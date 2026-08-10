@@ -663,6 +663,11 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 }
 
 /* =========================================================================
+   APP VERSION
+   ========================================================================= */
+const APP_VERSION = "1.0.0";
+
+/* =========================================================================
    DESIGN TOKENS
    ========================================================================= */
 const COLORS = {
@@ -1280,6 +1285,8 @@ function AuthScreen({ club, registerUser, loginUser }) {
           <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#8FA79A" }}>Club OS</p>
           <h1 className="disp text-2xl text-center" style={{ color: COLORS.chalk }}>{club.name || "Mi Club"}</h1>
         </div>
+
+        <p className="text-center text-[10px] mono mb-4" style={{ color: "#5C6E64" }}>v{APP_VERSION}</p>
 
         <div className="rounded-[20px] p-6" style={{ background: COLORS.chalk }}>
           <div className="flex gap-1.5 mb-5 p-1 rounded-xl" style={{ background: "#EEEBE0" }}>
