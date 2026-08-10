@@ -126,6 +126,27 @@ function formatMoney(n, symbol = "$") {
   return `${symbol}${v.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// Member pricing lives as a flat price on the item itself (court / open play / class),
+// not as a percentage on the membership plan — different items can have very different
+// member savings. CheckoutPanel still speaks baseUsd+discountPct, so this derives an
+// equivalent rounded percentage from the two flat prices at the call site.
+function memberDiscountPct(base, memberPrice) {
+  const b = Number(base) || 0;
+  if (b <= 0) return 0;
+  const m = memberPrice === undefined || memberPrice === null || memberPrice === "" ? b : Number(memberPrice) || 0;
+  return Math.max(0, Math.round((1 - m / b) * 100));
+}
+
+// Resolves a court's price for a given time-of-day, honoring an optional list of
+// time-window overrides (peak/off-peak pricing) before falling back to the court's base price.
+function courtPriceInfo(court, timeMin) {
+  const rule = (court.priceRules || []).find((r) => timeMin >= timeToMinutes(r.startTime) && timeMin < timeToMinutes(r.endTime));
+  const base = Number(rule ? rule.price : court.pricePerBlock) || 0;
+  const memberRaw = rule ? rule.memberPrice : court.memberPrice;
+  const member = memberRaw === undefined || memberRaw === null || memberRaw === "" ? base : Number(memberRaw) || 0;
+  return { base, member };
+}
+
 /* =========================================================================
    ANALYTICS HELPERS — unify every source of revenue (reservas, open plays,
    clases, membresías) into one transaction list, then aggregate it by day,
@@ -694,20 +715,20 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 
 /* =========================================================================
    DESIGN TOKENS
    ========================================================================= */
 const COLORS = {
-  court: "#123B32",        // deep refined pine green — primary
-  courtDark: "#0A1F1A",    // near-black pine — sidebar / dark surfaces
-  chalk: "#F7F5EF",        // warm ivory paper — canvas + light text on dark
-  ink: "#16241F",          // near-black body text
-  ball: "#D4F24B",         // citrus lime — signature accent
-  ballDark: "#9CC22A",
+  court: "#16325C",        // deep refined pine green — primary
+  courtDark: "#0A1830",    // near-black pine — sidebar / dark surfaces
+  chalk: "#F5F6F9",        // warm ivory paper — canvas + light text on dark
+  ink: "#101A2C",          // near-black body text
+  ball: "#FF6A1A",         // citrus lime — signature accent
+  ballDark: "#CC4A00",
   clay: "#DB5A34",         // clay-court terracotta — secondary CTA / alerts
-  line: "#E9E5D9",         // warm hairline border
+  line: "#E2E6EE",         // warm hairline border
   card: "#FFFFFF",
 };
 
@@ -793,8 +814,8 @@ export default function PickleballTournamentApp() {
 
   // ---- Club-wide schedule & courts (shared by Reservas, Eventos and Torneos) ----
   const [club, setClub] = useState({
-    name: "Club Pickleball Central",
-    openTime: "07:00", closeTime: "22:00", blockMinutes: 60,
+    name: "Pickle Hub",
+    openTime: "07:00", closeTime: "22:00", blockMinutes: 90,
     bsPerUsd: 180, // equivalente Bs por USD, anclado a la tasa EUR publicada por el BCV (ver syncBcvRate)
     pagoMovil: { banco: "Banesco", telefono: "0414-1234567", cedula: "V-12345678" },
   });
@@ -826,8 +847,8 @@ export default function PickleballTournamentApp() {
   }, []);
 
   const [courts, setCourts] = useState([
-    { id: uid("court"), name: "Cancha 1", isPrivate: false, pricePerBlock: 8 },
-    { id: uid("court"), name: "Cancha 2", isPrivate: false, pricePerBlock: 8 },
+    { id: uid("court"), name: "Cancha 1", isPrivate: false, pricePerBlock: 15, memberPrice: 5, priceRules: [] },
+    { id: uid("court"), name: "Cancha 2", isPrivate: false, pricePerBlock: 15, memberPrice: 5, priceRules: [] },
   ]);
 
   // ---- Reservas (individual court bookings) ----
@@ -838,10 +859,34 @@ export default function PickleballTournamentApp() {
   const [classes, setClasses] = useState([]);
 
   // ---- Membresías ----
+  // Each plan carries a "rateCard" — free-form priced line items (court booking, Open Plays,
+  // league days, monthly classes, drills, etc.) shown side-by-side in the comparison table.
+  // Real checkout math for courts/Open Plays/classes reads the flat memberPrice set on each
+  // item instead (see courtPriceInfo/memberDiscountPct) — the rateCard here is the plan's
+  // advertised rate sheet, editable independently of what's actually been created yet.
   const [membershipPlans, setMembershipPlans] = useState([
-    { id: uid("plan"), name: "Sin membresía", monthlyPrice: 0, courtDiscountPct: 0, eventDiscountPct: 0, privateCourtAccess: false, description: "Precio regular en reservas y eventos, sin acceso a canchas privadas." },
-    { id: uid("plan"), name: "Club Silver", monthlyPrice: 25, courtDiscountPct: 15, eventDiscountPct: 10, privateCourtAccess: true, description: "Acceso a canchas privadas y descuentos en reservas y eventos." },
-    { id: uid("plan"), name: "Club Gold", monthlyPrice: 45, courtDiscountPct: 30, eventDiscountPct: 25, privateCourtAccess: true, description: "El mayor descuento, prioridad de reserva y acceso total a canchas privadas." },
+    {
+      id: uid("plan"), name: "Sin membresía", monthlyPrice: 0, privateCourtAccess: false,
+      description: "Pago por uso (Pay per play), sin mensualidad.",
+      rateCard: [
+        { id: uid("rate"), label: "Reserva de cancha (1h30min)", price: 15 },
+        { id: uid("rate"), label: "Open Plays", price: 8 },
+        { id: uid("rate"), label: "Jornada de Liga", price: 10 },
+        { id: uid("rate"), label: "Mes de clases con APG", price: 80 },
+        { id: uid("rate"), label: "Sesión de Drills", price: 6 },
+      ],
+    },
+    {
+      id: uid("plan"), name: "Membresía", monthlyPrice: 50, privateCourtAccess: true,
+      description: "Precios preferenciales en canchas, Open Plays, ligas, clases y drills.",
+      rateCard: [
+        { id: uid("rate"), label: "Reserva de cancha (1h30min)", price: 5 },
+        { id: uid("rate"), label: "Open Plays", price: 0 },
+        { id: uid("rate"), label: "Jornada de Liga", price: 5 },
+        { id: uid("rate"), label: "Mes de clases con APG", price: 60 },
+        { id: uid("rate"), label: "Sesión de Drills", price: 3 },
+      ],
+    },
   ]);
   const [subscriptions, setSubscriptions] = useState([]);
 
@@ -1144,6 +1189,7 @@ export default function PickleballTournamentApp() {
 
   // ---- Membresías ----
   const addMembershipPlan = (plan) => setMembershipPlans((p) => [...p, { id: uid("plan"), ...plan }]);
+  const updateMembershipPlan = (id, patch) => setMembershipPlans((p) => p.map((pl) => (pl.id === id ? { ...pl, ...patch } : pl)));
   const removeMembershipPlan = (id) => setMembershipPlans((p) => p.filter((pl) => pl.id !== id));
   const subscribeToPlan = (planId, checkout) => {
     setSubscriptions((p) => [...p, { id: uid("sub"), planId, userId: currentUser?.id, createdAt: Date.now(), ...checkout }]);
@@ -1238,7 +1284,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "membresias" && (
             <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts}
-              addMembershipPlan={addMembershipPlan} removeMembershipPlan={removeMembershipPlan}
+              addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role} />
           )}
         </main>
@@ -1331,20 +1377,20 @@ function AuthScreen({ club, registerUser, loginUser }) {
           <div style={{ background: COLORS.ball }} className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-lg">
             <Trophy size={22} color={COLORS.courtDark} strokeWidth={2.5} />
           </div>
-          <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#8FA79A" }}>Club OS</p>
+          <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
           <h1 className="disp text-2xl text-center" style={{ color: COLORS.chalk }}>{club.name || "Mi Club"}</h1>
         </div>
 
-        <p className="text-center text-[10px] mono mb-4" style={{ color: "#5C6E64" }}>v{APP_VERSION}</p>
+        <p className="text-center text-[10px] mono mb-4" style={{ color: "#5B6B85" }}>v{APP_VERSION}</p>
 
         <div className="rounded-[20px] p-6" style={{ background: COLORS.chalk }}>
-          <div className="flex gap-1.5 mb-5 p-1 rounded-xl" style={{ background: "#EEEBE0" }}>
+          <div className="flex gap-1.5 mb-5 p-1 rounded-xl" style={{ background: "#EDEFF4" }}>
             <button onClick={() => { setMode("login"); setError(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
-              style={{ background: mode === "login" ? "#fff" : "transparent", color: mode === "login" ? COLORS.courtDark : "#8B968A", boxShadow: mode === "login" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
+              style={{ background: mode === "login" ? "#fff" : "transparent", color: mode === "login" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "login" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
               Iniciar sesión
             </button>
             <button onClick={() => { setMode("register"); setError(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
-              style={{ background: mode === "register" ? "#fff" : "transparent", color: mode === "register" ? COLORS.courtDark : "#8B968A", boxShadow: mode === "register" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
+              style={{ background: mode === "register" ? "#fff" : "transparent", color: mode === "register" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "register" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
               Crear cuenta
             </button>
           </div>
@@ -1356,14 +1402,14 @@ function AuthScreen({ club, registerUser, loginUser }) {
             <div>
               <Label>Correo</Label>
               <div className="relative">
-                <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#9AA697" />
+                <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
                 <input type="email" style={{ ...inputStyle, paddingLeft: 32 }} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com" />
               </div>
             </div>
             <div>
               <Label>Contraseña</Label>
               <div className="relative">
-                <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#9AA697" />
+                <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
                 <input type="password" style={{ ...inputStyle, paddingLeft: 32 }} value={password} onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
               </div>
@@ -1373,13 +1419,13 @@ function AuthScreen({ club, registerUser, loginUser }) {
               <div>
                 <Label>Zona / sector</Label>
                 <div className="relative">
-                  <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#9AA697" />
+                  <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
                   <input style={{ ...inputStyle, paddingLeft: 32 }} value={zone}
                     onChange={(e) => { setZone(e.target.value); setZoneStatus((s) => ({ ...s, auto: false, error: null })); }}
                     placeholder="Ej. Chacao, Caracas" />
                 </div>
                 <div className="flex items-center justify-between mt-1 gap-2">
-                  <p className="text-[10px]" style={{ color: zoneStatus.error ? "#B23A1B" : zoneStatus.auto ? COLORS.court : "#8B968A" }}>
+                  <p className="text-[10px]" style={{ color: zoneStatus.error ? "#B23A1B" : zoneStatus.auto ? COLORS.court : "#6B7688" }}>
                     {zoneStatus.loading ? "Detectando tu ubicación…" : zoneStatus.auto ? "Detectada automáticamente — puedes editarla." : zoneStatus.error || "Se usa para las estadísticas del club."}
                   </p>
                   <button type="button" onClick={detectZone} className="text-[10px] font-bold shrink-0" style={{ color: COLORS.court }}>Detectar de nuevo</button>
@@ -1395,15 +1441,15 @@ function AuthScreen({ club, registerUser, loginUser }) {
           </div>
 
           <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-            <p className="text-xs mb-2" style={{ color: "#8B968A" }}>¿Quieres ver la vista de administrador?</p>
-            <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+            <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres ver la vista de administrador?</p>
+            <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
               <Shield size={13} /> Usar cuenta demo de administrador
             </button>
-            <p className="mono text-[10px] text-center mt-2" style={{ color: "#A6ADA0" }}>admin@club.com · admin123</p>
+            <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>admin@club.com · admin123</p>
           </div>
         </div>
 
-        <p className="text-center text-[11px] mt-5" style={{ color: "#6E8478" }}>
+        <p className="text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
           Regístrate normal para ver la vista de cliente, o usa la cuenta demo para ver la de administrador.
         </p>
       </div>
@@ -1431,7 +1477,7 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
           <div style={{ background: COLORS.ball }} className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0">
             <Trophy size={16} color={COLORS.courtDark} strokeWidth={2.5} />
           </div>
-          <span className="text-[10px] tracking-[0.25em] uppercase" style={{ color: "#8FA79A" }}>Club OS</span>
+          <span className="text-[10px] tracking-[0.25em] uppercase" style={{ color: "#93A8C9" }}>Club OS</span>
         </div>
         <h1 className="disp text-lg leading-snug mt-3 line-clamp-2" style={{ color: COLORS.chalk }}>
           {club.name || "Mi Club"}
@@ -1445,7 +1491,7 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
           return (
             <button key={it.id} onClick={() => setTab(it.id)}
               className="w-full flex items-center gap-3 pl-4 pr-3 py-2.5 rounded-xl text-sm font-medium relative text-left"
-              style={{ background: active ? "rgba(212,242,75,0.10)" : "transparent", color: active ? COLORS.ball : "#AEC0B7" }}>
+              style={{ background: active ? "rgba(212,242,75,0.10)" : "transparent", color: active ? COLORS.ball : "#B7C4DA" }}>
               {active && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-full" style={{ background: COLORS.ball }} />}
               <Icon size={16} strokeWidth={2.25} /> {it.label}
             </button>
@@ -1455,21 +1501,21 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
 
       <div className="mx-3 mb-3 rounded-2xl px-4 py-3.5" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}>
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0" style={{ background: currentUser.role === "admin" ? COLORS.clay : currentPlan?.monthlyPrice > 0 ? COLORS.ball : "#3A4A43" }}>
-            {currentUser.role === "admin" ? <Shield size={14} color="#fff" /> : <Star size={14} color={currentPlan?.monthlyPrice > 0 ? COLORS.courtDark : "#9AA697"} />}
+          <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0" style={{ background: currentUser.role === "admin" ? COLORS.clay : currentPlan?.monthlyPrice > 0 ? COLORS.ball : "#22314B" }}>
+            {currentUser.role === "admin" ? <Shield size={14} color="#fff" /> : <Star size={14} color={currentPlan?.monthlyPrice > 0 ? COLORS.courtDark : "#78829A"} />}
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-xs font-bold truncate" style={{ color: COLORS.chalk }}>{currentUser.name}</p>
-            <p className="text-[10px] truncate" style={{ color: "#8FA79A" }}>
+            <p className="text-[10px] truncate" style={{ color: "#93A8C9" }}>
               {currentUser.role === "admin" ? "Administrador" : currentPlan?.name || "Sin membresía"}
             </p>
           </div>
-          <button onClick={logoutUser} title="Cerrar sesión" className="shrink-0 text-[#8FA79A] hover:text-white"><LogOut size={15} /></button>
+          <button onClick={logoutUser} title="Cerrar sesión" className="shrink-0 text-[#93A8C9] hover:text-white"><LogOut size={15} /></button>
         </div>
       </div>
 
       <div className="mx-3 mb-5 rounded-2xl px-4 py-4" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}>
-        <p className="text-[10px] uppercase tracking-widest mb-3" style={{ color: "#5E7669" }}>Resumen en vivo</p>
+        <p className="text-[10px] uppercase tracking-widest mb-3" style={{ color: "#4E6180" }}>Resumen en vivo</p>
         <div className="grid grid-cols-2 gap-y-3">
           <StatMini label="Canchas" value={stats.courts} />
           <StatMini label="Reservas" value={stats.bookings} />
@@ -1484,7 +1530,7 @@ function StatMini({ label, value }) {
   return (
     <div>
       <p className="mono text-lg font-bold leading-none" style={{ color: COLORS.ball }}>{value}</p>
-      <p className="text-[10px] uppercase tracking-wide mt-1" style={{ color: "#6E8478" }}>{label}</p>
+      <p className="text-[10px] uppercase tracking-wide mt-1" style={{ color: "#55677E" }}>{label}</p>
     </div>
   );
 }
@@ -1501,11 +1547,11 @@ function TopBar({ tab, stats, currentUser, currentPlan, logoutUser, visibleNav }
           </div>
           <div>
             <h2 className="disp text-lg leading-none" style={{ color: COLORS.courtDark }}>{meta.label}</h2>
-            <p className="text-xs mt-1" style={{ color: "#8B968A" }}>{meta.sub}</p>
+            <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{meta.sub}</p>
           </div>
         </div>
         <div className="flex items-center gap-2.5 md:hidden">
-          <span className="text-[10px] px-2.5 py-1 rounded-full font-bold" style={{ background: currentUser.role === "admin" ? COLORS.clay : "#EEF0EA", color: currentUser.role === "admin" ? "#fff" : COLORS.courtDark }}>
+          <span className="text-[10px] px-2.5 py-1 rounded-full font-bold" style={{ background: currentUser.role === "admin" ? COLORS.clay : "#ECEFF5", color: currentUser.role === "admin" ? "#fff" : COLORS.courtDark }}>
             {currentUser.role === "admin" ? "Admin" : currentPlan?.name || "Sin membresía"}
           </span>
           <button onClick={logoutUser} className="text-gray-400"><LogOut size={16} /></button>
@@ -1524,7 +1570,7 @@ function TickerStat({ label, value }) {
   return (
     <div className="text-right leading-none">
       <p className="mono text-base font-bold" style={{ color: COLORS.courtDark }}>{value}</p>
-      <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: "#9AA697" }}>{label}</p>
+      <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: "#78829A" }}>{label}</p>
     </div>
   );
 }
@@ -1538,7 +1584,7 @@ function MobileNav({ tab, setTab, visibleNav }) {
         const active = tab === it.id;
         return (
           <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-1 px-2 py-1 rounded-lg flex-1"
-            style={{ color: active ? COLORS.ball : "#7C8C82" }}>
+            style={{ color: active ? COLORS.ball : "#6B7688" }}>
             <Icon size={17} strokeWidth={2.25} />
             <span className="text-[9px] font-semibold">{it.short}</span>
           </button>
@@ -1561,12 +1607,12 @@ function SectionTitle({ children, sub }) {
   return (
     <div className="mb-5">
       <h2 className="disp text-xl md:text-[22px]" style={{ color: COLORS.courtDark }}>{children}</h2>
-      {sub && <p className="text-sm mt-1.5" style={{ color: "#8B968A" }}>{sub}</p>}
+      {sub && <p className="text-sm mt-1.5" style={{ color: "#6B7688" }}>{sub}</p>}
     </div>
   );
 }
 function Label({ children }) {
-  return <label className="block text-xs font-bold uppercase tracking-wide mb-1.5" style={{ color: "#7C8B80" }}>{children}</label>;
+  return <label className="block text-xs font-bold uppercase tracking-wide mb-1.5" style={{ color: "#6B7688" }}>{children}</label>;
 }
 const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, padding: "9px 12px", width: "100%", fontSize: 14, outline: "none" };
 
@@ -1605,11 +1651,11 @@ function TorneoTab({ tournament, setTournament, dates }) {
             </div>
           </div>
           {dates.length > 0 && (
-            <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+            <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
               {dates.length} día(s) de juego · {formatDateHuman(dates[0])} a {formatDateHuman(dates[dates.length - 1])}
             </div>
           )}
-          <p className="text-xs" style={{ color: "#8B968A" }}>La duración de partidos y el intervalo entre ellos ahora se configuran en la pestaña <b>Calendario</b>, donde puedes ajustarlos antes o después de generar el horario.</p>
+          <p className="text-xs" style={{ color: "#6B7688" }}>La duración de partidos y el intervalo entre ellos ahora se configuran en la pestaña <b>Calendario</b>, donde puedes ajustarlos antes o después de generar el horario.</p>
         </div>
       </Card>
 
@@ -1630,7 +1676,7 @@ function TorneoTab({ tournament, setTournament, dates }) {
             <div>
               <Label>Precio de preventa</Label>
               <div className="relative">
-                <DollarSign size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#9AA697" />
+                <DollarSign size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
                 <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 30 }} value={tournament.presalePrice}
                   onChange={(e) => set("presalePrice", e.target.value)} placeholder="0.00" />
               </div>
@@ -1663,14 +1709,21 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
+  const [memberPrice, setMemberPrice] = useState(8);
+  const [hasSpecialPricing, setHasSpecialPricing] = useState(false);
+  const [newRules, setNewRules] = useState([]);
   const setC = (k, v) => setClub((c) => ({ ...c, [k]: v }));
   const setPagoMovil = (k, v) => setClub((c) => ({ ...c, pagoMovil: { ...c.pagoMovil, [k]: v } }));
 
   const addCourt = () => {
     const n = name.trim() || `Cancha ${courts.length + 1}`;
-    setCourts((c) => [...c, { id: uid("court"), name: n, isPrivate, pricePerBlock: Number(price) || 0 }]);
-    setName(""); setIsPrivate(false); setPrice(8);
+    setCourts((c) => [...c, {
+      id: uid("court"), name: n, isPrivate, pricePerBlock: Number(price) || 0, memberPrice: Number(memberPrice) || 0,
+      priceRules: hasSpecialPricing ? newRules : [],
+    }]);
+    setName(""); setIsPrivate(false); setPrice(8); setMemberPrice(8); setHasSpecialPricing(false); setNewRules([]);
   };
+  const updateCourt = (id, patch) => setCourts((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
   const blocksPerDay = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes).length;
 
@@ -1704,7 +1757,7 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
             </select>
           </div>
         </div>
-        <div className="text-xs px-3 py-2 rounded-lg mt-3" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+        <div className="text-xs px-3 py-2 rounded-lg mt-3" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           {blocksPerDay} bloques reservables por cancha, por día ({club.openTime}–{club.closeTime}).
         </div>
       </Card>
@@ -1722,7 +1775,7 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
                 <p className="text-sm font-bold" style={{ color: rateStatus.error ? "#B23A1B" : COLORS.chalk }}>
                   {rateStatus.loading ? "Sincronizando con el BCV…" : rateStatus.source === "bcv_eur" ? "Anclada a la tasa EUR del BCV" : "Tasa manual (sin sincronizar)"}
                 </p>
-                <p className="text-xs mt-0.5" style={{ color: rateStatus.error ? "#B23A1B" : "#9FBBAA" }}>
+                <p className="text-xs mt-0.5" style={{ color: rateStatus.error ? "#B23A1B" : "#A9C0DC" }}>
                   {rateStatus.error
                     ? rateStatus.error
                     : rateStatus.lastSync
@@ -1743,13 +1796,13 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
             <Label>Tasa Bs / USD (tasa EUR BCV)</Label>
             <input type="number" min={0} step="0.01" style={inputStyle} value={club.bsPerUsd}
               onChange={(e) => { setC("bsPerUsd", e.target.value); }} />
-            <p className="text-[10px] mt-1" style={{ color: "#8B968A" }}>Se sincroniza sola cada 30 min. Editarla aquí la deja en modo manual hasta la próxima sincronización.</p>
+            <p className="text-[10px] mt-1" style={{ color: "#6B7688" }}>Se sincroniza sola cada 30 min. Editarla aquí la deja en modo manual hasta la próxima sincronización.</p>
           </div>
           <div className="mono text-xs px-3 py-2.5 rounded-lg h-fit self-end" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
             Ej: {formatMoney(10)} ≈ {formatMoney(10 * (Number(club.bsPerUsd) || 0), "Bs. ")}
           </div>
         </div>
-        <p className="text-xs font-bold uppercase tracking-wide mt-4 mb-2" style={{ color: "#7C8B80" }}>Datos de Pago Móvil</p>
+        <p className="text-xs font-bold uppercase tracking-wide mt-4 mb-2" style={{ color: "#6B7688" }}>Datos de Pago Móvil</p>
         <div className="grid sm:grid-cols-3 gap-3">
           <div><Label>Banco</Label><input style={inputStyle} value={club.pagoMovil.banco} onChange={(e) => setPagoMovil("banco", e.target.value)} /></div>
           <div><Label>Teléfono</Label><input style={inputStyle} value={club.pagoMovil.telefono} onChange={(e) => setPagoMovil("telefono", e.target.value)} /></div>
@@ -1758,8 +1811,8 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
       </Card>
 
       <Card>
-        <SectionTitle sub="Cada cancha puede ser pública (cualquiera reserva) o privada (prioridad para miembros), con su propio precio por bloque.">Canchas</SectionTitle>
-        <div className="grid sm:grid-cols-[1.4fr_1fr_1fr_auto] gap-2 items-end mb-4">
+        <SectionTitle sub="Cada cancha puede ser pública (cualquiera reserva) o privada (prioridad para miembros), con precio normal, precio con membresía, y horarios con precio especial.">Canchas</SectionTitle>
+        <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-2 mb-2">
           <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Cancha 3" /></div>
           <div>
             <Label>Acceso</Label>
@@ -1767,30 +1820,119 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
               options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
           </div>
           <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
-          <button onClick={addCourt} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1 h-[38px]">
-            <Plus size={16} /> Agregar
-          </button>
+          <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         </div>
+
+        <div className="rounded-xl p-3 mb-4" style={{ background: "#EEF1F7" }}>
+          <div className="flex items-center justify-between gap-3">
+            <Label>¿Hay precios especiales por horario?</Label>
+            <Segmented value={hasSpecialPricing ? "si" : "no"} onChange={(v) => setHasSpecialPricing(v === "si")} options={[{ value: "no", label: "No" }, { value: "si", label: "Sí" }]} />
+          </div>
+          {hasSpecialPricing && (
+            <div className="mt-3">
+              <PriceRuleEditor rules={newRules} onChange={setNewRules} />
+            </div>
+          )}
+        </div>
+
+        <button onClick={addCourt} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1.5 mb-4">
+          <Plus size={16} /> Agregar cancha
+        </button>
+
         <div className="space-y-2">
           {courts.map((c) => (
-            <div key={c.id} className="flex items-center justify-between px-3 py-2.5 rounded-xl" style={{ background: "#F4F7F1" }}>
-              <span className="flex items-center gap-2 text-sm font-medium">
-                {c.isPrivate ? <Lock size={14} color={COLORS.clay} /> : <Unlock size={14} color={COLORS.court} />} {c.name}
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: c.isPrivate ? "#FBE3D6" : "#DCEBD5", color: c.isPrivate ? COLORS.clay : COLORS.courtDark }}>
-                  {c.isPrivate ? "Privada" : "Pública"}
-                </span>
-              </span>
-              <div className="flex items-center gap-3">
-                <span className="mono text-xs" style={{ color: "#7C8B80" }}>{formatMoney(c.pricePerBlock)} / bloque</span>
-                <button onClick={() => setCourts((cs) => cs.filter((x) => x.id !== c.id))} className="text-gray-400 hover:text-red-500">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
+            <CourtCard key={c.id} court={c} onUpdate={(patch) => updateCourt(c.id, patch)} onRemove={() => setCourts((cs) => cs.filter((x) => x.id !== c.id))} />
           ))}
           {courts.length === 0 && <p className="text-sm text-gray-400 italic">Aún no hay canchas registradas.</p>}
         </div>
       </Card>
+    </div>
+  );
+}
+
+// Shared by the "add court" form and each existing CourtCard — a small list of
+// {startTime, endTime, price, memberPrice} time-window overrides (e.g. tarifa nocturna,
+// fin de semana) that courtPriceInfo() checks before falling back to the court's base price.
+function PriceRuleEditor({ rules, onChange }) {
+  const [from, setFrom] = useState("18:00");
+  const [to, setTo] = useState("22:00");
+  const [rulePrice, setRulePrice] = useState(0);
+  const [ruleMemberPrice, setRuleMemberPrice] = useState(0);
+
+  const addRule = () => {
+    if (!from || !to || from >= to) return;
+    onChange([...rules, { id: uid("rule"), startTime: from, endTime: to, price: Number(rulePrice) || 0, memberPrice: Number(ruleMemberPrice) || 0 }]);
+    setRulePrice(0); setRuleMemberPrice(0);
+  };
+  const removeRule = (id) => onChange(rules.filter((r) => r.id !== id));
+
+  return (
+    <div className="space-y-2">
+      {rules.map((r) => (
+        <div key={r.id} className="flex items-center justify-between px-2.5 py-2 rounded-lg text-xs" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+          <span>{formatTimeAmPm(r.startTime)}–{formatTimeAmPm(r.endTime)} · {formatMoney(r.price)} normal / {formatMoney(r.memberPrice ?? r.price)} miembro</span>
+          <button onClick={() => removeRule(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
+        </div>
+      ))}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 items-end">
+        <div><Label>Desde</Label><input type="time" style={inputStyle} value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+        <div><Label>Hasta</Label><input type="time" style={inputStyle} value={to} onChange={(e) => setTo(e.target.value)} /></div>
+        <div><Label>Precio normal</Label><input type="number" min={0} style={inputStyle} value={rulePrice} onChange={(e) => setRulePrice(e.target.value)} /></div>
+        <div><Label>Precio miembro</Label><input type="number" min={0} style={inputStyle} value={ruleMemberPrice} onChange={(e) => setRuleMemberPrice(e.target.value)} /></div>
+        <button onClick={addRule} className="py-2.5 rounded-lg text-xs font-bold h-[38px]" style={{ background: COLORS.court, color: "#fff" }}>
+          <Plus size={14} className="inline" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A single court row in the admin's Canchas list — click the pencil to edit its name,
+// access, base/member price and its time-based special-pricing rules in place.
+function CourtCard({ court, onUpdate, onRemove }) {
+  const [editing, setEditing] = useState(false);
+  const rules = court.priceRules || [];
+
+  return (
+    <div className="rounded-xl overflow-hidden" style={{ background: "#EEF1F7" }}>
+      <div className="flex items-center justify-between px-3 py-2.5 flex-wrap gap-2">
+        <span className="flex items-center gap-2 text-sm font-medium flex-wrap">
+          {court.isPrivate ? <Lock size={14} color={COLORS.clay} /> : <Unlock size={14} color={COLORS.court} />} {court.name}
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: court.isPrivate ? "#FBE3D6" : "#DCEBD5", color: court.isPrivate ? COLORS.clay : COLORS.courtDark }}>
+            {court.isPrivate ? "Privada" : "Pública"}
+          </span>
+          {rules.length > 0 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full flex items-center gap-1" style={{ background: "#FFF1E4", color: COLORS.clay }}>
+              <Clock size={9} /> {rules.length} horario{rules.length > 1 ? "s" : ""} especial{rules.length > 1 ? "es" : ""}
+            </span>
+          )}
+        </span>
+        <div className="flex items-center gap-3">
+          <span className="mono text-xs" style={{ color: "#6B7688" }}>
+            {formatMoney(court.pricePerBlock)} <span style={{ color: "#9AA6BC" }}>normal</span> · {formatMoney(court.memberPrice ?? court.pricePerBlock)} <span style={{ color: "#9AA6BC" }}>miembro</span>
+          </span>
+          <button onClick={() => setEditing((s) => !s)} style={{ color: editing ? COLORS.court : "#9AA6BC" }}><Pencil size={14} /></button>
+          <button onClick={onRemove} className="text-gray-400 hover:text-red-500"><Trash2 size={15} /></button>
+        </div>
+      </div>
+
+      {editing && (
+        <div className="px-3 pb-3 pt-2 space-y-3" style={{ borderTop: `1px solid ${COLORS.line}`, background: "#fff" }}>
+          <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-2">
+            <div><Label>Nombre</Label><input style={inputStyle} value={court.name} onChange={(e) => onUpdate({ name: e.target.value })} /></div>
+            <div>
+              <Label>Acceso</Label>
+              <Segmented value={court.isPrivate ? "priv" : "pub"} onChange={(v) => onUpdate({ isPrivate: v === "priv" })} options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
+            </div>
+            <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={court.pricePerBlock} onChange={(e) => onUpdate({ pricePerBlock: Number(e.target.value) || 0 })} /></div>
+            <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={court.memberPrice ?? court.pricePerBlock} onChange={(e) => onUpdate({ memberPrice: Number(e.target.value) || 0 })} /></div>
+          </div>
+          <div>
+            <Label>Precios especiales por horario</Label>
+            <PriceRuleEditor rules={rules} onChange={(rs) => onUpdate({ priceRules: rs })} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1802,12 +1944,12 @@ function StatCard({ label, value, icon: Icon }) {
   return (
     <Card>
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EEF3EB" }}>
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAF0F8" }}>
           <Icon size={18} color={COLORS.court} />
         </div>
         <div className="min-w-0">
           <p className="disp text-xl truncate" style={{ color: COLORS.courtDark }}>{value}</p>
-          <p className="text-xs" style={{ color: "#8B968A" }}>{label}</p>
+          <p className="text-xs" style={{ color: "#6B7688" }}>{label}</p>
         </div>
       </div>
     </Card>
@@ -1828,7 +1970,7 @@ function MiniBarChart({ data, color = COLORS.court, money = false }) {
       </div>
       <div className="flex gap-1 mt-1.5">
         {data.map((d, i) => (
-          <span key={i} className="flex-1 mono text-[8px] text-center truncate" style={{ color: "#9AA697" }}>{d.label}</span>
+          <span key={i} className="flex-1 mono text-[8px] text-center truncate" style={{ color: "#78829A" }}>{d.label}</span>
         ))}
       </div>
     </div>
@@ -1852,11 +1994,11 @@ function HourLineChart({ data }) {
       </svg>
       <div className="flex mt-1.5">
         {data.map((d, i) => (
-          <span key={i} className="flex-1 mono text-[8px] text-center" style={{ color: "#9AA697" }}>{i % everyN === 0 ? d.label : ""}</span>
+          <span key={i} className="flex-1 mono text-[8px] text-center" style={{ color: "#78829A" }}>{i % everyN === 0 ? d.label : ""}</span>
         ))}
       </div>
       {data[peakIdx] && (
-        <p className="text-xs mt-3" style={{ color: "#8B968A" }}>
+        <p className="text-xs mt-3" style={{ color: "#6B7688" }}>
           Hora más concurrida: <b style={{ color: COLORS.courtDark }}>{data[peakIdx].label}</b> con {data[peakIdx].value} reserva(s)
         </p>
       )}
@@ -1870,8 +2012,8 @@ function HBarList({ data, color = COLORS.court }) {
     <div className="space-y-2.5">
       {data.map((d, i) => (
         <div key={i}>
-          <div className="flex justify-between text-xs mb-1"><span className="font-medium truncate pr-2">{d.label}</span><span className="mono shrink-0" style={{ color: "#8B968A" }}>{d.value}</span></div>
-          <div className="h-2 rounded-full" style={{ background: "#EEEBE0" }}>
+          <div className="flex justify-between text-xs mb-1"><span className="font-medium truncate pr-2">{d.label}</span><span className="mono shrink-0" style={{ color: "#6B7688" }}>{d.value}</span></div>
+          <div className="h-2 rounded-full" style={{ background: "#EDEFF4" }}>
             <div className="h-2 rounded-full" style={{ width: `${(d.value / max) * 100}%`, background: color }} />
           </div>
         </div>
@@ -1968,7 +2110,7 @@ function TorneosSection(props) {
         {visibleSubItems.map((it) => (
           <button key={it.id} onClick={() => setSubTab(it.id)}
             className="px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
-            style={{ background: subTab === it.id ? COLORS.court : "#F0F3ED", color: subTab === it.id ? "#fff" : COLORS.ink }}>
+            style={{ background: subTab === it.id ? COLORS.court : "#EAEEF5", color: subTab === it.id ? "#fff" : COLORS.ink }}>
             {it.label}
           </button>
         ))}
@@ -2053,7 +2195,7 @@ function Segmented({ options, value, onChange }) {
       {options.map((o) => (
         <button key={o.value} type="button" onClick={() => onChange(o.value)}
           className="px-3.5 py-2 rounded-xl text-sm font-semibold transition-all"
-          style={{ background: value === o.value ? COLORS.court : "#F0F3ED", color: value === o.value ? COLORS.chalk : COLORS.ink }}>
+          style={{ background: value === o.value ? COLORS.court : "#EAEEF5", color: value === o.value ? COLORS.chalk : COLORS.ink }}>
           {o.label}
         </button>
       ))}
@@ -2088,15 +2230,15 @@ function NewCategoryForm({ onCreate, onCancel }) {
             {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
         </div>
-        <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+        <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           Nombre automático: <b>{previewName}</b>
         </div>
         <div>
           <Label>Cupo máximo de equipos (opcional)</Label>
           <input type="number" min={2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
-          <p className="text-xs mt-1" style={{ color: "#8B968A" }}>Al llenarse, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.</p>
+          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>Al llenarse, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.</p>
         </div>
-        <p className="text-xs" style={{ color: "#8B968A" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
+        <p className="text-xs" style={{ color: "#6B7688" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
         <div className="flex gap-2 pt-1">
           <button onClick={() => onCreate(modality, gender, level, maxTeams)}
             style={{ background: COLORS.court, color: COLORS.chalk }}
@@ -2156,11 +2298,11 @@ function PlayerField({ label, name, setName, ranking, setRanking, suggestedRanki
           onChange={(e) => setRanking(e.target.value)}
           placeholder="Ranking" />
         <button type="button" onClick={() => setEditing((e) => !e)} title="Editar ranking (solo organizador)"
-          className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#F0F3ED", color: COLORS.court }}>
+          className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
           <Pencil size={13} />
         </button>
       </div>
-      {showSuggested && <p className="text-[10px] mt-1" style={{ color: "#8B968A" }}>Sugerido por ranking histórico — pulsa el lápiz para editarlo.</p>}
+      {showSuggested && <p className="text-[10px] mt-1" style={{ color: "#6B7688" }}>Sugerido por ranking histórico — pulsa el lápiz para editarlo.</p>}
     </div>
   );
 }
@@ -2206,7 +2348,7 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
 
       <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
         {cat.teams.map((t) => (
-          <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#F4F7F1" }}>
+          <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
             <div>
               <span className="font-semibold">{t.name}</span>
               <span className="text-gray-500 ml-2 text-xs">{t.players.map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
@@ -2262,9 +2404,9 @@ function FormatAdvisor({ cat, categories, courts, dates, tournament, matchDurati
       ) : (
         <>
           <div className="rounded-xl p-4 mb-4" style={{ background: COLORS.courtDark }}>
-            <p className="text-[10px] uppercase tracking-widest mb-2" style={{ color: "#8FA79A" }}>Recomendación</p>
+            <p className="text-[10px] uppercase tracking-widest mb-2" style={{ color: "#93A8C9" }}>Recomendación</p>
             <p className="disp text-lg" style={{ color: COLORS.ball }}>{FORMAT_LABELS[rec.format]}</p>
-            <p className="text-xs mt-2 leading-relaxed" style={{ color: "#CFE1D8" }}>
+            <p className="text-xs mt-2 leading-relaxed" style={{ color: "#D6E1F0" }}>
               Con {n} equipos inscritos, el calendario configurado da para ≈{Math.round(rec.capacity)} partidos en todo el torneo
               {rec.othersDemand > 0 ? `, de los cuales ≈${Math.round(rec.othersDemand)} ya están comprometidos por otras categorías` : ""}.
               Nivel de esta categoría: <b>{cat.level}</b> — a mayor nivel, más prioridad recibe sobre el tiempo disponible frente a categorías de nivel más bajo.
@@ -2280,14 +2422,14 @@ function FormatAdvisor({ cat, categories, courts, dates, tournament, matchDurati
               return (
                 <button key={c.format} onClick={() => onSelect(c.format)} type="button"
                   className="text-left p-3 rounded-xl relative"
-                  style={{ border: `2px solid ${isRec ? COLORS.ball : COLORS.line}`, background: isRec ? "#F6FBDE" : "#fff" }}>
+                  style={{ border: `2px solid ${isRec ? COLORS.ball : COLORS.line}`, background: isRec ? "#FFF1E4" : "#fff" }}>
                   {isRec && (
                     <span className="absolute top-2 right-2 text-[9px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: COLORS.ball, color: COLORS.courtDark }}>
                       SUGERIDO
                     </span>
                   )}
                   <p className="text-sm font-bold pr-16" style={{ color: COLORS.courtDark }}>{c.label}</p>
-                  <p className="text-xs mt-1" style={{ color: "#8B968A" }}>{c.desc}</p>
+                  <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{c.desc}</p>
                   <p className="text-[10px] mt-2" style={{ color: fitsBudget ? COLORS.court : "#B23A1B" }}>
                     ≈ {est} partido(s) {!fitsBudget && "· exige más tiempo del disponible"}
                   </p>
@@ -2299,7 +2441,7 @@ function FormatAdvisor({ cat, categories, courts, dates, tournament, matchDurati
       )}
 
       {n >= 2 && (
-        <p className="text-xs mt-4" style={{ color: "#8B968A" }}>También puedes elegir cualquier formato manualmente arriba — la recomendación es solo un punto de partida.</p>
+        <p className="text-xs mt-4" style={{ color: "#6B7688" }}>También puedes elegir cualquier formato manualmente arriba — la recomendación es solo un punto de partida.</p>
       )}
     </Card>
   );
@@ -2336,11 +2478,11 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
           <Label>Modo de sembrado</Label>
           <div className="flex gap-2">
             <button onClick={() => setSeedMode("ranking")} className="flex-1 py-2 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5"
-              style={{ background: seedMode === "ranking" ? COLORS.court : "#F0F3ED", color: seedMode === "ranking" ? COLORS.chalk : COLORS.ink }}>
+              style={{ background: seedMode === "ranking" ? COLORS.court : "#EAEEF5", color: seedMode === "ranking" ? COLORS.chalk : COLORS.ink }}>
               <ArrowUpDown size={14} /> Por ranking
             </button>
             <button onClick={() => setSeedMode("random")} className="flex-1 py-2 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5"
-              style={{ background: seedMode === "random" ? COLORS.court : "#F0F3ED", color: seedMode === "random" ? COLORS.chalk : COLORS.ink }}>
+              style={{ background: seedMode === "random" ? COLORS.court : "#EAEEF5", color: seedMode === "random" ? COLORS.chalk : COLORS.ink }}>
               <Shuffle size={14} /> Aleatorio
             </button>
           </div>
@@ -2361,7 +2503,7 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
               {[2, 4, 8, 16, 32].map((n) => <option key={n} value={n}>{n} equipos</option>)}
             </select>
             {preview && (
-              <div className="mt-3 rounded-xl p-3 text-xs" style={{ background: "#EEF3EB" }}>
+              <div className="mt-3 rounded-xl p-3 text-xs" style={{ background: "#EAF0F8" }}>
                 <p className="font-semibold mb-1" style={{ color: COLORS.courtDark }}>
                   Con {teamCount} equipos inscritos, la app formará automáticamente:
                 </p>
@@ -2386,7 +2528,7 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
         )}
 
         {cat.format === "doble_eliminacion" && (
-          <div className="md:col-span-2 text-xs px-3 py-2.5 rounded-xl" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+          <div className="md:col-span-2 text-xs px-3 py-2.5 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
             Llave A (ganadores): eliminación directa — solo un equipo invicto puede ser campeón.
             Llave B (repechaje): recibe a cada equipo que pierde en la Llave A y juega únicamente para definir el 3er lugar; quien pierde en la Llave B queda eliminado.
           </div>
@@ -2414,7 +2556,7 @@ function DrawPreview({ cat, closeGroupsAndSeedBracket }) {
       {cat.groups.length > 0 && (
         <div className="grid md:grid-cols-2 gap-4 mb-5">
           {cat.groups.map((g) => (
-            <div key={g.id} className="rounded-xl p-3" style={{ background: "#F4F7F1" }}>
+            <div key={g.id} className="rounded-xl p-3" style={{ background: "#EEF1F7" }}>
               <div className="flex items-center justify-between mb-2">
                 <span className="font-bold text-sm">{g.name}</span>
                 <span className="text-xs text-gray-500">clasifican {g.qualifiers}</span>
@@ -2454,7 +2596,7 @@ function roundLabel(rn, total) {
 
 function MatchCard({ m, highlight }) {
   return (
-    <div className="rounded-lg p-2.5 text-xs" style={{ border: `1px solid ${COLORS.line}`, background: m.winnerId ? "#F4F7F1" : "#fff" }}>
+    <div className="rounded-lg p-2.5 text-xs" style={{ border: `1px solid ${COLORS.line}`, background: m.winnerId ? "#EEF1F7" : "#fff" }}>
       <div className={`flex justify-between px-1.5 py-1 rounded ${m.winnerId === m.teamAId ? "font-bold" : ""}`} style={{ background: m.winnerId === m.teamAId ? (highlight || "#DCEBD5") : "transparent" }}>
         <span>{m.teamALabel || "Por definir"}</span>
       </div>
@@ -2507,7 +2649,7 @@ function DoubleEliminationView({ cat }) {
         <div className="flex gap-4 overflow-x-auto pb-2">
           {wrRounds.map((rn) => (
             <div key={rn} className="min-w-[210px] flex flex-col gap-3 justify-center">
-              <p className="text-[10px] text-center uppercase" style={{ color: "#8B968A" }}>{roundLabel(rn, wrRounds.length)}</p>
+              <p className="text-[10px] text-center uppercase" style={{ color: "#6B7688" }}>{roundLabel(rn, wrRounds.length)}</p>
               {wrByRound[rn].map((m) => <MatchCard key={m.id} m={m} />)}
             </div>
           ))}
@@ -2520,7 +2662,7 @@ function DoubleEliminationView({ cat }) {
           <div className="flex gap-4 overflow-x-auto pb-2">
             {lbRounds.map((rn) => (
               <div key={rn} className="min-w-[210px] flex flex-col gap-3 justify-center">
-                <p className="text-[10px] text-center uppercase" style={{ color: "#8B968A" }}>Ronda B{rn}</p>
+                <p className="text-[10px] text-center uppercase" style={{ color: "#6B7688" }}>Ronda B{rn}</p>
                 {lbByRound[rn].map((m) => <MatchCard key={m.id} m={m} highlight="#FBE3D6" />)}
               </div>
             ))}
@@ -2532,7 +2674,7 @@ function DoubleEliminationView({ cat }) {
 }
 
 function PodiumSlot({ place, label }) {
-  const colors = { 1: COLORS.ball, 2: "#C9D4CC", 3: COLORS.clay, 4: "#5E7669" };
+  const colors = { 1: COLORS.ball, 2: "#C7D0DE", 3: COLORS.clay, 4: "#4E6180" };
   const titles = { 1: "Campeón", 2: "2° lugar", 3: "3er lugar", 4: "4° lugar" };
   return (
     <div className="flex items-center gap-2.5">
@@ -2540,7 +2682,7 @@ function PodiumSlot({ place, label }) {
         {place === 1 ? <Trophy size={16} color={COLORS.courtDark} /> : <Medal size={15} color={COLORS.courtDark} />}
       </div>
       <div>
-        <p className="text-[10px] uppercase tracking-wide" style={{ color: "#9FBBAA" }}>{titles[place]}</p>
+        <p className="text-[10px] uppercase tracking-wide" style={{ color: "#A9C0DC" }}>{titles[place]}</p>
         <p className="text-sm font-bold" style={{ color: COLORS.chalk }}>{label}</p>
       </div>
     </div>
@@ -2605,7 +2747,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
         {scheduleInfo && (
           <div className="mt-3 flex flex-wrap gap-3">
             {scheduleInfo.start && scheduleInfo.end && (
-              <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EEF3EB", color: COLORS.courtDark }}>
+              <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
                 Inicio: {formatDateHuman(scheduleInfo.start.day)} {formatTimeAmPm(scheduleInfo.start.time)} → Fin estimado: {formatDateHuman(scheduleInfo.end.day)} {formatTimeAmPm(scheduleInfo.end.time)}
               </div>
             )}
@@ -2622,10 +2764,10 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
         <Card>
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <button onClick={() => setFilterCat("all")} className="px-3 py-1.5 rounded-full text-xs font-semibold"
-              style={{ background: filterCat === "all" ? COLORS.court : "#F0F3ED", color: filterCat === "all" ? "#fff" : COLORS.ink }}>Todas</button>
+              style={{ background: filterCat === "all" ? COLORS.court : "#EAEEF5", color: filterCat === "all" ? "#fff" : COLORS.ink }}>Todas</button>
             {categories.map((c) => (
               <button key={c.id} onClick={() => setFilterCat(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
-                style={{ background: filterCat === c.id ? COLORS.court : "#F0F3ED", color: filterCat === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
+                style={{ background: filterCat === c.id ? COLORS.court : "#EAEEF5", color: filterCat === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
             ))}
           </div>
 
@@ -2707,12 +2849,12 @@ function InscripcionTab({ categories, addTeam, suggestedRanking }) {
             return (
               <button key={c.id} onClick={() => { setCatId(c.id); setDone(false); }}
                 className="w-full text-left px-3 py-2.5 rounded-xl text-sm"
-                style={{ background: catId === c.id ? "#EAF3E6" : "#F4F7F1", color: catId === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: catId === c.id ? 700 : 500 }}>
+                style={{ background: catId === c.id ? "#EAF3E6" : "#EEF1F7", color: catId === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: catId === c.id ? 700 : 500 }}>
                 <div className="flex items-center justify-between">
                   <span className="truncate">{c.name}</span>
                   {spotsLeft === 0 ? <Hourglass size={13} color="#8A5A16" /> : <UserPlus size={13} className="opacity-50" />}
                 </div>
-                <p className="text-[11px] mt-0.5" style={{ color: "#8B968A" }}>
+                <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
                   {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{c.waitlist.length > 0 ? ` · ${c.waitlist.length} en espera` : ""}
                 </p>
               </button>
@@ -2773,7 +2915,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
       <div className="flex flex-wrap gap-2">
         {categories.map((c) => (
           <button key={c.id} onClick={() => setCatId(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
-            style={{ background: catId === c.id ? COLORS.court : "#F0F3ED", color: catId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
+            style={{ background: catId === c.id ? COLORS.court : "#EAEEF5", color: catId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
         ))}
       </div>
 
@@ -2867,7 +3009,7 @@ function MatchRow({ m, cat, courtById, teamName, bestOf, onSubmit }) {
   };
 
   return (
-    <div className="rounded-xl p-3" style={{ background: m.winnerId ? "#F4F7F1" : "#FAFAF7", border: `1px solid ${COLORS.line}` }}>
+    <div className="rounded-xl p-3" style={{ background: m.winnerId ? "#EEF1F7" : "#FAFAF7", border: `1px solid ${COLORS.line}` }}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="text-sm">
           <span className={m.winnerId === m.teamAId ? "font-bold" : ""}>{labelA}</span>
@@ -2930,17 +3072,17 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
   };
 
   return (
-    <div className="rounded-xl p-4 mt-3" style={{ background: "#F4F7F1", border: `1px solid ${COLORS.line}` }}>
+    <div className="rounded-xl p-4 mt-3" style={{ background: "#EEF1F7", border: `1px solid ${COLORS.line}` }}>
       <p className="text-sm font-bold mb-3" style={{ color: COLORS.courtDark }}>{title}</p>
 
       <div className="rounded-lg p-3 mb-3" style={{ background: COLORS.courtDark }}>
-        <span className="text-xs" style={{ color: "#9FBBAA" }}>{discountPct > 0 ? `Precio con ${discountPct}% de descuento por membresía` : "Total a pagar"}</span>
+        <span className="text-xs" style={{ color: "#A9C0DC" }}>{discountPct > 0 ? `Precio con ${discountPct}% de descuento por membresía` : "Total a pagar"}</span>
         <div className="flex items-baseline gap-3 mt-1 flex-wrap">
           <span className="disp text-2xl" style={{ color: COLORS.ball }}>{formatMoney(discounted)}</span>
-          <span className="mono text-sm" style={{ color: "#CFE1D8" }}>≈ {formatMoney(bs, "Bs. ")}</span>
+          <span className="mono text-sm" style={{ color: "#D6E1F0" }}>≈ {formatMoney(bs, "Bs. ")}</span>
         </div>
-        {discountPct > 0 && baseUsd > 0 && <p className="text-[10px] mt-1 line-through" style={{ color: "#6E8478" }}>{formatMoney(baseUsd)} sin membresía</p>}
-        <p className="text-[10px] mt-1.5" style={{ color: "#5E7669" }}>Bs calculado a {formatMoney(club.bsPerUsd, "Bs. ")}/USD (referencia EUR BCV)</p>
+        {discountPct > 0 && baseUsd > 0 && <p className="text-[10px] mt-1 line-through" style={{ color: "#55677E" }}>{formatMoney(baseUsd)} sin membresía</p>}
+        <p className="text-[10px] mt-1.5" style={{ color: "#4E6180" }}>Bs calculado a {formatMoney(club.bsPerUsd, "Bs. ")}/USD (referencia EUR BCV)</p>
       </div>
 
       {requireName && (
@@ -2958,7 +3100,7 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
           <div><Label>N° de referencia</Label><input style={inputStyle} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Últimos dígitos de la operación" /></div>
           <div>
             <Label>Comprobante de pago (obligatorio)</Label>
-            <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: proofName ? COLORS.court : "#8B968A" }}>
+            <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: proofName ? COLORS.court : "#6B7688" }}>
               <Upload size={14} /> {proofName || "Subir captura del pago"}
               <input type="file" accept="image/*,.pdf" className="hidden" onChange={handleFile} />
             </label>
@@ -3005,6 +3147,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   };
 
   const lockedPrivate = court && court.isPrivate && !currentPlan?.privateCourtAccess;
+  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
 
   const shiftDate = (delta) => {
     const d = new Date(date + "T00:00:00");
@@ -3034,7 +3177,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
           {courts.map((c) => (
             <button key={c.id} onClick={() => { setCourtId(c.id); setSelectedTime(null); }}
               className="px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-1.5"
-              style={{ background: courtId === c.id ? COLORS.court : "#F0F3ED", color: courtId === c.id ? "#fff" : COLORS.ink }}>
+              style={{ background: courtId === c.id ? COLORS.court : "#EAEEF5", color: courtId === c.id ? "#fff" : COLORS.ink }}>
               {c.isPrivate && <Lock size={12} />} {c.name}
             </button>
           ))}
@@ -3043,11 +3186,11 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
         <div className="max-w-sm mb-5">
           <p className="text-xs font-bold uppercase tracking-wide mb-1.5" style={{ color: COLORS.court }}>{formatDateFull(date)}</p>
           <div className="flex items-center gap-2">
-            <button onClick={() => shiftDate(-1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#F0F3ED" }}>
+            <button onClick={() => shiftDate(-1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronLeft size={16} color={COLORS.courtDark} />
             </button>
             <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={date} onChange={(e) => { setDate(e.target.value); setSelectedTime(null); }} />
-            <button onClick={() => shiftDate(1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#F0F3ED" }}>
+            <button onClick={() => shiftDate(1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronRight size={16} color={COLORS.courtDark} />
             </button>
           </div>
@@ -3063,27 +3206,29 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
           {blocks.map((t) => {
             const occ = occupant(court.id, t);
             const isSel = selectedTime === t;
+            const { base, member } = courtPriceInfo(court, t);
+            const shownPrice = isMember ? member : base;
             return (
               <button key={t} onClick={() => !occ && setSelectedTime(t)} disabled={!!occ}
                 title={occ ? `${occ.kind}${occ.label ? ": " + occ.label : ""}` : "Disponible"}
                 className="rounded-xl py-2.5 px-1.5 text-center transition-all"
                 style={{
-                  background: occ ? "#F0EEE5" : isSel ? COLORS.court : "#fff",
+                  background: occ ? "#EDEEF2" : isSel ? COLORS.court : "#fff",
                   border: `1.5px solid ${occ ? "transparent" : isSel ? COLORS.court : COLORS.line}`,
                   cursor: occ ? "not-allowed" : "pointer",
                 }}>
-                <p className="mono text-sm font-bold" style={{ color: occ ? "#B5AF9E" : isSel ? "#fff" : COLORS.courtDark }}>{minutesToAmPm(t)}</p>
-                <p className="text-[9px] mt-0.5 font-bold uppercase tracking-wide" style={{ color: occ ? "#B5AF9E" : isSel ? "#DCEBD5" : "#9AA697" }}>
-                  {occ ? occ.kind : "Libre"}
+                <p className="mono text-sm font-bold" style={{ color: occ ? "#9AA6BC" : isSel ? "#fff" : COLORS.courtDark }}>{minutesToAmPm(t)}</p>
+                <p className="text-[9px] mt-0.5 font-bold uppercase tracking-wide" style={{ color: occ ? "#9AA6BC" : isSel ? "#DCEBD5" : "#78829A" }}>
+                  {occ ? occ.kind : formatMoney(shownPrice)}
                 </p>
               </button>
             );
           })}
         </div>
 
-        <div className="flex flex-wrap gap-4 mt-4 text-[11px]" style={{ color: "#8B968A" }}>
+        <div className="flex flex-wrap gap-4 mt-4 text-[11px]" style={{ color: "#6B7688" }}>
           <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ background: "#fff", border: `1.5px solid ${COLORS.line}` }} /> Disponible</span>
-          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ background: "#F0EEE5" }} /> Ocupado</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ background: "#EDEEF2" }} /> Ocupado</span>
           <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ background: COLORS.court }} /> Seleccionado</span>
         </div>
       </Card>
@@ -3096,8 +3241,9 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
               <Lock size={13} /> Esta cancha es privada — necesitas una membresía con acceso a canchas privadas. Revisa la sección Membresías.
             </div>
           ) : (
-            <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={court.pricePerBlock}
-              discountPct={currentPlan?.courtDiscountPct || 0} club={club} defaultName={currentUser.name}
+            <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={courtPriceInfo(court, selectedTime).base}
+              discountPct={isMember ? memberDiscountPct(courtPriceInfo(court, selectedTime).base, courtPriceInfo(court, selectedTime).member) : 0}
+              club={club} defaultName={currentUser.name}
               onConfirm={confirm} onCancel={() => setSelectedTime(null)} confirmLabel="Confirmar reserva" />
           )}
         </Card>
@@ -3109,7 +3255,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
           {visibleBookings.map((b) => {
             const c = courts.find((cc) => cc.id === b.courtId);
             return (
-              <div key={b.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#F4F7F1" }}>
+              <div key={b.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
                 <div>
                   <span className="font-semibold">{c?.name}</span>
                   <span className="text-gray-500 ml-2 text-xs">{formatDateHuman(b.date)} · {minutesToAmPm(b.timeMin)} · {b.userName}</span>
@@ -3140,7 +3286,7 @@ function MultiCourtSelect({ courts, value, onChange }) {
       {courts.map((c) => (
         <button key={c.id} type="button" onClick={() => toggle(c.id)}
           className="px-3 py-1.5 rounded-lg text-xs font-semibold"
-          style={{ background: value.includes(c.id) ? COLORS.court : "#F0F3ED", color: value.includes(c.id) ? "#fff" : COLORS.ink }}>
+          style={{ background: value.includes(c.id) ? COLORS.court : "#EAEEF5", color: value.includes(c.id) ? "#fff" : COLORS.ink }}>
           {c.name}
         </button>
       ))}
@@ -3154,6 +3300,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [image, setImage] = useState("");
   const [level, setLevel] = useState("Todos");
   const [price, setPrice] = useState(5);
+  const [memberPrice, setMemberPrice] = useState(5);
   const [description, setDescription] = useState("");
   const [courtIds, setCourtIds] = useState([]);
   const [date, setDate] = useState("");
@@ -3180,7 +3327,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         <div><Label>Nombre de la actividad</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Jueves de DUPR" /></div>
         <div>
           <Label>Imagen (opcional)</Label>
-          <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: image ? COLORS.court : "#8B968A" }}>
+          <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: image ? COLORS.court : "#6B7688" }}>
             <ImageIcon size={14} /> {image ? "Imagen cargada" : "Subir imagen"}
             <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
           </label>
@@ -3192,26 +3339,27 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
               {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
-          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
+        <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         <div><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 70 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
           <div>
             <Label>Fecha {isRecurring ? "del primer evento" : ""}</Label>
             <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
-            {date && <p className="text-[11px] mt-1" style={{ color: "#8B968A" }}>{formatDateFull(date)}</p>}
+            {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
           </div>
           <div><Label>Desde</Label><input type="time" style={inputStyle} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></div>
           <div><Label>Hasta</Label><input type="time" style={inputStyle} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></div>
         </div>
-        <p className="text-xs" style={{ color: "#8B968A" }}>Los bloques de horario de las canchas elegidas quedan reservados automáticamente para esta actividad — nadie más podrá reservarlos.</p>
+        <p className="text-xs" style={{ color: "#6B7688" }}>Los bloques de horario de las canchas elegidas quedan reservados automáticamente para esta actividad — nadie más podrá reservarlos.</p>
 
-        <div className="rounded-xl p-3" style={{ background: "#F4F7F1" }}>
+        <div className="rounded-xl p-3" style={{ background: "#EEF1F7" }}>
           <div className="flex items-center justify-between gap-3">
             <div>
               <Label>Evento recurrente (semanal)</Label>
-              <p className="text-[11px]" style={{ color: "#8B968A" }}>Ej: "Jueves de DUPR" cada jueves a la misma hora.</p>
+              <p className="text-[11px]" style={{ color: "#6B7688" }}>Ej: "Jueves de DUPR" cada jueves a la misma hora.</p>
             </div>
             <Segmented value={isRecurring ? "si" : "no"} onChange={(v) => setIsRecurring(v === "si")} options={[{ value: "no", label: "No" }, { value: "si", label: "Sí" }]} />
           </div>
@@ -3224,7 +3372,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
                 <Label>Repetir hasta (inclusive)</Label>
                 <input type="date" min={date || undefined} style={inputStyle} value={recurUntil} onChange={(e) => setRecurUntil(e.target.value)} />
                 {recurUntil && recurUntil >= date && (
-                  <p className="text-[11px] mt-1" style={{ color: "#8B968A" }}>Última fecha: {formatDateFull(recurUntil)}</p>
+                  <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Última fecha: {formatDateFull(recurUntil)}</p>
                 )}
               </div>
             </div>
@@ -3232,7 +3380,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         </div>
 
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ name: name.trim(), image, level, price: Number(price) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
+          <button disabled={!canSave} onClick={() => onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
             style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
             {isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
           </button>
@@ -3247,6 +3395,7 @@ function ClaseForm({ courts, onCreate, onCancel }) {
   const [academyName, setAcademyName] = useState("");
   const [level, setLevel] = useState("Todos");
   const [price, setPrice] = useState(15);
+  const [memberPrice, setMemberPrice] = useState(15);
   const [courtIds, setCourtIds] = useState([]);
   const [date, setDate] = useState("");
   const [startTime, setStartTime] = useState("17:00");
@@ -3266,20 +3415,21 @@ function ClaseForm({ courts, onCreate, onCancel }) {
               {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
-          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
+        <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
           <div>
             <Label>Fecha</Label>
             <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
-            {date && <p className="text-[11px] mt-1" style={{ color: "#8B968A" }}>{formatDateFull(date)}</p>}
+            {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
           </div>
           <div><Label>Desde</Label><input type="time" style={inputStyle} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></div>
           <div><Label>Hasta</Label><input type="time" style={inputStyle} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></div>
         </div>
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, courtIds, date, startTime, endTime })}
+          <button disabled={!canSave} onClick={() => onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime })}
             style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">Crear Clase</button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -3340,6 +3490,7 @@ function EventPoster({ kind, title, subtitle, date, price, image, recurring, onC
 function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
+  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
   const [checkoutId, setCheckoutId] = useState(isSeries ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
 
@@ -3348,7 +3499,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
           <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.name}</p>
-          <p className="text-xs mt-1" style={{ color: "#8B968A" }}>
+          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
             Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
             {isSeries ? (
               <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
@@ -3363,13 +3514,13 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
       </div>
-      {e.description && <p className="text-sm mb-3" style={{ color: "#4B5A50" }}>{e.description}</p>}
+      {e.description && <p className="text-sm mb-3" style={{ color: "#3D4A5C" }}>{e.description}</p>}
 
       {isSeries ? (
         <div className="space-y-1.5 mb-4">
-          <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#8B968A" }}>Próximas fechas — elige una para inscribirte</p>
+          <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => (
-            <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#F4F7F1" }}>
+            <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#EEF1F7" }}>
               <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">· {o.registrations.length} inscrito(s)</span></span>
               <div className="flex items-center gap-2">
                 {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
@@ -3382,11 +3533,11 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           ))}
         </div>
       ) : (
-        <p className="text-xs mb-4" style={{ color: "#8B968A" }}>{e.registrations.length} inscrito(s)</p>
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>{e.registrations.length} inscrito(s)</p>
       )}
 
       {checkoutTarget && (
-        <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={currentPlan?.eventDiscountPct || 0} club={club} defaultName={currentUser.name}
+        <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
           onConfirm={(checkout) => onRegister(checkoutTarget.id, checkout)} onCancel={onClose} confirmLabel="Confirmar inscripción" />
       )}
     </Card>
@@ -3395,20 +3546,21 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
 
 function ClassDetail({ e, courts, club, currentPlan, currentUser, onRegister, onRemove, onClose }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
+  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
   return (
     <Card>
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
           <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
-          <p className="text-xs mt-1" style={{ color: "#8B968A" }}>Nivel {e.level} · {formatDateHuman(e.date)} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}</p>
+          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>Nivel {e.level} · {formatDateHuman(e.date)} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}</p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {onRemove && <button onClick={onRemove} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
       </div>
-      <p className="text-xs mb-4" style={{ color: "#8B968A" }}>{e.registrations.length} inscrito(s)</p>
-      <CheckoutPanel title={`Cupo en clase con ${e.academyName}`} baseUsd={e.price} discountPct={currentPlan?.eventDiscountPct || 0} club={club} defaultName={currentUser.name}
+      <p className="text-xs mb-4" style={{ color: "#6B7688" }}>{e.registrations.length} inscrito(s)</p>
+      <CheckoutPanel title={`Cupo en clase con ${e.academyName}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
         onConfirm={onRegister} onCancel={onClose} confirmLabel="Confirmar cupo" />
     </Card>
   );
@@ -3517,31 +3669,64 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
 /* =========================================================================
    TAB: MEMBRESÍAS
    ========================================================================= */
-function MembershipPlanForm({ onCreate, onCancel }) {
-  const [name, setName] = useState("");
-  const [monthlyPrice, setMonthlyPrice] = useState(30);
-  const [courtDiscountPct, setCourtDiscountPct] = useState(10);
-  const [eventDiscountPct, setEventDiscountPct] = useState(10);
-  const [privateCourtAccess, setPrivateCourtAccess] = useState(true);
-  const [description, setDescription] = useState("");
+// Used both to create a new plan and to edit an existing one (pass `initial`).
+// The rate card is a free-form list of priced line items (court booking, Open Plays,
+// league days, monthly classes, drills…) shown in the comparison table below — it's
+// the plan's advertised rate sheet, independent of what's actually bookable yet.
+function MembershipPlanForm({ initial, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [monthlyPrice, setMonthlyPrice] = useState(initial?.monthlyPrice ?? 30);
+  const [privateCourtAccess, setPrivateCourtAccess] = useState(initial?.privateCourtAccess ?? true);
+  const [description, setDescription] = useState(initial?.description || "");
+  const [rateCard, setRateCard] = useState(initial?.rateCard || []);
+  const [rateLabel, setRateLabel] = useState("");
+  const [ratePrice, setRatePrice] = useState(0);
+
+  const addRate = () => {
+    if (!rateLabel.trim()) return;
+    setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel.trim(), price: Number(ratePrice) || 0 }]);
+    setRateLabel(""); setRatePrice(0);
+  };
+  const removeRate = (id) => setRateCard((rc) => rc.filter((r) => r.id !== id));
 
   return (
     <Card>
-      <h4 className="font-bold text-sm mb-4">Nuevo plan de membresía</h4>
+      <h4 className="font-bold text-sm mb-4">{initial ? `Editar ${initial.name}` : "Nuevo plan de membresía"}</h4>
       <div className="grid sm:grid-cols-2 gap-3">
         <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></div>
         <div><Label>Precio mensual (USD)</Label><input type="number" min={0} style={inputStyle} value={monthlyPrice} onChange={(e) => setMonthlyPrice(e.target.value)} /></div>
-        <div><Label>Descuento en reservas (%)</Label><input type="number" min={0} max={100} style={inputStyle} value={courtDiscountPct} onChange={(e) => setCourtDiscountPct(e.target.value)} /></div>
-        <div><Label>Descuento en eventos (%)</Label><input type="number" min={0} max={100} style={inputStyle} value={eventDiscountPct} onChange={(e) => setEventDiscountPct(e.target.value)} /></div>
       </div>
       <div className="mt-3">
         <Label>Acceso a canchas privadas</Label>
         <Segmented value={privateCourtAccess ? "si" : "no"} onChange={(v) => setPrivateCourtAccess(v === "si")} options={[{ value: "si", label: "Sí" }, { value: "no", label: "No" }]} />
       </div>
       <div className="mt-3"><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
+
+      <div className="mt-4">
+        <Label>Tarifario (se muestra en la tabla comparativa)</Label>
+        <div className="space-y-1.5 mb-2">
+          {rateCard.map((r) => (
+            <div key={r.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg text-xs" style={{ background: "#EEF1F7" }}>
+              <span>{r.label}</span>
+              <div className="flex items-center gap-2">
+                <span className="mono font-bold">{r.price > 0 ? formatMoney(r.price) : "Gratis"}</span>
+                <button onClick={() => removeRate(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
+          <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Reserva de cancha (1h30min)" /></div>
+          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={ratePrice} onChange={(e) => setRatePrice(e.target.value)} /></div>
+          <button onClick={addRate} disabled={!rateLabel.trim()} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() ? COLORS.court : "#E5E5E5", color: rateLabel.trim() ? "#fff" : "#999" }}>
+            <Plus size={14} />
+          </button>
+        </div>
+      </div>
+
       <div className="flex gap-2 pt-4">
-        <button disabled={!name.trim()} onClick={() => onCreate({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, courtDiscountPct: Number(courtDiscountPct) || 0, eventDiscountPct: Number(eventDiscountPct) || 0, privateCourtAccess, description })}
-          style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">Crear plan</button>
+        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, description, rateCard })}
+          style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">{initial ? "Guardar cambios" : "Crear plan"}</button>
         <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
       </div>
     </Card>
@@ -3551,13 +3736,13 @@ function MembershipPlanForm({ onCreate, onCancel }) {
 function ComparisonRow({ label, plans, render, isBool, highlight }) {
   return (
     <tr style={{ borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-      <td className="px-4 py-3.5 text-xs font-bold" style={{ color: "#CFE1D8" }}>{label}</td>
+      <td className="px-4 py-3.5 text-xs font-bold" style={{ color: "#D6E1F0" }}>{label}</td>
       {plans.map((p, idx) => {
         const val = render(p);
         return (
           <td key={p.id} className="px-3 py-3.5 text-center">
             {isBool ? (
-              val ? <Check size={16} color={COLORS.ball} className="inline" strokeWidth={3} /> : <span style={{ color: "#4E625A" }}>—</span>
+              val ? <Check size={16} color={COLORS.ball} className="inline" strokeWidth={3} /> : <span style={{ color: "#3F5062" }}>—</span>
             ) : (
               <span className={highlight ? "mono text-base font-extrabold" : "mono text-sm font-bold"} style={{ color: idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE" }}>{val}</span>
             )}
@@ -3568,17 +3753,23 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
   );
 }
 
-function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
+function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
   const [showForm, setShowForm] = useState(false);
+  const [editingPlanId, setEditingPlanId] = useState(null);
   const [checkoutPlanId, setCheckoutPlanId] = useState(null);
   const isAdmin = role === "admin";
-
-  const avgCourtPrice = courts.length ? courts.reduce((s, c) => s + Number(c.pricePerBlock || 0), 0) / courts.length : 8;
-  const avgEventPrice = 10;
 
   const paidPlans = [...membershipPlans].filter((p) => p.monthlyPrice > 0).sort((a, b) => b.monthlyPrice - a.monthlyPrice);
   const freePlans = membershipPlans.filter((p) => p.monthlyPrice === 0);
   const orderedPlans = [...paidPlans, ...freePlans];
+
+  // Union every distinct rate-card label across plans, in first-seen order, so the
+  // comparison table stays correct even if plans don't share the exact same line items.
+  const rateLabels = useMemo(() => {
+    const seen = [];
+    orderedPlans.forEach((p) => (p.rateCard || []).forEach((r) => { if (!seen.includes(r.label)) seen.push(r.label); }));
+    return seen;
+  }, [orderedPlans]);
 
   const badgeFor = (idx) => {
     if (idx === 0 && paidPlans.length > 0) return { label: "MEJOR VALOR", color: COLORS.ball, text: COLORS.courtDark };
@@ -3587,22 +3778,28 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, remov
   };
 
   const selectedPlan = orderedPlans.find((p) => p.id === checkoutPlanId);
+  const editingPlan = orderedPlans.find((p) => p.id === editingPlanId);
 
   return (
     <div className="mt-2 space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <SectionTitle sub="Compara beneficios y suscríbete a la membresía que más te convenga.">Planes y membresías</SectionTitle>
-        {isAdmin && <button onClick={() => setShowForm((s) => !s)} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.courtDark, color: "#fff" }}><Plus size={14} /> Nuevo plan</button>}
+        {isAdmin && <button onClick={() => { setShowForm((s) => !s); setEditingPlanId(null); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.courtDark, color: "#fff" }}><Plus size={14} /> Nuevo plan</button>}
       </div>
 
-      {isAdmin && showForm && <MembershipPlanForm onCreate={(p) => { addMembershipPlan(p); setShowForm(false); }} onCancel={() => setShowForm(false)} />}
+      {isAdmin && showForm && <MembershipPlanForm onSave={(p) => { addMembershipPlan(p); setShowForm(false); }} onCancel={() => setShowForm(false)} />}
+      {isAdmin && editingPlan && (
+        <MembershipPlanForm initial={editingPlan}
+          onSave={(p) => { updateMembershipPlan(editingPlan.id, p); setEditingPlanId(null); }}
+          onCancel={() => setEditingPlanId(null)} />
+      )}
 
       <div className="rounded-[24px] overflow-hidden" style={{ background: COLORS.courtDark }}>
         <div className="px-5 md:px-7 pt-7 pb-5 flex items-start justify-between flex-wrap gap-3">
           <h2 className="disp text-2xl md:text-[28px] leading-tight" style={{ color: COLORS.chalk }}>
             Elige tu <span style={{ color: COLORS.ball }}>membresía</span>
           </h2>
-          <p className="text-xs text-right max-w-[220px]" style={{ color: "#9FBBAA" }}>
+          <p className="text-xs text-right max-w-[220px]" style={{ color: "#A9C0DC" }}>
             ¿Juegas al menos una vez por semana?<br />Una membresía se paga sola.
           </p>
         </div>
@@ -3612,7 +3809,7 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, remov
             <thead>
               <tr>
                 <th className="text-left align-bottom px-4 pb-4" style={{ width: 170 }}>
-                  <span className="text-[10px] font-extrabold uppercase tracking-widest" style={{ color: "#5E7669" }}>Beneficio</span>
+                  <span className="text-[10px] font-extrabold uppercase tracking-widest" style={{ color: "#4E6180" }}>Beneficio</span>
                 </th>
                 {orderedPlans.map((plan, idx) => {
                   const badge = badgeFor(idx);
@@ -3620,7 +3817,7 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, remov
                   return (
                     <th key={plan.id} className="align-bottom px-2 pb-0 text-center" style={{ minWidth: 128 }}>
                       <div className="rounded-t-2xl pt-3.5 pb-4 px-2"
-                        style={{ background: idx === 0 ? "rgba(212,242,75,0.10)" : idx === 1 ? "rgba(242,184,75,0.08)" : "transparent" }}>
+                        style={{ background: idx === 0 ? "rgba(255,106,26,0.12)" : idx === 1 ? "rgba(242,184,75,0.08)" : "transparent" }}>
                         <div className="h-[20px] flex items-center justify-center mb-1.5">
                           {badge && <span className="inline-block text-[9px] font-extrabold px-2.5 py-1 rounded-full" style={{ background: badge.color, color: badge.text }}>{badge.label}</span>}
                         </div>
@@ -3628,14 +3825,22 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, remov
                         {!isAdmin && (
                           <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={isCurrent}
                             className="w-full mt-3 py-2 rounded-lg text-[11px] font-extrabold"
-                            style={{ background: isCurrent ? "rgba(255,255,255,0.08)" : idx <= 1 ? badge.color : "rgba(255,255,255,0.12)", color: isCurrent ? "#7C8C82" : idx <= 1 ? badge.text : "#fff" }}>
+                            style={{ background: isCurrent ? "rgba(255,255,255,0.08)" : idx <= 1 ? badge.color : "rgba(255,255,255,0.12)", color: isCurrent ? "#6B7688" : idx <= 1 ? badge.text : "#fff" }}>
                             {isCurrent ? "Tu plan" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
                           </button>
                         )}
-                        {isAdmin && plan.monthlyPrice > 0 && (
-                          <button onClick={() => removeMembershipPlan(plan.id)} className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1" style={{ color: "#8FA79A" }}>
-                            <Trash2 size={11} /> Eliminar
-                          </button>
+                        {isAdmin && (
+                          <div className="flex gap-1.5 mt-3">
+                            <button onClick={() => { setEditingPlanId((id) => (id === plan.id ? null : plan.id)); setShowForm(false); }}
+                              className="flex-1 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1" style={{ background: "rgba(255,255,255,0.10)", color: COLORS.chalk }}>
+                              <Pencil size={11} /> Editar
+                            </button>
+                            {plan.monthlyPrice > 0 && (
+                              <button onClick={() => removeMembershipPlan(plan.id)} className="py-1.5 px-2 rounded-lg text-[10px] font-bold" style={{ color: "#93A8C9" }}>
+                                <Trash2 size={11} />
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
                     </th>
@@ -3646,10 +3851,14 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, remov
             <tbody>
               <ComparisonRow label="Costo mensual" plans={orderedPlans}
                 render={(p) => (p.monthlyPrice > 0 ? formatMoney(p.monthlyPrice) : "Pago por uso")} highlight />
-              <ComparisonRow label="Reserva de cancha / bloque" plans={orderedPlans}
-                render={(p) => (p.courtDiscountPct >= 100 ? "Gratis" : formatMoney(avgCourtPrice * (1 - (p.courtDiscountPct || 0) / 100)))} />
-              <ComparisonRow label="Open Plays y eventos" plans={orderedPlans}
-                render={(p) => (p.eventDiscountPct > 0 ? formatMoney(avgEventPrice * (1 - p.eventDiscountPct / 100)) : "Precio regular")} />
+              {rateLabels.map((lbl) => (
+                <ComparisonRow key={lbl} label={lbl} plans={orderedPlans}
+                  render={(p) => {
+                    const item = (p.rateCard || []).find((r) => r.label === lbl);
+                    if (!item) return "—";
+                    return item.price > 0 ? formatMoney(item.price) : "Gratis";
+                  }} />
+              ))}
               <ComparisonRow label="Canchas privadas" plans={orderedPlans} render={(p) => p.privateCourtAccess} isBool />
             </tbody>
           </table>

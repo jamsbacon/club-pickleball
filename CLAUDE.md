@@ -59,4 +59,14 @@ Two roles: `admin` and `client` (`currentUser.role`), checked ad hoc per tab/sec
 
 ### Currency
 
-Prices are entered/stored in USD; `club.bcvRate` (synced from the BCV EUR rate, or set manually) converts to Bs at checkout time in `CheckoutPanel`. `formatMoney` formats USD with the `es-VE` locale.
+Prices are entered/stored in USD; `club.bsPerUsd` (synced from the BCV EUR rate, or set manually) converts to Bs at checkout time in `CheckoutPanel`. `formatMoney` formats USD with the `es-VE` locale.
+
+### Member pricing lives on the item, not as a plan-wide percentage
+
+Courts, Open Plays and Classes each carry **two flat USD prices**: a base price (`pricePerBlock`/`price`) and a member price (`memberPrice`) — set directly on the item, not derived from a discount percentage on the membership plan. `courtPriceInfo(court, timeMin)` resolves a court's `{base, member}` for a given time (checking `court.priceRules` — time-window overrides like peak/off-peak pricing — before falling back to the court's own price). `memberDiscountPct(base, memberPrice)` converts a flat member price back into a rounded percentage so it can still be fed to `CheckoutPanel`'s existing `baseUsd`/`discountPct` props unchanged. Whether the *current* user gets the member price is just `!!currentPlan && currentPlan.monthlyPrice > 0` — computed ad hoc at each call site (`ReservasTab`, `EventDetail`, `ClassDetail`), not stored anywhere.
+
+Membership plans themselves only carry `monthlyPrice`, `privateCourtAccess`, `description`, and a `rateCard` — a free-form list of `{label, price}` line items shown in the `MembresiasTab` comparison table. The rate card is the plan's *advertised* rate sheet (e.g. "Jornada de Liga", "Mes de clases con APG" — categories that don't have dedicated booking flows yet) and is edited independently of the real `memberPrice` fields on actual courts/Open Plays/Classes; the two aren't kept in sync automatically.
+
+### Branding
+
+Club identity (name, colors) lives in the `COLORS` design tokens ([src/App.jsx:723](src/App.jsx:723), navy `court`/`courtDark` + orange `ball`/`ballDark`) and `club.name` (seeded as "Pickle Hub"). Most secondary text/background colors are inline hex literals rather than COLORS references — if rebranding again, grep for hex literals rather than assuming everything routes through `COLORS`.
