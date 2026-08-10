@@ -694,7 +694,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 
 /* =========================================================================
    DESIGN TOKENS

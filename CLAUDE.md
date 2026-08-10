@@ -14,6 +14,17 @@ npm run preview       # serve the dist/ build locally
 
 There is no test suite, linter, or type checker configured in this project — don't assume `npm test` or `npm run lint` exist.
 
+## Versioning
+
+Every time you make a code change to the app (anything under `src/`), bump the version number before finishing:
+
+1. Update `APP_VERSION` in [src/App.jsx](src/App.jsx) (shown on the login screen).
+2. Update `"version"` in [package.json](package.json) to match.
+3. Use semver: patch (`1.0.x`) for fixes/tweaks, minor (`1.x.0`) for new features, major (`x.0.0`) for breaking changes to the data model or workflows.
+4. Tell the user the resulting version number in your reply.
+
+This does not apply to changes that don't touch the app itself (e.g. editing this file, README, or git/deploy config).
+
 ## Architecture
 
 This is a single-page club-management app ("Club OS") for a pickleball club: bookings, tournaments, open plays, classes and memberships, built as **one React component tree in one file**, [src/App.jsx](src/App.jsx) (~3700 lines). [src/main.jsx](src/main.jsx) just mounts `<App />`; there is no router — navigation is a `tab` state string switched in the main component.
