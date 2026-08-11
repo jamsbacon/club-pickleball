@@ -715,7 +715,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3825,7 +3825,7 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                         {!isAdmin && (
                           <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={isCurrent}
                             className="w-full mt-3 py-2 rounded-lg text-[11px] font-extrabold"
-                            style={{ background: isCurrent ? "rgba(255,255,255,0.08)" : idx <= 1 ? badge.color : "rgba(255,255,255,0.12)", color: isCurrent ? "#6B7688" : idx <= 1 ? badge.text : "#fff" }}>
+                            style={{ background: isCurrent ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)", color: isCurrent ? "#6B7688" : badge ? badge.text : "#fff" }}>
                             {isCurrent ? "Tu plan" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
                           </button>
                         )}
