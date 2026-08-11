@@ -70,3 +70,15 @@ Membership plans themselves only carry `monthlyPrice`, `privateCourtAccess`, `de
 ### Branding
 
 Club identity (name, colors) lives in the `COLORS` design tokens ([src/App.jsx:723](src/App.jsx:723), navy `court`/`courtDark` + orange `ball`/`ballDark`) and `club.name` (seeded as "Pickle Hub"). Most secondary text/background colors are inline hex literals rather than COLORS references — if rebranding again, grep for hex literals rather than assuming everything routes through `COLORS`.
+
+### Torneo admin controls vs. player self-service
+
+Inside `TorneosSection`, `TORNEO_SUB_ITEMS` gates which sub-tabs a role can even see, but **visibility of a sub-tab is not the same as write access within it** — `CalendarioTab` is visible to both roles (players need to see the schedule) but only renders the match-duration inputs and the "Generar/Actualizar calendario" button when `role === "admin"`; check `isAdmin` inside a shared tab before assuming a `roles` entry on `TORNEO_SUB_ITEMS` is sufficient gating. `InscripcionTab` branches early into two entirely different components based on role: `InscripcionAdminForm` (unchanged free-text roster entry, no payment) for admins, vs. the player self-service flow (this file) for everyone else — don't try to unify them further, they serve different jobs (organizer registering a walk-in vs. a player registering themselves with a real checkout).
+
+### Player self-registration: identity, partner search, and checkout
+
+A player never types their own name when registering for a tournament category — it comes from `currentUser`. For doubles, `PartnerPicker` either searches the `users` directory by name/email ("Instagram-style") and resolves to `{userId, name, ranking}`, or invites someone not yet registered via `{name, email, ranking}`. `InscripcionTab` only lists categories still open to the current user: `c.matches.length === 0` (no draw generated yet) and the user isn't already in `c.teams`/`c.waitlist`. Registration price is `tournamentRegPrice(tournament)` (presale vs. regular price, from `tournament.presalePrice`/`regularPrice`) **times the number of players** — so a doubles team pays double a single competitor. `addTeam(catId, players, checkout)`'s third argument is optional and spread onto the stored team record; the organizer's manual roster editor omits it.
+
+### Client activity attribution (loyalty leaderboard)
+
+Every self-service checkout (`ReservasTab`, `EventDetail`, `ClassDetail`, `InscripcionTab`) stamps `userId: currentUser.id` onto the record it creates (booking / registration / team) — this is what lets `buildClientActivity()` in [src/App.jsx](src/App.jsx) attribute money and attendance back to a specific client for `EstadisticasTab`'s "Clientes más leales" card. Resolution falls back to a name match (`byName`) for older or admin-entered records that predate `userId`, and silently drops anything matching no known user — if you add a new paid, attendee-facing flow, stamp `userId` on it too or it won't show up in the leaderboard. Membership subscriptions are excluded on purpose (a subscription isn't "attendance").

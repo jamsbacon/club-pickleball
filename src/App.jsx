@@ -171,6 +171,69 @@ function buildTransactions(bookings, openPlays, classes, subscriptions) {
   return list;
 }
 
+// Every paid, attendance-worthy activity (booking, Open Play, class, tournament team) resolved
+// to a specific registered client — the basis for the "Clientes más leales" leaderboard.
+// Membership fees are deliberately left out: they're a subscription, not attendance.
+// Resolution prefers the userId stamped at checkout (see ReservasTab/EventDetail/ClassDetail/
+// InscripcionTab confirm handlers); it falls back to a name match for older/admin-entered
+// records that predate userId tracking, and drops anything that matches no known client.
+function buildClientActivity(bookings, openPlays, classes, categories, users) {
+  const byId = {}; users.forEach((u) => { byId[u.id] = u; });
+  const byName = {}; users.forEach((u) => { byName[u.name.trim().toLowerCase()] = u; });
+  const resolve = (userId, userName) => {
+    if (userId && byId[userId]) return byId[userId];
+    if (userName) return byName[userName.trim().toLowerCase()] || null;
+    return null;
+  };
+
+  const entries = [];
+  bookings.filter((b) => b.status !== "cancelada").forEach((b) => {
+    const client = resolve(b.userId, b.userName);
+    if (client) entries.push({ client, usd: Number(b.priceUsd) || 0, ts: b.createdAt, kind: "Reserva de cancha" });
+  });
+  openPlays.forEach((e) => e.registrations.forEach((r) => {
+    const client = resolve(r.userId, r.userName);
+    if (client) entries.push({ client, usd: Number(r.priceUsd) || 0, ts: r.createdAt, kind: "Open Play" });
+  }));
+  classes.forEach((e) => e.registrations.forEach((r) => {
+    const client = resolve(r.userId, r.userName);
+    if (client) entries.push({ client, usd: Number(r.priceUsd) || 0, ts: r.createdAt, kind: "Clase" });
+  }));
+  categories.forEach((c) => {
+    [...c.teams, ...c.waitlist].forEach((t) => {
+      if (t.priceUsd === undefined) return; // manually-entered team, no checkout on record
+      const client = resolve(t.userId, null);
+      if (client) entries.push({ client, usd: Number(t.priceUsd) || 0, ts: t.createdAt, kind: "Torneo" });
+    });
+  });
+  return entries;
+}
+
+function filterActivityByPeriod(entries, period) {
+  if (period === "all") return entries;
+  const now = new Date();
+  return entries.filter((e) => {
+    if (!e.ts) return false;
+    const d = new Date(e.ts);
+    if (period === "day") return d.toDateString() === now.toDateString();
+    if (period === "month") return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    if (period === "year") return d.getFullYear() === now.getFullYear();
+    return true;
+  });
+}
+
+// Ranks by activity count first (loyalty ~ how often they show up), spend as the tiebreaker.
+function rankClientsByActivity(entries) {
+  const byClientId = new Map();
+  entries.forEach((e) => {
+    const row = byClientId.get(e.client.id) || { client: e.client, usd: 0, count: 0 };
+    row.usd += e.usd;
+    row.count += 1;
+    byClientId.set(e.client.id, row);
+  });
+  return [...byClientId.values()].sort((a, b) => b.count - a.count || b.usd - a.usd);
+}
+
 function groupByDay(transactions, days = 14) {
   const map = {};
   transactions.forEach((t) => { const d = new Date(t.ts).toISOString().slice(0, 10); map[d] = (map[d] || 0) + t.usd; });
@@ -725,7 +788,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1261,7 +1324,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "estadisticas" && role === "admin" && (
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
-              membershipPlans={membershipPlans} users={users} club={club} courts={courts} />
+              membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories} />
           )}
 
           {effectiveTab === "reservas" && (
@@ -2044,7 +2107,43 @@ function HBarList({ data, color = COLORS.court }) {
   );
 }
 
-function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts }) {
+// Admin-only leaderboard: who spends the most and shows up the most, over a chosen window.
+function LoyalClientsCard({ bookings, openPlays, classes, categories, users }) {
+  const [period, setPeriod] = useState("all");
+  const activity = useMemo(() => buildClientActivity(bookings, openPlays, classes, categories, users), [bookings, openPlays, classes, categories, users]);
+  const rows = useMemo(() => rankClientsByActivity(filterActivityByPeriod(activity, period)).slice(0, 10), [activity, period]);
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+        <SectionTitle sub="Ranking por cantidad de actividades pagadas (reservas, Open Plays, clases y torneo) y dinero dejado en el club.">Clientes más leales</SectionTitle>
+        <Segmented value={period} onChange={setPeriod} options={[
+          { value: "day", label: "Hoy" }, { value: "month", label: "Este mes" }, { value: "year", label: "Este año" }, { value: "all", label: "Histórico" },
+        ]} />
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-sm text-gray-400 italic">Sin actividad paga registrada en este período.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((r, idx) => (
+            <div key={r.client.id} className="flex items-center justify-between px-3 py-2.5 rounded-xl gap-3" style={{ background: "#EEF1F7" }}>
+              <span className="flex items-center gap-2.5 text-sm font-medium min-w-0">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: idx < 3 ? COLORS.ball : COLORS.court, color: idx < 3 ? COLORS.courtDark : "#fff" }}>{idx + 1}</span>
+                <span className="truncate">{r.client.name}</span>
+              </span>
+              <div className="flex items-center gap-4 shrink-0">
+                <span className="text-xs" style={{ color: "#6B7688" }}>{r.count} actividad{r.count !== 1 ? "es" : ""}</span>
+                <span className="mono text-sm font-bold" style={{ color: COLORS.court }}>{formatMoney(r.usd)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories }) {
   const transactions = useMemo(() => buildTransactions(bookings, openPlays, classes, subscriptions), [bookings, openPlays, classes, subscriptions]);
   const byDay = useMemo(() => groupByDay(transactions, 14), [transactions]);
   const byMonth = useMemo(() => groupByMonth(transactions, 6), [transactions]);
@@ -2094,6 +2193,8 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
           <HBarList data={byZone} color={COLORS.clay} />
         </Card>
       </div>
+
+      <LoyalClientsCard bookings={bookings} openPlays={openPlays} classes={classes} categories={categories} users={users} />
     </div>
   );
 }
@@ -2963,7 +3064,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUs
   const confirm = (checkout) => {
     const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
     if (isDoubles) players.push(partner);
-    addTeam(cat.id, players, checkout);
+    addTeam(cat.id, players, { ...checkout, userId: currentUser.id });
     setDone(cat.name);
     setPartner(null);
   };
@@ -3392,7 +3493,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   };
 
   const confirm = (checkout) => {
-    createBooking({ courtId: court.id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, ...checkout });
+    createBooking({ courtId: court.id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, ...checkout });
     setSelectedTime(null);
   };
 
@@ -3773,7 +3874,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
 
       {checkoutTarget && (
         <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
-          onConfirm={(checkout) => onRegister(checkoutTarget.id, checkout)} onCancel={onClose} confirmLabel="Confirmar inscripción" />
+          onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
       )}
     </Card>
   );
@@ -3796,7 +3897,7 @@ function ClassDetail({ e, courts, club, currentPlan, currentUser, onRegister, on
       </div>
       <p className="text-xs mb-4" style={{ color: "#6B7688" }}>{e.registrations.length} inscrito(s)</p>
       <CheckoutPanel title={`Cupo en clase con ${e.academyName}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
-        onConfirm={onRegister} onCancel={onClose} confirmLabel="Confirmar cupo" />
+        onConfirm={(checkout) => onRegister({ ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
     </Card>
   );
 }
