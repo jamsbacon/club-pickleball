@@ -137,6 +137,16 @@ function memberDiscountPct(base, memberPrice) {
   return Math.max(0, Math.round((1 - m / b) * 100));
 }
 
+// Presale price wins while today falls inside [presaleStart, presaleEnd] (and is set);
+// otherwise falls back to the regular registration price. Charged per player, so a
+// doubles team pays double what a single competitor pays.
+function tournamentRegPrice(tournament) {
+  const today = new Date().toISOString().slice(0, 10);
+  const inPresale = tournament.presaleStart && tournament.presaleEnd && today >= tournament.presaleStart && today <= tournament.presaleEnd;
+  if (inPresale && Number(tournament.presalePrice) > 0) return Number(tournament.presalePrice) || 0;
+  return Number(tournament.regularPrice) || 0;
+}
+
 // Resolves a court's price for a given time-of-day, honoring an optional list of
 // time-window overrides (peak/off-peak pricing) before falling back to the court's base price.
 function courtPriceInfo(court, timeMin) {
@@ -715,7 +725,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.3.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -922,7 +932,7 @@ export default function PickleballTournamentApp() {
   const [tournament, setTournament] = useState({
     name: "Copa Verano Pickleball",
     startDate: "", endDate: "", dailyStart: "08:00", dailyEnd: "20:00",
-    presaleStart: "", presaleEnd: "", presalePrice: "",
+    presaleStart: "", presaleEnd: "", presalePrice: "", regularPrice: "",
     regStart: "", regEnd: "",
   });
   const [matchDuration, setMatchDuration] = useState(35);
@@ -1004,11 +1014,14 @@ export default function PickleballTournamentApp() {
 
   // Shared by both the organizer's roster editor and the player self-registration screen.
   // Automatically fills the waitlist once maxTeams is reached — no organizer action required.
-  const addTeam = (catId, players) => {
+  // `checkout` is optional — the organizer's manual roster editor (CategoriasTab) omits it;
+  // the player self-registration screen (InscripcionTab) passes the CheckoutPanel result so
+  // the payment/price sticks to the team record for the loyalty/revenue stats.
+  const addTeam = (catId, players, checkout) => {
     const name = players.map((p) => p.name).join(" / ");
     players.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
     updateCategory(catId, (c) => {
-      const team = { id: uid("team"), name, players };
+      const team = { id: uid("team"), name, players, createdAt: Date.now(), ...(checkout || {}) };
       if (c.maxTeams && c.teams.length >= c.maxTeams) {
         c.waitlist = [...c.waitlist, team];
       } else {
@@ -1267,7 +1280,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "torneos" && (
             <TorneosSection
-              role={role}
+              role={role} currentUser={currentUser} users={users} club={club}
               tournament={tournament} setTournament={setTournament} dates={dates}
               categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
               addCategory={addCategory} removeCategory={removeCategory}
@@ -1696,6 +1709,14 @@ function TorneoTab({ tournament, setTournament, dates }) {
               <input type="date" style={inputStyle} value={tournament.regEnd} onChange={(e) => set("regEnd", e.target.value)} />
             </div>
           </div>
+          <div className="mt-3">
+            <Label>Precio regular (por jugador, fuera de preventa)</Label>
+            <div className="relative">
+              <DollarSign size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+              <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 30 }} value={tournament.regularPrice}
+                onChange={(e) => set("regularPrice", e.target.value)} placeholder="0.00" />
+            </div>
+          </div>
         </Card>
       </div>
     </div>
@@ -2101,7 +2122,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
-    setMatchDuration, setBreakM, submitScore,
+    setMatchDuration, setBreakM, submitScore, currentUser, users, club,
   } = props;
 
   return (
@@ -2131,11 +2152,12 @@ function TorneosSection(props) {
       )}
 
       {subTab === "inscripcion" && (
-        <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking} />
+        <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking}
+          role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} />
       )}
 
       {subTab === "calendario" && (
-        <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler}
+        <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} role={role}
           scheduleInfo={scheduleInfo} tournament={tournament}
           matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM} />
       )}
@@ -2692,7 +2714,8 @@ function PodiumSlot({ place, label }) {
 /* =========================================================================
    TAB: CALENDARIO
    ========================================================================= */
-function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, matchDuration, setMatchDuration, breakM, setBreakM }) {
+function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, matchDuration, setMatchDuration, breakM, setBreakM, role }) {
+  const isAdmin = role === "admin";
   const [filterCat, setFilterCat] = useState("all");
   const allMatches = categories.flatMap((c) => c.matches.map((m) => ({ ...m, catName: c.name })));
   const scheduled = allMatches.filter((m) => m.day).sort((a, b) => (a.day + a.time).localeCompare(b.day + b.time));
@@ -2717,32 +2740,37 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 
   return (
     <div className="mt-2 space-y-5">
-      <Card>
-        <SectionTitle sub="Duración de cada partido e intervalo entre partidos. Puedes ajustarlos antes o después de generar el calendario.">Duración de partidos</SectionTitle>
-        <div className="grid sm:grid-cols-3 gap-3 items-end">
-          <div>
-            <Label>Duración aproximada por partido (min)</Label>
-            <input type="number" min={10} style={inputStyle} value={matchDuration} onChange={(e) => setMatchDuration(e.target.value)} />
+      {isAdmin && (
+        <Card>
+          <SectionTitle sub="Duración de cada partido e intervalo entre partidos. Puedes ajustarlos antes o después de generar el calendario.">Duración de partidos</SectionTitle>
+          <div className="grid sm:grid-cols-3 gap-3 items-end">
+            <div>
+              <Label>Duración aproximada por partido (min)</Label>
+              <input type="number" min={10} style={inputStyle} value={matchDuration} onChange={(e) => setMatchDuration(e.target.value)} />
+            </div>
+            <div>
+              <Label>Intervalo entre partidos (min)</Label>
+              <input type="number" min={0} style={inputStyle} value={breakM} onChange={(e) => setBreakM(e.target.value)} />
+            </div>
+            <div className="text-xs px-3 py-2.5 rounded-lg h-fit" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+              Cada franja por cancha: {Number(matchDuration) + Number(breakM)} min
+            </div>
           </div>
-          <div>
-            <Label>Intervalo entre partidos (min)</Label>
-            <input type="number" min={0} style={inputStyle} value={breakM} onChange={(e) => setBreakM(e.target.value)} />
-          </div>
-          <div className="text-xs px-3 py-2.5 rounded-lg h-fit" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-            Cada franja por cancha: {Number(matchDuration) + Number(breakM)} min
-          </div>
-        </div>
-      </Card>
+        </Card>
+      )}
 
-      <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <SectionTitle sub="Genera (o vuelve a generar) los horarios evitando que un jugador tenga dos partidos a la vez.">Calendario de juego</SectionTitle>
+      {(isAdmin || scheduleInfo) && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <SectionTitle sub={isAdmin ? "Genera (o vuelve a generar) los horarios evitando que un jugador tenga dos partidos a la vez." : "Horario generado por el organizador del torneo."}>Calendario de juego</SectionTitle>
+            </div>
+            {isAdmin && (
+              <button onClick={runScheduler} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
+                <Clock size={16} /> {scheduleInfo ? "Actualizar calendario" : "Generar calendario"}
+              </button>
+            )}
           </div>
-          <button onClick={runScheduler} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
-            <Clock size={16} /> {scheduleInfo ? "Actualizar calendario" : "Generar calendario"}
-          </button>
-        </div>
 
         {scheduleInfo && (
           <div className="mt-3 flex flex-wrap gap-3">
@@ -2759,6 +2787,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
           </div>
         )}
       </Card>
+      )}
 
       {scheduled.length > 0 && (
         <Card>
@@ -2801,7 +2830,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
         </Card>
       )}
       {scheduled.length === 0 && (
-        <Card><p className="text-sm text-gray-400">Aún no hay calendario generado. Configura torneo, canchas y al menos un draw de categoría, luego pulsa "Generar calendario".</p></Card>
+        <Card><p className="text-sm text-gray-400">{isAdmin ? 'Aún no hay calendario generado. Configura torneo, canchas y al menos un draw de categoría, luego pulsa "Generar calendario".' : "El organizador del torneo todavía no ha generado el calendario."}</p></Card>
       )}
     </div>
   );
@@ -2810,7 +2839,213 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 /* =========================================================================
    TAB: INSCRIPCIÓN (autoservicio de jugadores)
    ========================================================================= */
-function InscripcionTab({ categories, addTeam, suggestedRanking }) {
+// Type-ahead partner picker — searches the app's user directory ("Instagram-style") by name
+// or email, or falls back to inviting someone not registered yet by name + email. Emits the
+// resolved player object ({userId, name, ranking} or {name, email, ranking}) via onChange,
+// or null while no valid partner is resolved yet.
+function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
+  const [mode, setMode] = useState("search");
+  const [query, setQuery] = useState("");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [inviteName, setInviteName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [ranking, setRanking] = useState("");
+
+  const results = mode === "search" && !selectedUser && query.trim().length > 0
+    ? users.filter((u) => u.id !== excludeUserId && u.role !== "admin" &&
+        (u.name.toLowerCase().includes(query.trim().toLowerCase()) || u.email.toLowerCase().includes(query.trim().toLowerCase())))
+        .slice(0, 6)
+    : [];
+
+  useEffect(() => {
+    if (mode === "search" && selectedUser) {
+      onChange({ userId: selectedUser.id, name: selectedUser.name, ranking: Number(ranking) || 0 });
+    } else if (mode === "invite" && inviteName.trim() && inviteEmail.trim()) {
+      onChange({ name: inviteName.trim(), email: inviteEmail.trim(), ranking: Number(ranking) || 0 });
+    } else {
+      onChange(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selectedUser, inviteName, inviteEmail, ranking]);
+
+  const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); setRanking(suggestedRanking(u.name) || ""); };
+  const clearUser = () => { setSelectedUser(null); setQuery(""); setRanking(""); };
+  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setInviteName(""); setInviteEmail(""); setRanking(""); };
+
+  const hasPartner = (mode === "search" && selectedUser) || (mode === "invite" && inviteName.trim() && inviteEmail.trim());
+
+  return (
+    <div>
+      <div className="flex gap-1.5 mb-2">
+        <button type="button" onClick={() => switchMode("search")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
+          style={{ background: mode === "search" ? COLORS.court : "#EAEEF5", color: mode === "search" ? "#fff" : COLORS.ink }}>Buscar jugador</button>
+        <button type="button" onClick={() => switchMode("invite")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
+          style={{ background: mode === "invite" ? COLORS.court : "#EAEEF5", color: mode === "invite" ? "#fff" : COLORS.ink }}>Invitar por correo</button>
+      </div>
+
+      {mode === "search" ? (
+        selectedUser ? (
+          <div className="flex items-center justify-between px-3 py-2.5 rounded-xl mb-2" style={{ background: "#DCEBD5" }}>
+            <span className="text-sm font-semibold flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{selectedUser.name.charAt(0).toUpperCase()}</span>
+              {selectedUser.name} <span className="text-xs font-normal text-gray-500">· {selectedUser.email}</span>
+            </span>
+            <button onClick={clearUser} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
+          </div>
+        ) : (
+          <div className="relative mb-2">
+            <input style={inputStyle} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Busca a tu pareja por nombre o correo…" />
+            {results.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1 rounded-xl overflow-hidden shadow-lg" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                {results.map((u) => (
+                  <button key={u.id} type="button" onClick={() => pickUser(u)} className="w-full text-left px-3 py-2 text-sm flex items-center gap-2" style={{ background: "#fff" }}>
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{u.name.charAt(0).toUpperCase()}</span>
+                    <span className="truncate">{u.name}<span className="text-gray-400"> · {u.email}</span></span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {query.trim().length > 0 && results.length === 0 && (
+              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Nadie coincide — usa "Invitar por correo" si tu pareja aún no está registrada en la app.</p>
+            )}
+          </div>
+        )
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-2 mb-2">
+          <input style={inputStyle} value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Nombre de tu pareja" />
+          <input type="email" style={inputStyle} value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="Correo de invitación" />
+        </div>
+      )}
+
+      {hasPartner && (
+        <div>
+          <Label>Nivel / ranking de tu pareja (opcional)</Label>
+          <input type="number" style={inputStyle} value={ranking} onChange={(e) => setRanking(e.target.value)} placeholder="Ej. 3.5" />
+        </div>
+      )}
+      {mode === "invite" && hasPartner && (
+        <p className="text-[11px] mt-1.5 flex items-center gap-1" style={{ color: "#6B7688" }}><Mail size={11} /> Le llegará una invitación a {inviteEmail} para crear su cuenta.</p>
+      )}
+    </div>
+  );
+}
+
+function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUser, users, club, tournament }) {
+  const isAdmin = role === "admin";
+
+  // ---- Admin path: unchanged manual roster entry (free-text names), no payment step —
+  // this mirrors what CategoriasTab's organizer roster editor already does. ----
+  if (isAdmin) return <InscripcionAdminForm categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking} />;
+
+  // ---- Player self-registration: only categories still open to the current user, no free-text
+  // name for themselves, a searched/invited partner for doubles, and a real checkout step. ----
+  const eligible = categories.filter((c) => {
+    const drawStarted = c.matches && c.matches.length > 0;
+    if (drawStarted) return false;
+    const alreadyIn = [...c.teams, ...c.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
+    return !alreadyIn;
+  });
+
+  const [catId, setCatId] = useState(eligible[0]?.id || null);
+  const cat = eligible.find((c) => c.id === catId) || null;
+  const [done, setDone] = useState(null);
+  const [myRanking, setMyRanking] = useState(suggestedRanking(currentUser.name) || "");
+  const [partner, setPartner] = useState(null);
+
+  const isDoubles = cat && cat.modality !== "individual";
+  const full = cat && cat.maxTeams && cat.teams.length >= cat.maxTeams;
+  const canCheckout = cat && (!isDoubles || partner);
+  const unitPrice = tournamentRegPrice(tournament);
+  const totalPrice = unitPrice * (isDoubles ? 2 : 1);
+
+  const selectCat = (id) => { setCatId(id); setDone(null); setPartner(null); };
+
+  const confirm = (checkout) => {
+    const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
+    if (isDoubles) players.push(partner);
+    addTeam(cat.id, players, checkout);
+    setDone(cat.name);
+    setPartner(null);
+  };
+
+  if (categories.length === 0) {
+    return <Card className="mt-2"><p className="text-sm text-gray-400">Todavía no hay categorías abiertas para inscripción.</p></Card>;
+  }
+
+  return (
+    <div className="mt-2 grid md:grid-cols-[280px_1fr] gap-5">
+      <Card>
+        <SectionTitle sub="Solo se muestran las categorías en las que todavía puedes inscribirte.">Categorías abiertas</SectionTitle>
+        <div className="space-y-1.5">
+          {eligible.map((c) => {
+            const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
+            return (
+              <button key={c.id} onClick={() => selectCat(c.id)}
+                className="w-full text-left px-3 py-2.5 rounded-xl text-sm"
+                style={{ background: catId === c.id ? "#EAF3E6" : "#EEF1F7", color: catId === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: catId === c.id ? 700 : 500 }}>
+                <div className="flex items-center justify-between">
+                  <span className="truncate">{c.name}</span>
+                  {spotsLeft === 0 ? <Hourglass size={13} color="#8A5A16" /> : <UserPlus size={13} className="opacity-50" />}
+                </div>
+                <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
+                  {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{c.waitlist.length > 0 ? ` · ${c.waitlist.length} en espera` : ""}
+                </p>
+              </button>
+            );
+          })}
+          {eligible.length === 0 && <p className="text-xs text-gray-400 italic px-1">No hay categorías disponibles para ti en este momento — ya estás inscrito en todas las abiertas, o su calendario ya fue generado.</p>}
+        </div>
+      </Card>
+
+      {cat && (
+        <Card>
+          <SectionTitle sub="El cupo se confirma solo, sin que el organizador tenga que hacerlo por ti.">
+            Inscribirme en {cat.name}
+          </SectionTitle>
+
+          {full && (
+            <div className="text-xs px-3 py-2 rounded-lg mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+              <Hourglass size={12} /> El cupo está lleno — te inscribirás en la lista de espera y subirás automáticamente si alguien se retira.
+            </div>
+          )}
+
+          <div className="mb-4">
+            <Label>{isDoubles ? "Jugador 1 (tú)" : "Jugador"}</Label>
+            <div className="flex items-center justify-between px-3 py-2.5 rounded-xl mb-2" style={{ background: "#EEF1F7" }}>
+              <span className="text-sm font-semibold flex items-center gap-2">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{currentUser.name.charAt(0).toUpperCase()}</span>
+                {currentUser.name}
+              </span>
+            </div>
+            <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Tu nivel / ranking (opcional)" />
+          </div>
+
+          {isDoubles && (
+            <div className="mb-4">
+              <Label>Jugador 2 (tu pareja)</Label>
+              <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={setPartner} />
+            </div>
+          )}
+
+          {canCheckout && (
+            <CheckoutPanel title={`Inscripción a ${cat.name}${isDoubles ? " (dupla)" : ""}`} baseUsd={totalPrice} discountPct={0} club={club} defaultName={currentUser.name} requireName={false}
+              onConfirm={confirm} confirmLabel={full ? "Unirme a la lista de espera" : "Confirmar inscripción"} />
+          )}
+
+          {done && (
+            <div className="mt-4 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+              <CheckCircle2 size={13} /> ¡Listo! Tu cupo quedó registrado en {done}.
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// Organizer-side manual roster entry — kept exactly as before (free-text names, no payment
+// step) for adding walk-in players the admin is registering on someone's behalf.
+function InscripcionAdminForm({ categories, addTeam, suggestedRanking }) {
   const [catId, setCatId] = useState(categories[0]?.id || null);
   const cat = categories.find((c) => c.id === catId) || null;
   const [done, setDone] = useState(false);
@@ -2842,7 +3077,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking }) {
   return (
     <div className="mt-2 grid md:grid-cols-[280px_1fr] gap-5">
       <Card>
-        <SectionTitle sub="Elige la categoría en la que quieres competir.">Categorías abiertas</SectionTitle>
+        <SectionTitle sub="Elige la categoría en la que quieres registrar un equipo.">Categorías abiertas</SectionTitle>
         <div className="space-y-1.5">
           {categories.map((c) => {
             const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
@@ -2865,28 +3100,28 @@ function InscripcionTab({ categories, addTeam, suggestedRanking }) {
 
       {cat && (
         <Card>
-          <SectionTitle sub="Regístrate directamente — el cupo se confirma solo, sin que el organizador tenga que hacerlo por ti.">
-            Inscribirme en {cat.name}
+          <SectionTitle sub="Registro manual de un equipo — por ejemplo, un jugador que se inscribe presencialmente.">
+            Registrar equipo en {cat.name}
           </SectionTitle>
 
           {full && (
             <div className="text-xs px-3 py-2 rounded-lg mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-              <Hourglass size={12} /> El cupo está lleno — te inscribirás en la lista de espera y subirás automáticamente si alguien se retira.
+              <Hourglass size={12} /> El cupo está lleno — se inscribirá en la lista de espera.
             </div>
           )}
 
           <div className={`grid gap-3 mb-4 ${isDoubles ? "sm:grid-cols-2" : ""}`}>
-            <PlayerField label={isDoubles ? "Jugador 1 (tú)" : "Tu nombre"} name={p1} setName={setP1} ranking={r1} setRanking={setR1} suggestedRanking={suggestedRanking} />
-            {isDoubles && <PlayerField label="Jugador 2 (pareja)" name={p2} setName={setP2} ranking={r2} setRanking={setR2} suggestedRanking={suggestedRanking} />}
+            <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} ranking={r1} setRanking={setR1} suggestedRanking={suggestedRanking} />
+            {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} ranking={r2} setRanking={setR2} suggestedRanking={suggestedRanking} />}
           </div>
 
           <button onClick={submit} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
-            <UserPlus size={16} /> {full ? "Unirme a la lista de espera" : "Confirmar inscripción"}
+            <UserPlus size={16} /> {full ? "Agregar a la lista de espera" : "Registrar equipo"}
           </button>
 
           {done && (
             <div className="mt-4 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
-              <CheckCircle2 size={13} /> ¡Listo! Tu cupo quedó registrado en {cat.name}.
+              <CheckCircle2 size={13} /> Equipo registrado en {cat.name}.
             </div>
           )}
         </Card>
