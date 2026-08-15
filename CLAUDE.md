@@ -23,6 +23,10 @@ Every time you make a code change to the app (anything under `src/`), bump the v
 3. Use semver: patch (`1.0.x`) for fixes/tweaks, minor (`1.x.0`) for new features, major (`x.0.0`) for breaking changes to the data model or workflows.
 4. Tell the user the resulting version number in your reply.
 
+## Commit & push after every change
+
+After bumping the version (above), commit the change and push to `origin/main` — don't leave changes staged locally waiting for a separate request. This repo deploys from `main` (Vercel auto-deploys on push to `https://club-pickleball.vercel.app/`), so an unpushed change never reaches production. Write a commit message describing what changed and why, and include the resulting version number.
+
 This does not apply to changes that don't touch the app itself (e.g. editing this file, README, or git/deploy config).
 
 ## Architecture
