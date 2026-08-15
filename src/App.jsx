@@ -6,7 +6,7 @@ import {
   UserPlus, Pencil, Medal, Hourglass, DollarSign,
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
-  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat
+  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search
 } from "lucide-react";
 
 /* =========================================================================
@@ -79,6 +79,21 @@ function dateRange(start, end) {
     d.setDate(d.getDate() + 1);
   }
   return dates;
+}
+// Weekday values follow Date#getDay() (0 = domingo … 6 = sábado).
+const WEEKDAY_OPTIONS = [
+  { value: 1, label: "Lun" },
+  { value: 2, label: "Mar" },
+  { value: 3, label: "Mié" },
+  { value: 4, label: "Jue" },
+  { value: 5, label: "Vie" },
+  { value: 6, label: "Sáb" },
+  { value: 0, label: "Dom" },
+];
+// An empty/undefined playDays list means "sin restricción" (todos los días del rango juegan).
+function filterDatesByPlayDays(dates, playDays) {
+  if (!playDays || playDays.length === 0) return dates;
+  return dates.filter((iso) => playDays.includes(new Date(iso + "T00:00:00").getDay()));
 }
 function formatDateHuman(iso) {
   if (!iso) return "";
@@ -788,7 +803,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.6.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -965,9 +980,10 @@ export default function PickleballTournamentApp() {
 
   // ---- Cuentas (login / registro) ----
   // No hay backend real: los usuarios viven en memoria durante la sesión del navegador.
-  // Se incluye una cuenta admin de muestra para poder probar ambas vistas de inmediato.
+  // Se incluyen cuentas de muestra (admin y cliente) para poder probar ambas vistas de inmediato.
   const [users, setUsers] = useState([
     { id: uid("user"), name: "Administrador del Club", email: "admin@club.com", password: "admin123", role: "admin", planId: null, zone: "", createdAt: Date.now() },
+    { id: uid("user"), name: "Cliente de Prueba", email: "cliente@club.com", password: "cliente123", role: "cliente", planId: null, zone: "", createdAt: Date.now() },
   ]);
   const [currentUserId, setCurrentUserId] = useState(null);
   const currentUser = users.find((u) => u.id === currentUserId) || null;
@@ -996,7 +1012,7 @@ export default function PickleballTournamentApp() {
     name: "Copa Verano Pickleball",
     startDate: "", endDate: "", dailyStart: "08:00", dailyEnd: "20:00",
     presaleStart: "", presaleEnd: "", presalePrice: "", regularPrice: "",
-    regStart: "", regEnd: "",
+    regStart: "", regEnd: "", playDays: [],
   });
   const [matchDuration, setMatchDuration] = useState(35);
   const [breakM, setBreakM] = useState(10);
@@ -1011,7 +1027,10 @@ export default function PickleballTournamentApp() {
   const activeCat = categories.find((c) => c.id === activeCatId) || null;
   const currentPlan = membershipPlans.find((p) => p.id === currentUser?.planId) || membershipPlans[0];
 
-  const dates = useMemo(() => dateRange(tournament.startDate, tournament.endDate), [tournament.startDate, tournament.endDate]);
+  const dates = useMemo(
+    () => filterDatesByPlayDays(dateRange(tournament.startDate, tournament.endDate), tournament.playDays),
+    [tournament.startDate, tournament.endDate, tournament.playDays]
+  );
 
   // Every block already claimed by a booking, an Open Play, a class or a scheduled tournament
   // match — the single source of truth so nothing ever gets double-booked across modules.
@@ -1253,10 +1272,29 @@ export default function PickleballTournamentApp() {
     const occupiedBlocks = computeOccupiedBlocks(data.courtIds, data.date, data.startTime, data.endTime);
     setOpenPlays((p) => [...p, { id: uid("op"), type: "open_play", registrations: [], occupiedBlocks, ...data }]);
   };
-  const addClass = (data) => {
+  // Same weekly-expansion pattern as addOpenPlay above: a recurring class (e.g. "Lunes con
+  // Academia PickleUp") becomes one independent entry per occurrence, linked by recurringGroupId.
+  const addClass = ({ recurrence, ...data }) => {
+    if (recurrence?.until && recurrence.until >= data.date) {
+      const seriesId = uid("series");
+      const occurrenceDates = [];
+      let d = new Date(data.date + "T00:00:00");
+      const until = new Date(recurrence.until + "T00:00:00");
+      while (d <= until) {
+        occurrenceDates.push(d.toISOString().slice(0, 10));
+        d.setDate(d.getDate() + 7);
+      }
+      const entries = occurrenceDates.map((dt) => ({
+        id: uid("cls"), type: "clase", registrations: [], recurringGroupId: seriesId,
+        ...data, date: dt, occupiedBlocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
+      }));
+      setClasses((p) => [...p, ...entries]);
+      return;
+    }
     const occupiedBlocks = computeOccupiedBlocks(data.courtIds, data.date, data.startTime, data.endTime);
     setClasses((p) => [...p, { id: uid("cls"), type: "clase", registrations: [], occupiedBlocks, ...data }]);
   };
+  const removeClassSeries = (recurringGroupId) => setClasses((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
   const removeOpenPlay = (id) => setOpenPlays((p) => p.filter((e) => e.id !== id));
   const removeOpenPlaySeries = (recurringGroupId) => setOpenPlays((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
   const removeClass = (id) => setClasses((p) => p.filter((e) => e.id !== id));
@@ -1293,7 +1331,7 @@ export default function PickleballTournamentApp() {
   const stats = {
     courts: courts.length,
     bookings: bookings.filter((b) => b.status !== "cancelada").length,
-    events: new Set(openPlays.map((e) => e.recurringGroupId || e.id)).size + classes.length + (categories.some((c) => c.teams.length > 0) ? 1 : 0),
+    events: new Set(openPlays.map((e) => e.recurringGroupId || e.id)).size + new Set(classes.map((e) => e.recurringGroupId || e.id)).size + (categories.some((c) => c.teams.length > 0) ? 1 : 0),
     members: subscriptions.length,
   };
 
@@ -1335,7 +1373,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "eventos" && (
             <EventosTab club={club} courts={courts} openPlays={openPlays} classes={classes}
-              addOpenPlay={addOpenPlay} addClass={addClass} removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass}
+              addOpenPlay={addOpenPlay} addClass={addClass} removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournament={tournament} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab} />
@@ -1377,9 +1415,9 @@ export default function PickleballTournamentApp() {
 function GlobalStyles() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
       .disp { font-family: 'Space Grotesk', 'Inter', sans-serif; letter-spacing: -0.015em; }
-      .mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+      .mono { font-family: 'Inter', sans-serif; font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1, 'zero' 1; }
       input, select, textarea { font-family: 'Inter', sans-serif; background:#fff; transition: border-color .15s ease, box-shadow .15s ease; }
       input:focus, select:focus, textarea:focus { border-color: ${COLORS.court} !important; box-shadow: 0 0 0 3px rgba(18,59,50,0.10); }
       button { transition: transform .12s ease, opacity .12s ease, background-color .15s ease; }
@@ -1443,6 +1481,13 @@ function AuthScreen({ club, registerUser, loginUser }) {
     setMode("login");
     setEmail("admin@club.com");
     setPassword("admin123");
+    setError("");
+  };
+
+  const fillDemoClient = () => {
+    setMode("login");
+    setEmail("cliente@club.com");
+    setPassword("cliente123");
     setError("");
   };
 
@@ -1517,16 +1562,21 @@ function AuthScreen({ club, registerUser, loginUser }) {
           </div>
 
           <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-            <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres ver la vista de administrador?</p>
-            <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-              <Shield size={13} /> Usar cuenta demo de administrador
-            </button>
-            <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>admin@club.com · admin123</p>
+            <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres probar rápido alguna vista?</p>
+            <div className="space-y-2">
+              <button onClick={fillDemoClient} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                <Users size={13} /> Usar cuenta demo de cliente
+              </button>
+              <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                <Shield size={13} /> Usar cuenta demo de administrador
+              </button>
+            </div>
+            <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>cliente@club.com · cliente123 &nbsp;·&nbsp; admin@club.com · admin123</p>
           </div>
         </div>
 
         <p className="text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
-          Regístrate normal para ver la vista de cliente, o usa la cuenta demo para ver la de administrador.
+          Regístrate normal o usa una de las cuentas demo para entrar rápido a la vista de cliente o de administrador.
         </p>
       </div>
     </div>
@@ -1725,6 +1775,25 @@ function TorneoTab({ tournament, setTournament, dates }) {
               <Label>Hora fin diaria</Label>
               <input type="time" style={inputStyle} value={tournament.dailyEnd} onChange={(e) => set("dailyEnd", e.target.value)} />
             </div>
+          </div>
+          <div>
+            <Label>Días de la semana en que se juega</Label>
+            <div className="flex flex-wrap gap-1.5">
+              {WEEKDAY_OPTIONS.map((d) => {
+                const active = (tournament.playDays || []).includes(d.value);
+                return (
+                  <button key={d.value} type="button"
+                    onClick={() => set("playDays", active ? (tournament.playDays || []).filter((v) => v !== d.value) : [...(tournament.playDays || []), d.value])}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                    style={{ background: active ? COLORS.court : "#EAEEF5", color: active ? "#fff" : COLORS.ink }}>
+                    {d.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+              {(tournament.playDays || []).length === 0 ? "Sin días marcados: se juega todos los días del rango." : "Solo se generarán partidos en los días marcados, dentro del rango de fechas."}
+            </p>
           </div>
           {dates.length > 0 && (
             <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
@@ -3462,12 +3531,10 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
 function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, cancelBooking, currentUser, currentPlan, categories, openPlays, classes, role }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(todayIso);
-  const [courtId, setCourtId] = useState(courts[0]?.id || "");
   const [selectedTime, setSelectedTime] = useState(null);
+  const [courtId, setCourtId] = useState(null);
   const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes);
-  const court = courts.find((c) => c.id === courtId) || courts[0];
-
-  useEffect(() => { if ((!courtId || !courts.some((c) => c.id === courtId)) && courts[0]) setCourtId(courts[0].id); }, [courts, courtId]);
+  const court = courts.find((c) => c.id === courtId) || null;
 
   const occupant = (cid, timeMin) => {
     if (!occupiedKeys.has(blockKey(cid, date, timeMin))) return null;
@@ -3482,6 +3549,8 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
     return { kind: "Reservado", label: "" };
   };
 
+  const availableCourtsAt = (timeMin) => courts.filter((c) => !occupant(c.id, timeMin));
+
   const lockedPrivate = court && court.isPrivate && !currentPlan?.privateCourtAccess;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
 
@@ -3490,11 +3559,18 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
     d.setDate(d.getDate() + delta);
     setDate(d.toISOString().slice(0, 10));
     setSelectedTime(null);
+    setCourtId(null);
+  };
+
+  const pickTime = (t) => {
+    setSelectedTime(t);
+    setCourtId(null);
   };
 
   const confirm = (checkout) => {
     createBooking({ courtId: court.id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, ...checkout });
     setSelectedTime(null);
+    setCourtId(null);
   };
 
   const activeBookings = bookings.filter((b) => b.status !== "cancelada").sort((a, b) => (a.date + a.timeMin) - (b.date + b.timeMin));
@@ -3507,17 +3583,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   return (
     <div className="mt-2 space-y-5">
       <Card>
-        <SectionTitle sub="Elige una cancha y una fecha, luego toca un horario disponible.">Reservar cancha</SectionTitle>
-
-        <div className="flex flex-wrap gap-2 mb-5">
-          {courts.map((c) => (
-            <button key={c.id} onClick={() => { setCourtId(c.id); setSelectedTime(null); }}
-              className="px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-1.5"
-              style={{ background: courtId === c.id ? COLORS.court : "#EAEEF5", color: courtId === c.id ? "#fff" : COLORS.ink }}>
-              {c.isPrivate && <Lock size={12} />} {c.name}
-            </button>
-          ))}
-        </div>
+        <SectionTitle sub="Elige una fecha y un horario, luego una cancha disponible.">Reservar cancha</SectionTitle>
 
         <div className="max-w-sm mb-5">
           <p className="text-xs font-bold uppercase tracking-wide mb-1.5" style={{ color: COLORS.court }}>{formatDateFull(date)}</p>
@@ -3525,28 +3591,21 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
             <button onClick={() => shiftDate(-1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronLeft size={16} color={COLORS.courtDark} />
             </button>
-            <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={date} onChange={(e) => { setDate(e.target.value); setSelectedTime(null); }} />
+            <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={date} onChange={(e) => { setDate(e.target.value); setSelectedTime(null); setCourtId(null); }} />
             <button onClick={() => shiftDate(1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronRight size={16} color={COLORS.courtDark} />
             </button>
           </div>
         </div>
 
-        {court?.isPrivate && !currentPlan?.privateCourtAccess && (
-          <div className="mb-4 px-3 py-2 rounded-lg text-xs flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
-            <Lock size={13} /> Cancha privada — necesitas una membresía con acceso para reservarla.
-          </div>
-        )}
-
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
           {blocks.map((t) => {
-            const occ = occupant(court.id, t);
+            const available = availableCourtsAt(t);
+            const occ = available.length === 0;
             const isSel = selectedTime === t;
-            const { base, member } = courtPriceInfo(court, t);
-            const shownPrice = isMember ? member : base;
             return (
-              <button key={t} onClick={() => !occ && setSelectedTime(t)} disabled={!!occ}
-                title={occ ? `${occ.kind}${occ.label ? ": " + occ.label : ""}` : "Disponible"}
+              <button key={t} onClick={() => !occ && pickTime(t)} disabled={occ}
+                title={occ ? "Ocupado — ninguna cancha disponible" : `${available.length} cancha${available.length === 1 ? "" : "s"} disponible${available.length === 1 ? "" : "s"}`}
                 className="rounded-xl py-2.5 px-1.5 text-center transition-all"
                 style={{
                   background: occ ? "#EDEEF2" : isSel ? COLORS.court : "#fff",
@@ -3555,7 +3614,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                 }}>
                 <p className="mono text-sm font-bold" style={{ color: occ ? "#9AA6BC" : isSel ? "#fff" : COLORS.courtDark }}>{minutesToAmPm(t)}</p>
                 <p className="text-[9px] mt-0.5 font-bold uppercase tracking-wide" style={{ color: occ ? "#9AA6BC" : isSel ? "#DCEBD5" : "#78829A" }}>
-                  {occ ? occ.kind : formatMoney(shownPrice)}
+                  {occ ? "Ocupado" : `${available.length} cancha${available.length === 1 ? "" : "s"}`}
                 </p>
               </button>
             );
@@ -3569,6 +3628,28 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
         </div>
       </Card>
 
+      {selectedTime !== null && (
+        <Card>
+          <SectionTitle sub="Toca una cancha para continuar.">Canchas disponibles · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})</SectionTitle>
+          <div className="flex flex-wrap gap-2">
+            {availableCourtsAt(selectedTime).map((c) => {
+              const { base, member } = courtPriceInfo(c, selectedTime);
+              const shownPrice = isMember ? member : base;
+              const isSel = courtId === c.id;
+              return (
+                <button key={c.id} onClick={() => setCourtId(c.id)}
+                  className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5"
+                  style={{ background: isSel ? COLORS.court : "#EAEEF5", color: isSel ? "#fff" : COLORS.ink }}>
+                  {c.isPrivate && <Lock size={12} />} {c.name}
+                  <span className="text-[10px] font-semibold opacity-80">{formatMoney(shownPrice)}</span>
+                </button>
+              );
+            })}
+          </div>
+          {availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
+        </Card>
+      )}
+
       {selectedTime !== null && court && (
         <Card>
           <SectionTitle>Confirmar {court.name} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})</SectionTitle>
@@ -3580,7 +3661,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
             <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={courtPriceInfo(court, selectedTime).base}
               discountPct={isMember ? memberDiscountPct(courtPriceInfo(court, selectedTime).base, courtPriceInfo(court, selectedTime).member) : 0}
               club={club} defaultName={currentUser.name}
-              onConfirm={confirm} onCancel={() => setSelectedTime(null)} confirmLabel="Confirmar reserva" />
+              onConfirm={confirm} onCancel={() => setCourtId(null)} confirmLabel="Confirmar reserva" />
           )}
         </Card>
       )}
@@ -3642,6 +3723,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [date, setDate] = useState("");
   const [startTime, setStartTime] = useState("18:00");
   const [endTime, setEndTime] = useState("20:00");
+  const [capacity, setCapacity] = useState(8);
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurUntil, setRecurUntil] = useState("");
 
@@ -3653,7 +3735,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
     reader.readAsDataURL(f);
   };
 
-  const canSave = name.trim() && courtIds.length > 0 && date && startTime < endTime
+  const canSave = name.trim() && courtIds.length > 0 && date && startTime < endTime && Number(capacity) > 0
     && (!isRecurring || (recurUntil && recurUntil >= date));
 
   return (
@@ -3677,7 +3759,10 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
           </div>
           <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
-        <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
+          <div><Label>Cupos (quorum máximo)</Label><input type="number" min={1} style={inputStyle} value={capacity} onChange={(e) => setCapacity(e.target.value)} /></div>
+        </div>
         <div><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 70 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
@@ -3716,7 +3801,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         </div>
 
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
+          <button disabled={!canSave} onClick={() => onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
             style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
             {isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
           </button>
@@ -3736,8 +3821,11 @@ function ClaseForm({ courts, onCreate, onCancel }) {
   const [date, setDate] = useState("");
   const [startTime, setStartTime] = useState("17:00");
   const [endTime, setEndTime] = useState("18:00");
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [recurUntil, setRecurUntil] = useState("");
 
-  const canSave = academyName.trim() && courtIds.length > 0 && date && startTime < endTime;
+  const canSave = academyName.trim() && courtIds.length > 0 && date && startTime < endTime
+    && (!isRecurring || (recurUntil && recurUntil >= date));
 
   return (
     <Card className="mt-3">
@@ -3764,9 +3852,37 @@ function ClaseForm({ courts, onCreate, onCancel }) {
           <div><Label>Desde</Label><input type="time" style={inputStyle} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></div>
           <div><Label>Hasta</Label><input type="time" style={inputStyle} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></div>
         </div>
+
+        <div className="rounded-xl p-3" style={{ background: "#EEF1F7" }}>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <Label>Clase recurrente (semanal)</Label>
+              <p className="text-[11px]" style={{ color: "#6B7688" }}>Ej: clase cada lunes a la misma hora.</p>
+            </div>
+            <Segmented value={isRecurring ? "si" : "no"} onChange={(v) => setIsRecurring(v === "si")} options={[{ value: "no", label: "No" }, { value: "si", label: "Sí" }]} />
+          </div>
+          {isRecurring && (
+            <div className="mt-3 space-y-2">
+              <p className="text-xs font-semibold" style={{ color: COLORS.court }}>
+                {date ? `Se repetirá cada ${weekdayLabel(date)}, empezando el ${formatDateFull(date)}.` : "Elige primero la fecha de la primera clase."}
+              </p>
+              <div>
+                <Label>Repetir hasta (inclusive)</Label>
+                <input type="date" min={date || undefined} style={inputStyle} value={recurUntil} onChange={(e) => setRecurUntil(e.target.value)} />
+                {recurUntil && recurUntil >= date && (
+                  <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Última fecha: {formatDateFull(recurUntil)}</p>
+                )}
+              </div>
+              <p className="text-[11px]" style={{ color: "#6B7688" }}>Para una clase con dos días fijos por semana (ej. lunes y miércoles), crea dos series recurrentes — una por cada día.</p>
+            </div>
+          )}
+        </div>
+
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime })}
-            style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">Crear Clase</button>
+          <button disabled={!canSave} onClick={() => onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
+            style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
+            {isRecurring ? "Crear serie recurrente" : "Crear Clase"}
+          </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
       </div>
@@ -3774,47 +3890,66 @@ function ClaseForm({ courts, onCreate, onCancel }) {
   );
 }
 
-function EventPoster({ kind, title, subtitle, date, price, image, recurring, onClick }) {
+// Lucide doesn't ship a pickleball/racket glyph, so this stand-in follows the same 24×24
+// stroke-based convention (round caps/joins) as the imported lucide icons above, for use as
+// the client-facing placeholder thumbnail on event cards that have no uploaded image.
+function RacketIcon({ size = 24, color = "currentColor", strokeWidth = 2, className }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth}
+      strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect x="5" y="2" width="12" height="14.5" rx="6" />
+      <line x1="11" y1="16.5" x2="11" y2="21.5" />
+      <line x1="8" y1="21.5" x2="14" y2="21.5" />
+      <circle cx="8.7" cy="7.5" r="0.6" fill={color} stroke="none" />
+      <circle cx="13.3" cy="7.5" r="0.6" fill={color} stroke="none" />
+      <circle cx="11" cy="10.8" r="0.6" fill={color} stroke="none" />
+    </svg>
+  );
+}
+
+// Compact list-row card for the Eventos browser (search + kind filter chips above). Unlike the
+// old poster-grid layout, this keeps the essentials scannable in one row: thumbnail, kind badge,
+// name, price, a short description, when it happens, and how many spots are left/taken.
+function EventListItem({ kind, title, description, date, startTime, endTime, price, image, recurring, meta, onClick }) {
   const kindMeta = {
-    open_play: { label: "OPEN PLAY", color: COLORS.court },
-    torneo: { label: "TORNEO", color: COLORS.clay },
-    clase: { label: "CLASE", color: COLORS.courtDark },
+    open_play: { label: "Open Play", color: COLORS.court },
+    torneo: { label: "Torneo", color: COLORS.clay },
+    clase: { label: "Clase", color: COLORS.courtDark },
   }[kind];
-  const day = date ? new Date(date + "T00:00:00") : null;
 
   return (
-    <button onClick={onClick} className="text-left rounded-[20px] overflow-hidden flex flex-col"
-      style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, boxShadow: "0 1px 2px rgba(20,30,25,.04), 0 16px 32px -22px rgba(20,30,25,.22)" }}>
-      <div className="relative h-36 md:h-40 overflow-hidden shrink-0" style={!image ? { background: `linear-gradient(135deg, ${kindMeta.color}, ${COLORS.courtDark})` } : undefined}>
-        {image && <img src={image} alt={title} className="w-full h-full object-cover" />}
-        {!image && (
-          <div className="absolute inset-0 flex items-center justify-center opacity-[0.14]">
-            <Trophy size={64} color="#fff" />
-          </div>
+    <button onClick={onClick} className="w-full text-left rounded-2xl p-3 flex gap-3"
+      style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, boxShadow: "0 1px 2px rgba(20,30,25,.04), 0 10px 24px -18px rgba(20,30,25,.22)" }}>
+      <div className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden shrink-0"
+        style={!image ? { background: `linear-gradient(135deg, ${kindMeta.color}, ${COLORS.courtDark})` } : undefined}>
+        {image
+          ? <img src={image} alt={title} className="w-full h-full object-cover" />
+          : <div className="absolute inset-0 flex items-center justify-center"><RacketIcon size={30} color="rgba(255,255,255,0.85)" /></div>}
+        {recurring && (
+          <span className="absolute bottom-1 left-1 right-1 text-center text-[8px] font-extrabold px-1 py-0.5 rounded-full uppercase tracking-wide flex items-center justify-center gap-0.5"
+            style={{ background: "rgba(255,255,255,0.92)", color: COLORS.courtDark }}>
+            <Repeat size={8} /> Recurrente
+          </span>
         )}
-        <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(10,31,26,0.78) 100%)" }} />
-        <div className="absolute top-3 left-3 right-3 flex items-center gap-1.5 flex-wrap">
-          <span className="text-[9px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wide" style={{ background: kindMeta.color, color: "#fff" }}>{kindMeta.label}</span>
-          {recurring && (
-            <span className="text-[9px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wide flex items-center gap-1" style={{ background: "rgba(255,255,255,0.92)", color: COLORS.courtDark }}>
-              <Repeat size={10} /> Recurrente
-            </span>
-          )}
-        </div>
-        {day && (
-          <div className="absolute top-3 right-3 rounded-lg overflow-hidden text-center shadow-md" style={{ background: "#fff", minWidth: 44 }}>
-            <div className="text-[8px] font-extrabold uppercase py-0.5" style={{ background: COLORS.clay, color: "#fff" }}>{day.toLocaleDateString("es-ES", { month: "short" }).replace(".", "")}</div>
-            <div className="mono text-base font-extrabold py-0.5" style={{ color: COLORS.courtDark }}>{day.getDate()}</div>
-          </div>
-        )}
-        <div className="absolute bottom-0 left-0 right-0 p-3.5">
-          <p className="disp text-white text-base leading-tight">{title}</p>
-          {subtitle && <p className="text-[11px] mt-0.5" style={{ color: "rgba(255,255,255,0.85)" }}>{subtitle}</p>}
-        </div>
       </div>
-      <div className="p-3.5 flex items-center justify-between mt-auto">
-        <span className="mono text-sm font-extrabold" style={{ color: COLORS.court }}>{price}</span>
-        <span className="text-xs font-bold flex items-center gap-1" style={{ color: COLORS.clay }}>Ver más <ArrowRight size={13} /></span>
+
+      <div className="flex-1 min-w-0 flex flex-col">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide" style={{ background: `${kindMeta.color}1A`, color: kindMeta.color }}>{kindMeta.label}</span>
+            <p className="disp text-[15px] leading-tight mt-1 truncate" style={{ color: COLORS.courtDark }}>{title}</p>
+          </div>
+          <span className="mono text-sm font-extrabold shrink-0" style={{ color: COLORS.court }}>{price}</span>
+        </div>
+        {description && <p className="text-xs mt-1 line-clamp-2" style={{ color: "#6B7688" }}>{description}</p>}
+        <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[11px]" style={{ color: "#6B7688" }}>
+          <span className="flex items-center gap-1"><Calendar size={11} /> {date ? formatDateHuman(date) : "Por definir"}</span>
+          {startTime && <span className="flex items-center gap-1"><Clock size={11} /> {formatTimeAmPm(startTime)}{endTime ? `–${formatTimeAmPm(endTime)}` : ""}</span>}
+        </div>
+        <div className="flex items-center justify-between gap-2 mt-auto pt-2">
+          {meta && <span className="text-[11px] font-bold" style={{ color: meta.full ? COLORS.clay : COLORS.court }}>{meta.text}</span>}
+          <span className="text-[11px] font-bold px-3 py-1 rounded-full shrink-0 ml-auto" style={{ background: COLORS.ball, color: "#fff" }}>Ver más</span>
+        </div>
       </div>
     </button>
   );
@@ -3855,6 +3990,82 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
       {isSeries ? (
         <div className="space-y-1.5 mb-4">
           <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
+          {occurrences.map((o) => {
+            const slotsLeft = e.capacity ? Math.max(0, e.capacity - o.registrations.length) : null;
+            const isFull = slotsLeft === 0;
+            return (
+              <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#EEF1F7" }}>
+                <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">
+                  · {slotsLeft !== null ? (isFull ? "Cupo lleno" : `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}`) : `${o.registrations.length} inscrito(s)`}
+                </span></span>
+                <div className="flex items-center gap-2">
+                  {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
+                  <button disabled={isFull} onClick={() => setCheckoutId(o.id)} className="text-xs font-bold px-2.5 py-1 rounded-lg"
+                    style={{
+                      background: isFull ? "#EDEEF2" : checkoutId === o.id ? COLORS.court : "#fff",
+                      color: isFull ? "#9AA6BC" : checkoutId === o.id ? "#fff" : COLORS.court,
+                      border: `1.5px solid ${isFull ? "transparent" : COLORS.court}`, cursor: isFull ? "not-allowed" : "pointer",
+                    }}>
+                    {isFull ? "Lleno" : checkoutId === o.id ? "Seleccionada" : "Elegir"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>
+          {e.capacity
+            ? (e.registrations.length >= e.capacity ? "Cupo lleno" : `${Math.max(0, e.capacity - e.registrations.length)} cupo${(e.capacity - e.registrations.length) === 1 ? "" : "s"} disponible${(e.capacity - e.registrations.length) === 1 ? "" : "s"} de ${e.capacity}`)
+            : `${e.registrations.length} inscrito(s)`}
+        </p>
+      )}
+
+      {checkoutTarget && (
+        (checkoutTarget.capacity && checkoutTarget.registrations.length >= checkoutTarget.capacity) ? (
+          <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+            <AlertTriangle size={13} /> Este cupo está lleno — ya se alcanzó el quorum máximo.
+          </div>
+        ) : (
+          <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
+            onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
+        )
+      )}
+    </Card>
+  );
+}
+
+function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose }) {
+  const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
+  const isSeries = occurrences.length > 1;
+  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
+  const [checkoutId, setCheckoutId] = useState(isSeries ? null : e.id);
+  const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
+
+  return (
+    <Card>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
+          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
+            Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
+            {isSeries ? (
+              <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
+            ) : (
+              <> · {formatDateHuman(e.date)}</>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {isSeries && onRemoveSeries && <button onClick={onRemoveSeries} title="Eliminar toda la serie" className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          {!isSeries && onRemove && <button onClick={() => onRemove(e.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
+        </div>
+      </div>
+
+      {isSeries ? (
+        <div className="space-y-1.5 mb-4">
+          <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => (
             <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#EEF1F7" }}>
               <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">· {o.registrations.length} inscrito(s)</span></span>
@@ -3873,49 +4084,35 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
       )}
 
       {checkoutTarget && (
-        <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
-          onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
+        <CheckoutPanel title={`Cupo en clase con ${e.academyName}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
+          onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
       )}
     </Card>
   );
 }
 
-function ClassDetail({ e, courts, club, currentPlan, currentUser, onRegister, onRemove, onClose }) {
-  const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
-  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
-  return (
-    <Card>
-      <div className="flex items-start justify-between gap-3 mb-3">
-        <div>
-          <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
-          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>Nivel {e.level} · {formatDateHuman(e.date)} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}</p>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          {onRemove && <button onClick={onRemove} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
-          <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
-        </div>
-      </div>
-      <p className="text-xs mb-4" style={{ color: "#6B7688" }}>{e.registrations.length} inscrito(s)</p>
-      <CheckoutPanel title={`Cupo en clase con ${e.academyName}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
-        onConfirm={(checkout) => onRegister({ ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
-    </Card>
-  );
-}
+const EVENT_FILTER_CHIPS = [
+  { value: "all", label: "Disponibles ahora" },
+  { value: "open_play", label: "Open Plays" },
+  { value: "clase", label: "Clases" },
+  { value: "torneo", label: "Torneos" },
+];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournament, categories, setTab, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournament, categories, setTab, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filterKind, setFilterKind] = useState("all");
   const isAdmin = role === "admin";
   const hasTournamentActivity = categories.some((c) => c.teams.length > 0);
   const todayIso = new Date().toISOString().slice(0, 10);
 
-  const courtNames = (ids) => ids.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const noEvents = openPlays.length === 0 && classes.length === 0 && !hasTournamentActivity;
 
   // Recurring Open Plays are stored as one entry per occurrence (sharing a recurringGroupId)
   // so registrations/court blocks stay per-date. Group them back into one card per series —
-  // showing the next upcoming date — instead of flooding the grid with every future week.
+  // showing the next upcoming date — instead of flooding the list with every future week.
   const openPlaySeries = useMemo(() => {
     const groups = {};
     openPlays.forEach((e) => {
@@ -3926,6 +4123,68 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
   }, [openPlays]);
 
   const seriesForKey = (key) => openPlaySeries.find((list) => (list[0].recurringGroupId || list[0].id) === key);
+
+  // Same grouping as openPlaySeries above, mirrored for recurring Classes.
+  const classSeries = useMemo(() => {
+    const groups = {};
+    classes.forEach((e) => {
+      const key = e.recurringGroupId || e.id;
+      (groups[key] = groups[key] || []).push(e);
+    });
+    return Object.values(groups).map((list) => [...list].sort((a, b) => a.date.localeCompare(b.date)));
+  }, [classes]);
+
+  const classSeriesForKey = (key) => classSeries.find((list) => (list[0].recurringGroupId || list[0].id) === key);
+
+  // One flat, browsable list mixing Open Plays, Clases and the tournament — this is what
+  // feeds the search box and the "Disponibles ahora / Open Plays / Clases / Torneos" chips.
+  const listItems = useMemo(() => {
+    const items = [];
+    openPlaySeries.forEach((list) => {
+      const key = list[0].recurringGroupId || list[0].id;
+      const rep = list.find((o) => o.date >= todayIso) || list[list.length - 1];
+      const isSeries = list.length > 1;
+      const slotsLeft = rep.capacity ? Math.max(0, rep.capacity - rep.registrations.length) : null;
+      items.push({
+        key: `op-${key}`, kind: "open_play", title: rep.name,
+        description: rep.description || `Nivel ${rep.level}`,
+        date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
+        price: rep.price > 0 ? formatMoney(rep.price) : "Gratis", image: rep.image, recurring: isSeries,
+        meta: slotsLeft !== null
+          ? { text: slotsLeft > 0 ? `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}` : "Cupo lleno", full: slotsLeft === 0 }
+          : { text: `${rep.registrations.length} inscrito(s)` },
+        onClick: () => setSelected({ kind: "open_play", key }),
+      });
+    });
+    classSeries.forEach((list) => {
+      const key = list[0].recurringGroupId || list[0].id;
+      const rep = list.find((c) => c.date >= todayIso) || list[list.length - 1];
+      const isSeries = list.length > 1;
+      items.push({
+        key: `cl-${key}`, kind: "clase", title: rep.academyName, description: `Nivel ${rep.level}`,
+        date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
+        price: rep.price > 0 ? formatMoney(rep.price) : "Gratis", image: null, recurring: isSeries,
+        meta: { text: `${rep.registrations.length} inscrito(s)` },
+        onClick: () => setSelected({ kind: "clase", key }),
+      });
+    });
+    items.push({
+      key: "torneo", kind: "torneo", title: tournament.name || "Torneo del club",
+      description: hasTournamentActivity ? `${categories.length} categoría(s) abiertas.` : "Configúralo en la pestaña Torneos.",
+      date: tournament.startDate, startTime: tournament.dailyStart, endTime: tournament.dailyEnd,
+      price: "Ver detalles", image: null, recurring: false,
+      meta: { text: hasTournamentActivity ? `${categories.reduce((s, c) => s + c.teams.length, 0)} equipos inscritos` : "Sin categorías aún" },
+      onClick: () => setTab("torneos"),
+    });
+    return items;
+  }, [openPlaySeries, classSeries, tournament, categories, hasTournamentActivity, todayIso]);
+
+  const filteredItems = listItems.filter((it) => {
+    if (filterKind !== "all" && it.kind !== filterKind) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return it.title.toLowerCase().includes(q) || (it.description || "").toLowerCase().includes(q);
+  });
 
   return (
     <div className="mt-2 space-y-5">
@@ -3942,37 +4201,31 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
       {isAdmin && showOpenPlayForm && <OpenPlayForm courts={courts} onCreate={(d) => { addOpenPlay(d); setShowOpenPlayForm(false); }} onCancel={() => setShowOpenPlayForm(false)} />}
       {isAdmin && showClaseForm && <ClaseForm courts={courts} onCreate={(d) => { addClass(d); setShowClaseForm(false); }} onCancel={() => setShowClaseForm(false)} />}
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-        {openPlaySeries.map((list) => {
-          const key = list[0].recurringGroupId || list[0].id;
-          const rep = list.find((o) => o.date >= todayIso) || list[list.length - 1];
-          const isSeries = list.length > 1;
-          return (
-            <EventPoster key={key} kind="open_play" title={rep.name}
-              subtitle={isSeries
-                ? `Cada ${weekdayLabel(rep.date)} · ${formatTimeAmPm(rep.startTime)} · ${courtNames(rep.courtIds)}`
-                : `Nivel ${rep.level} · ${courtNames(rep.courtIds)}`}
-              date={rep.date} price={rep.price > 0 ? formatMoney(rep.price) : "Gratis"} image={rep.image}
-              recurring={isSeries}
-              onClick={() => setSelected({ kind: "open_play", key })} />
-          );
-        })}
+      <div className="relative">
+        <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar actividades, clubes…" style={{ ...inputStyle, paddingLeft: 38 }} />
+      </div>
 
-        <EventPoster kind="torneo" title={tournament.name || "Torneo del club"}
-          subtitle={hasTournamentActivity ? `${categories.length} categoría(s)` : "Configúralo en Torneos"}
-          date={tournament.startDate}
-          price={hasTournamentActivity ? `${categories.reduce((s, c) => s + c.teams.length, 0)} equipos inscritos` : "Ver detalles"}
-          onClick={() => setTab("torneos")} />
+      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+        {EVENT_FILTER_CHIPS.map((f) => (
+          <button key={f.value} onClick={() => setFilterKind(f.value)}
+            className="px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap shrink-0"
+            style={{ background: filterKind === f.value ? COLORS.ball : "#EAEEF5", color: filterKind === f.value ? "#fff" : COLORS.ink }}>
+            {f.label}
+          </button>
+        ))}
+      </div>
 
-        {classes.map((e) => (
-          <EventPoster key={e.id} kind="clase" title={e.academyName}
-            subtitle={`Nivel ${e.level} · ${courtNames(e.courtIds)}`}
-            date={e.date} price={e.price > 0 ? formatMoney(e.price) : "Gratis"}
-            onClick={() => setSelected({ kind: "clase", id: e.id })} />
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        {filteredItems.map((it) => (
+          <EventListItem key={it.key} kind={it.kind} title={it.title} description={it.description}
+            date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
+            recurring={it.recurring} meta={it.meta} onClick={it.onClick} />
         ))}
       </div>
 
       {noEvents && <p className="text-xs text-gray-400 italic">Aún no hay Open Plays ni clases programadas.</p>}
+      {!noEvents && filteredItems.length === 0 && <p className="text-xs text-gray-400 italic">Ninguna actividad coincide con la búsqueda o el filtro.</p>}
 
       {selected?.kind === "open_play" && (() => {
         const list = seriesForKey(selected.key);
@@ -3989,12 +4242,15 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
       })()}
 
       {selected?.kind === "clase" && (() => {
-        const e = classes.find((x) => x.id === selected.id);
-        if (!e) return null;
+        const list = classSeriesForKey(selected.key);
+        if (!list) return null;
+        const occurrences = list.filter((c) => c.date >= todayIso);
+        const e = occurrences[0] || list[list.length - 1];
         return (
-          <ClassDetail e={e} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
-            onRegister={(checkout) => { registerForClass(e.id, checkout); setSelected(null); }}
-            onRemove={isAdmin ? () => { removeClass(e.id); setSelected(null); } : null}
+          <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
+            onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
+            onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
+            onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
             onClose={() => setSelected(null)} />
         );
       })()}
