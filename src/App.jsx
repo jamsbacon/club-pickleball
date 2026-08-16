@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.9.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -901,13 +901,58 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
 export default function PickleballTournamentApp() {
   const [tab, setTab] = useState("club");
 
-  // ---- Club-wide schedule & courts (shared by Reservas, Eventos and Torneos) ----
-  const [club, setClub] = useState({
-    name: "Pickle Hub",
-    openTime: "07:00", closeTime: "22:00", blockMinutes: 90,
-    bsPerUsd: 180, // equivalente Bs por USD, anclado a la tasa EUR publicada por el BCV (ver syncBcvRate)
-    pagoMovil: { banco: "Banesco", telefono: "0414-1234567", cedula: "V-12345678" },
+  // ---- Club-wide schedule & courts (shared by Reservas, Eventos y Torneos) ----
+  // `clubs`/`courts` en Supabase son la fuente real; estos mappers convierten las filas
+  // (snake_case) a la misma forma camelCase que ya consumía el resto de la app, para no
+  // tocar los componentes que leen club.openTime, court.pricePerBlock, etc.
+  const mapClubRow = (r) => ({
+    id: r.id, name: r.name, openTime: r.open_time, closeTime: r.close_time,
+    blockMinutes: r.block_minutes, bsPerUsd: Number(r.bs_per_usd),
+    pagoMovil: r.pago_movil || { banco: "", telefono: "", cedula: "" },
   });
+  const mapCourtRow = (r) => ({
+    id: r.id, name: r.name, isPrivate: r.is_private, pricePerBlock: Number(r.price_per_block),
+    memberPrice: Number(r.member_price), priceRules: r.price_rules || [],
+  });
+
+  const [club, setClub] = useState(null);
+  const [courts, setCourts] = useState([]);
+  const [clubDataLoading, setClubDataLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [clubRes, courtsRes] = await Promise.all([
+        supabase.from("clubs").select("*").limit(1),
+        supabase.from("courts").select("*").order("created_at"),
+      ]);
+      if (clubRes.error) console.error("fetch clubs:", clubRes.error.message);
+      if (courtsRes.error) console.error("fetch courts:", courtsRes.error.message);
+      // Fallback defensivo si por algún motivo la fila semilla de `clubs` no existe --
+      // evita que la app quede sin poder renderizar en vez de romperse.
+      setClub(clubRes.data?.[0]
+        ? mapClubRow(clubRes.data[0])
+        : { id: null, name: "Pickle Hub", openTime: "07:00", closeTime: "22:00", blockMinutes: 90, bsPerUsd: 180, pagoMovil: { banco: "", telefono: "", cedula: "" } });
+      setCourts((courtsRes.data || []).map(mapCourtRow));
+      setClubDataLoading(false);
+    })();
+  }, []);
+
+  // Actualiza local al toque (UI instantánea) y persiste en Supabase en segundo plano.
+  const updateClub = (patch) => {
+    setClub((c) => (c ? { ...c, ...patch } : c));
+    if (!club?.id) return;
+    const dbPatch = {};
+    if ("name" in patch) dbPatch.name = patch.name;
+    if ("openTime" in patch) dbPatch.open_time = patch.openTime;
+    if ("closeTime" in patch) dbPatch.close_time = patch.closeTime;
+    if ("blockMinutes" in patch) dbPatch.block_minutes = patch.blockMinutes;
+    if ("bsPerUsd" in patch) dbPatch.bs_per_usd = patch.bsPerUsd;
+    if ("pagoMovil" in patch) dbPatch.pago_movil = patch.pagoMovil;
+    supabase.from("clubs").update(dbPatch).eq("id", club.id).then(({ error }) => {
+      if (error) console.error("updateClub:", error.message);
+    });
+  };
+
   // Estado de la sincronización con la API del BCV.
   const [rateStatus, setRateStatus] = useState({ loading: false, error: null, lastSync: null, source: "manual", effectiveDate: null });
 
@@ -918,7 +963,7 @@ export default function PickleballTournamentApp() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!data.EUR) throw new Error("La respuesta no trajo tasa EUR");
-      setClub((c) => ({ ...c, bsPerUsd: Number(data.EUR) }));
+      updateClub({ bsPerUsd: Number(data.EUR) });
       setRateStatus({ loading: false, error: null, lastSync: Date.now(), source: "bcv_eur", effectiveDate: data.effective_date });
     } catch (err) {
       setRateStatus((s) => ({
@@ -928,17 +973,41 @@ export default function PickleballTournamentApp() {
     }
   };
 
-  // Sincroniza al abrir la app y luego cada 30 minutos, mientras la pestaña siga abierta.
+  // Sincroniza en cuanto el club termina de cargar desde Supabase, y luego cada 30 minutos.
   useEffect(() => {
+    if (clubDataLoading) return;
     syncBcvRate();
     const interval = setInterval(syncBcvRate, 30 * 60 * 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [clubDataLoading]);
 
-  const [courts, setCourts] = useState([
-    { id: uid("court"), name: "Cancha 1", isPrivate: false, pricePerBlock: 15, memberPrice: 5, priceRules: [] },
-    { id: uid("court"), name: "Cancha 2", isPrivate: false, pricePerBlock: 15, memberPrice: 5, priceRules: [] },
-  ]);
+  const addCourt = async (data) => {
+    if (!club?.id) return;
+    const { data: row, error } = await supabase.from("courts").insert({
+      club_id: club.id, name: data.name, is_private: data.isPrivate,
+      price_per_block: data.pricePerBlock, member_price: data.memberPrice, price_rules: data.priceRules || [],
+    }).select().single();
+    if (error) { console.error("addCourt:", error.message); return; }
+    setCourts((cs) => [...cs, mapCourtRow(row)]);
+  };
+  const updateCourt = (id, patch) => {
+    setCourts((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    const dbPatch = {};
+    if ("name" in patch) dbPatch.name = patch.name;
+    if ("isPrivate" in patch) dbPatch.is_private = patch.isPrivate;
+    if ("pricePerBlock" in patch) dbPatch.price_per_block = patch.pricePerBlock;
+    if ("memberPrice" in patch) dbPatch.member_price = patch.memberPrice;
+    if ("priceRules" in patch) dbPatch.price_rules = patch.priceRules;
+    supabase.from("courts").update(dbPatch).eq("id", id).then(({ error }) => {
+      if (error) console.error("updateCourt:", error.message);
+    });
+  };
+  const removeCourt = (id) => {
+    setCourts((cs) => cs.filter((c) => c.id !== id));
+    supabase.from("courts").delete().eq("id", id).then(({ error }) => {
+      if (error) console.error("removeCourt:", error.message);
+    });
+  };
 
   // ---- Reservas (individual court bookings) ----
   const [bookings, setBookings] = useState([]);
@@ -1366,9 +1435,10 @@ export default function PickleballTournamentApp() {
     members: subscriptions.length,
   };
 
-  // Mientras se resuelve la sesión de Supabase (una sola vez, al cargar) no mostramos el
-  // login todavía -- evita el parpadeo de "no hay sesión" antes de confirmar que sí la hay.
-  if (authLoading) {
+  // Mientras se resuelve la sesión de Supabase o se cargan club/canchas (una sola vez, al
+  // cargar) no mostramos nada todavía -- evita el parpadeo de "no hay sesión"/datos vacíos
+  // antes de confirmar qué hay realmente.
+  if (authLoading || clubDataLoading) {
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen" />
     );
@@ -1397,7 +1467,7 @@ export default function PickleballTournamentApp() {
         <TopBar tab={effectiveTab} stats={stats} currentUser={currentUser} currentPlan={currentPlan} logoutUser={logoutUser} visibleNav={visibleNav} />
 
         <main className="max-w-7xl w-full mx-auto px-4 md:px-10 pt-6 pb-28 md:pb-16 flex-1">
-          {effectiveTab === "club" && role === "admin" && <ClubTab club={club} setClub={setClub} courts={courts} setCourts={setCourts} rateStatus={rateStatus} syncBcvRate={syncBcvRate} />}
+          {effectiveTab === "club" && role === "admin" && <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate} />}
 
           {effectiveTab === "estadisticas" && role === "admin" && (
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
@@ -1900,25 +1970,24 @@ function TorneoTab({ tournament, setTournament, dates }) {
 /* =========================================================================
    TAB: CANCHAS
    ========================================================================= */
-function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) {
+function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate }) {
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
   const [memberPrice, setMemberPrice] = useState(8);
   const [hasSpecialPricing, setHasSpecialPricing] = useState(false);
   const [newRules, setNewRules] = useState([]);
-  const setC = (k, v) => setClub((c) => ({ ...c, [k]: v }));
-  const setPagoMovil = (k, v) => setClub((c) => ({ ...c, pagoMovil: { ...c.pagoMovil, [k]: v } }));
+  const setC = (k, v) => updateClub({ [k]: v });
+  const setPagoMovil = (k, v) => updateClub({ pagoMovil: { ...club.pagoMovil, [k]: v } });
 
-  const addCourt = () => {
+  const handleAddCourt = () => {
     const n = name.trim() || `Cancha ${courts.length + 1}`;
-    setCourts((c) => [...c, {
-      id: uid("court"), name: n, isPrivate, pricePerBlock: Number(price) || 0, memberPrice: Number(memberPrice) || 0,
+    addCourt({
+      name: n, isPrivate, pricePerBlock: Number(price) || 0, memberPrice: Number(memberPrice) || 0,
       priceRules: hasSpecialPricing ? newRules : [],
-    }]);
+    });
     setName(""); setIsPrivate(false); setPrice(8); setMemberPrice(8); setHasSpecialPricing(false); setNewRules([]);
   };
-  const updateCourt = (id, patch) => setCourts((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
   const blocksPerDay = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes).length;
 
@@ -2030,13 +2099,13 @@ function ClubTab({ club, setClub, courts, setCourts, rateStatus, syncBcvRate }) 
           )}
         </div>
 
-        <button onClick={addCourt} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1.5 mb-4">
+        <button onClick={handleAddCourt} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1.5 mb-4">
           <Plus size={16} /> Agregar cancha
         </button>
 
         <div className="space-y-2">
           {courts.map((c) => (
-            <CourtCard key={c.id} court={c} onUpdate={(patch) => updateCourt(c.id, patch)} onRemove={() => setCourts((cs) => cs.filter((x) => x.id !== c.id))} />
+            <CourtCard key={c.id} court={c} onUpdate={(patch) => updateCourt(c.id, patch)} onRemove={() => removeCourt(c.id)} />
           ))}
           {courts.length === 0 && <p className="text-sm text-gray-400 italic">Aún no hay canchas registradas.</p>}
         </div>
