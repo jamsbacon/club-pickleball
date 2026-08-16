@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.1.3";
+const APP_VERSION = "2.2.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1072,6 +1072,10 @@ export default function PickleballTournamentApp() {
   const [users, setUsers] = useState([]);
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  // Supabase abre una sesión temporal de "recuperación" cuando el usuario entra desde el
+  // enlace del correo de reset -- no es un login normal, así que se intercepta con este flag
+  // para forzar la pantalla de "elige tu nueva contraseña" en vez de dejarlo pasar a la app.
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const currentUserId = session?.user?.id || null;
   const currentUser = users.find((u) => u.id === currentUserId) || null;
 
@@ -1095,7 +1099,8 @@ export default function PickleballTournamentApp() {
     const { data: sub } = supabase.auth.onAuthStateChange((event, newSession) => {
       setSession(newSession);
       if (event === "SIGNED_IN") fetchAllProfiles(); // trae el perfil recién creado/logueado
-      if (event === "SIGNED_OUT") setTab("club");
+      if (event === "PASSWORD_RECOVERY") setPasswordRecovery(true); // vino del link del correo de reset
+      if (event === "SIGNED_OUT") { setTab("club"); setPasswordRecovery(false); }
     });
     return () => sub.subscription.unsubscribe();
   }, []);
@@ -1121,6 +1126,30 @@ export default function PickleballTournamentApp() {
     return {};
   };
   const logoutUser = async () => { await supabase.auth.signOut(); };
+
+  // Envía el correo de "recuperar contraseña" (Supabase Auth). redirectTo apunta al origin
+  // actual (funciona igual en localhost que en producción) -- Supabase abre esa URL con un
+  // token de recuperación que el propio cliente detecta solo (detectSessionInUrl, on por
+  // defecto) y dispara el evento PASSWORD_RECOVERY arriba en onAuthStateChange.
+  const resetPasswordUser = async (email) => {
+    if (!email.trim()) return { error: "Escribe tu correo." };
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin,
+    });
+    if (error) return { error: error.message };
+    return {};
+  };
+
+  // Se llama desde la pantalla de "nueva contraseña" mientras dura la sesión temporal de
+  // recuperación. Al terminar, apaga passwordRecovery -- como la sesión ya es válida, el
+  // usuario entra directo a la app sin tener que loguearse de nuevo.
+  const updatePassword = async (newPassword) => {
+    if (!newPassword || newPassword.length < 6) return { error: "La contraseña debe tener al menos 6 caracteres." };
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) return { error: error.message };
+    setPasswordRecovery(false);
+    return {};
+  };
 
   const mapTournamentRow = (r) => ({
     id: r.id, name: r.name, startDate: r.start_date || "", endDate: r.end_date || "",
@@ -1650,11 +1679,23 @@ export default function PickleballTournamentApp() {
     );
   }
 
+  // Prioridad sobre currentUser: aunque la sesión temporal de recuperación ya tenga un
+  // usuario válido, no lo dejamos pasar a la app hasta que elija una contraseña nueva.
+  if (passwordRecovery) {
+    return (
+      <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
+        <GlobalStyles />
+        <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser}
+          resetPasswordUser={resetPasswordUser} updatePassword={updatePassword} forceReset />
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
         <GlobalStyles />
-        <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} />
+        <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />
       </div>
     );
   }
@@ -1749,14 +1790,21 @@ function GlobalStyles() {
    durante la sesión. Incluye una cuenta admin de muestra para poder ver
    ambas vistas (administrador y cliente) sin salir de la app.
    ========================================================================= */
-function AuthScreen({ club, registerUser, loginUser }) {
-  const [mode, setMode] = useState("login");
+function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePassword, forceReset }) {
+  const [mode, setMode] = useState(forceReset ? "reset" : "login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPassword2, setNewPassword2] = useState("");
   const [zone, setZone] = useState("");
   const [zoneStatus, setZoneStatus] = useState({ loading: false, error: null, auto: false });
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState(""); // mensaje de éxito (no es error), p.ej. "te enviamos un correo"
+
+  // La sesión temporal de recuperación viene del padre (App) -- mientras dure, no se puede
+  // salir de esta pantalla ni volver a login/register.
+  useEffect(() => { if (forceReset) setMode("reset"); }, [forceReset]);
 
   const detectZone = () => {
     if (!navigator.geolocation) {
@@ -1789,8 +1837,19 @@ function AuthScreen({ club, registerUser, loginUser }) {
   const [submitting, setSubmitting] = useState(false);
   const submit = async () => {
     setError("");
+    setNotice("");
+    if (mode === "reset" && newPassword !== newPassword2) { setError("Las contraseñas no coinciden."); return; }
     setSubmitting(true);
-    const result = mode === "login" ? await loginUser(email, password) : await registerUser({ name, email, password, zone });
+    let result;
+    if (mode === "login") result = await loginUser(email, password);
+    else if (mode === "register") result = await registerUser({ name, email, password, zone });
+    else if (mode === "recover") {
+      result = await resetPasswordUser(email);
+      // Mensaje genérico a propósito -- no confirma si el correo existe o no en el sistema.
+      if (!result?.error) setNotice("Si ese correo tiene una cuenta, te enviamos un enlace para restablecer la contraseña. Revisa tu bandeja de entrada (y spam).");
+    } else if (mode === "reset") {
+      result = await updatePassword(newPassword);
+    }
     setSubmitting(false);
     if (result?.error) setError(result.error);
   };
@@ -1823,36 +1882,85 @@ function AuthScreen({ club, registerUser, loginUser }) {
         <p className="text-center text-[10px] mono mb-4" style={{ color: "#5B6B85" }}>v{APP_VERSION}</p>
 
         <div className="rounded-[20px] p-6" style={{ background: COLORS.chalk }}>
-          <div className="flex gap-1.5 mb-5 p-1 rounded-xl" style={{ background: "#EDEFF4" }}>
-            <button onClick={() => { setMode("login"); setError(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
-              style={{ background: mode === "login" ? "#fff" : "transparent", color: mode === "login" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "login" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
-              Iniciar sesión
-            </button>
-            <button onClick={() => { setMode("register"); setError(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
-              style={{ background: mode === "register" ? "#fff" : "transparent", color: mode === "register" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "register" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
-              Crear cuenta
-            </button>
-          </div>
+          {(mode === "login" || mode === "register") && (
+            <div className="flex gap-1.5 mb-5 p-1 rounded-xl" style={{ background: "#EDEFF4" }}>
+              <button onClick={() => { setMode("login"); setError(""); setNotice(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
+                style={{ background: mode === "login" ? "#fff" : "transparent", color: mode === "login" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "login" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
+                Iniciar sesión
+              </button>
+              <button onClick={() => { setMode("register"); setError(""); setNotice(""); }} className="flex-1 py-2 rounded-lg text-sm font-bold"
+                style={{ background: mode === "register" ? "#fff" : "transparent", color: mode === "register" ? COLORS.courtDark : "#6B7688", boxShadow: mode === "register" ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
+                Crear cuenta
+              </button>
+            </div>
+          )}
+
+          {mode === "recover" && (
+            <div className="flex items-center gap-2 mb-5">
+              <button onClick={() => { setMode("login"); setError(""); setNotice(""); }} className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#EDEFF4" }}>
+                <ChevronLeft size={16} color="#6B7688" />
+              </button>
+              <p className="text-sm font-bold" style={{ color: COLORS.courtDark }}>Recuperar contraseña</p>
+            </div>
+          )}
+
+          {mode === "reset" && (
+            <div className="mb-5">
+              <p className="text-sm font-bold" style={{ color: COLORS.courtDark }}>Elige tu nueva contraseña</p>
+              <p className="text-xs mt-1" style={{ color: "#6B7688" }}>Ya verificamos tu correo desde el enlace que te enviamos.</p>
+            </div>
+          )}
 
           <div className="space-y-3">
             {mode === "register" && (
               <div><Label>Nombre completo</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre" /></div>
             )}
-            <div>
-              <Label>Correo</Label>
-              <div className="relative">
-                <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                <input type="email" style={{ ...inputStyle, paddingLeft: 32 }} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com" />
+            {(mode === "login" || mode === "register" || mode === "recover") && (
+              <div>
+                <Label>Correo</Label>
+                <div className="relative">
+                  <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                  <input type="email" style={{ ...inputStyle, paddingLeft: 32 }} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com"
+                    onKeyDown={(e) => e.key === "Enter" && submit()} />
+                </div>
               </div>
-            </div>
-            <div>
-              <Label>Contraseña</Label>
-              <div className="relative">
-                <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                <input type="password" style={{ ...inputStyle, paddingLeft: 32 }} value={password} onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
+            )}
+            {(mode === "login" || mode === "register") && (
+              <div>
+                <Label>Contraseña</Label>
+                <div className="relative">
+                  <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                  <input type="password" style={{ ...inputStyle, paddingLeft: 32 }} value={password} onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
+                </div>
+                {mode === "login" && (
+                  <button type="button" onClick={() => { setMode("recover"); setError(""); setNotice(""); }} className="text-[11px] font-bold mt-1.5" style={{ color: COLORS.court }}>
+                    ¿Olvidaste tu contraseña?
+                  </button>
+                )}
               </div>
-            </div>
+            )}
+
+            {mode === "reset" && (
+              <>
+                <div>
+                  <Label>Nueva contraseña</Label>
+                  <div className="relative">
+                    <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                    <input type="password" style={{ ...inputStyle, paddingLeft: 32 }} value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
+                  </div>
+                </div>
+                <div>
+                  <Label>Confirma la nueva contraseña</Label>
+                  <div className="relative">
+                    <KeyRound size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                    <input type="password" style={{ ...inputStyle, paddingLeft: 32 }} value={newPassword2} onChange={(e) => setNewPassword2(e.target.value)}
+                      placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
+                  </div>
+                </div>
+              </>
+            )}
 
             {mode === "register" && (
               <div>
@@ -1872,30 +1980,35 @@ function AuthScreen({ club, registerUser, loginUser }) {
               </div>
             )}
 
+            {notice && <p className="text-xs font-semibold" style={{ color: COLORS.court }}>{notice}</p>}
             {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
             <button disabled={submitting} onClick={submit} style={{ background: COLORS.clay, color: "#fff", opacity: submitting ? 0.6 : 1 }} className="w-full py-2.5 rounded-xl font-bold text-sm mt-1">
-              {submitting ? "Un momento…" : mode === "login" ? "Entrar" : "Crear cuenta"}
+              {submitting ? "Un momento…" : mode === "login" ? "Entrar" : mode === "register" ? "Crear cuenta" : mode === "recover" ? "Enviar enlace" : "Guardar nueva contraseña"}
             </button>
           </div>
 
-          <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-            <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres probar rápido alguna vista?</p>
-            <div className="space-y-2">
-              <button onClick={fillDemoClient} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                <Users size={13} /> Usar cuenta demo de cliente
-              </button>
-              <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                <Shield size={13} /> Usar cuenta demo de administrador
-              </button>
+          {(mode === "login" || mode === "register") && (
+            <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres probar rápido alguna vista?</p>
+              <div className="space-y-2">
+                <button onClick={fillDemoClient} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                  <Users size={13} /> Usar cuenta demo de cliente
+                </button>
+                <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                  <Shield size={13} /> Usar cuenta demo de administrador
+                </button>
+              </div>
+              <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>cliente@club.com · cliente123 &nbsp;·&nbsp; admin@club.com · admin123</p>
             </div>
-            <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>cliente@club.com · cliente123 &nbsp;·&nbsp; admin@club.com · admin123</p>
-          </div>
+          )}
         </div>
 
-        <p className="text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
-          Regístrate normal o usa una de las cuentas demo para entrar rápido a la vista de cliente o de administrador.
-        </p>
+        {(mode === "login" || mode === "register") && (
+          <p className="text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
+            Regístrate normal o usa una de las cuentas demo para entrar rápido a la vista de cliente o de administrador.
+          </p>
+        )}
       </div>
     </div>
   );
