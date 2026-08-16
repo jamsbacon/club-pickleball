@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from "react";
 import { createPortal } from "react-dom";
 import {
   Trophy, Users, MapPin, Calendar, ClipboardList, Plus, Trash2,
-  ChevronRight, ChevronDown, Shuffle, ArrowUpDown, CheckCircle2,
+  ChevronRight, ChevronDown, ChevronUp, Shuffle, ArrowUpDown, CheckCircle2,
   Clock, AlertTriangle, Swords, ListOrdered, Settings2, X,
   UserPlus, Pencil, Medal, Hourglass, DollarSign,
   CalendarClock, PartyPopper, Award, Lock, Unlock,
@@ -709,8 +709,24 @@ function computeStandings(teams, teamIds, matches) {
 /* =========================================================================
    SCHEDULER — assigns day / time / court to every match, guaranteeing that
    no player is ever booked into two matches at the same time slot.
+
+   `plan` (opcional, lo arma el asistente de CalendarioTab) controla el orden:
+     - plan.mode === "mixed": intercala partidos de todas las categorías
+       (primer partido pendiente de cada categoría, luego el segundo, ...) en
+       vez de agotar una categoría antes de pasar a la siguiente.
+     - plan.mode === "byCategory" (default si no hay plan): agenda cada
+       categoría completa antes de pasar a la siguiente, en el orden de
+       plan.categoryOrder (categorías no listadas ahí se agregan al final, en
+       su orden original).
+     - plan.dayCategories: { [dateISO]: [categoryId, ...] } — restringe qué
+       categorías pueden jugar cada fecha. Fecha ausente o array vacío =
+       sin restricción, cualquier categoría puede jugar ese día.
+   Dentro de cada categoría el orden interno nunca se toca: grupos primero
+   (round-robin, en el orden en que se crearon), luego bracket por ronda
+   (bye excluidos, no ocupan cancha) — una ronda de bracket jamás se agenda
+   antes que la anterior de su misma categoría.
    ========================================================================= */
-function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDuration, breakM, occupiedKeys = new Set()) {
+function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDuration, breakM, occupiedKeys = new Set(), plan = null) {
   const slots = [];
   const startM = timeToMinutes(dailyStart), endM = timeToMinutes(dailyEnd);
   dates.forEach((date) => {
@@ -736,53 +752,75 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   // reset previous schedule
   categories.forEach((c) => c.matches.forEach((m) => { m.day = null; m.time = null; m.courtId = null; }));
 
-  let groupQueue = [];
-  categories.forEach((c) => c.matches.filter((m) => m.phase === "group").forEach((m) => groupQueue.push(m)));
-
-  let slotIndex = 0;
-  while (groupQueue.length > 0 && slotIndex < slots.length) {
-    const slot = slots[slotIndex];
-    const usedPlayers = new Set();
-    for (let c = 0; c < courts.length && groupQueue.length > 0; c++) {
-      if (occupiedKeys.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
-      let foundIdx = -1;
-      for (let i = 0; i < groupQueue.length; i++) {
-        const ps = playersOf(groupQueue[i]);
-        if (ps.length > 0 && ps.every((p) => !usedPlayers.has(p))) { foundIdx = i; break; }
-      }
-      if (foundIdx === -1) continue;
-      const match = groupQueue.splice(foundIdx, 1)[0];
-      playersOf(match).forEach((p) => usedPlayers.add(p));
-      match.day = slot.date; match.time = minutesToTime(slot.timeMin); match.courtId = courts[c].id;
+  const orderedCats = (() => {
+    if (plan?.mode === "byCategory" && plan.categoryOrder?.length) {
+      const rank = {}; plan.categoryOrder.forEach((id, i) => (rank[id] = i));
+      return [...categories].sort((a, b) => (rank[a.id] ?? 999) - (rank[b.id] ?? 999));
     }
-    slotIndex++;
-  }
+    return categories;
+  })();
 
-  const unscheduledGroup = groupQueue.length;
-  let curIndex = slotIndex;
-
-  categories.forEach((cat) => {
+  // Cola propia de cada categoría: grupos (tal cual se crearon) + bracket agrupado
+  // por ronda/seq y ordenado ascendente -- exactamente el mismo criterio que usaba
+  // el loop de bracket original, solo que ahora se arma como lista en vez de
+  // consumirse con su propio cursor de slots independiente.
+  const perCatQueues = orderedCats.map((cat) => {
+    const group = cat.matches.filter((m) => m.phase === "group");
     const byRound = {};
     cat.matches.filter((m) => m.phase !== "group" && !isByeMatch(m)).forEach((m) => {
       const key = m.seq != null ? m.seq : m.round;
       byRound[key] = byRound[key] || [];
       byRound[key].push(m);
     });
-    Object.keys(byRound).map(Number).sort((a, b) => a - b).forEach((rn) => {
-      const matches = byRound[rn];
-      let mi = 0;
-      while (mi < matches.length) {
-        if (curIndex >= slots.length) return;
-        const slot = slots[curIndex];
-        for (let c = 0; c < courts.length && mi < matches.length; c++) {
-          if (occupiedKeys.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
-          const match = matches[mi++];
-          match.day = slot.date; match.time = minutesToTime(slot.timeMin); match.courtId = courts[c].id;
-        }
-        curIndex++;
-      }
-    });
+    const bracket = Object.keys(byRound).map(Number).sort((a, b) => a - b).flatMap((rn) => byRound[rn]);
+    return [...group, ...bracket];
   });
+
+  // "byCategory": concatena cada cola completa en el orden elegido (una categoría
+  // entera, luego la siguiente). "mixed": intercala posición a posición entre
+  // categorías, así las rondas quedan mezcladas en vez de una entera por vez.
+  const queue = [];
+  if (plan?.mode === "mixed") {
+    const maxLen = Math.max(0, ...perCatQueues.map((q) => q.length));
+    for (let i = 0; i < maxLen; i++) perCatQueues.forEach((q) => { if (q[i]) queue.push(q[i]); });
+  } else {
+    perCatQueues.forEach((q) => queue.push(...q));
+  }
+
+  const dateAllows = (categoryId, date) => {
+    const allowed = plan?.dayCategories?.[date];
+    return !allowed || allowed.length === 0 || allowed.includes(categoryId);
+  };
+
+  let slotIndex = 0;
+  while (queue.length > 0 && slotIndex < slots.length) {
+    const slot = slots[slotIndex];
+    const usedPlayers = new Set();
+    for (let c = 0; c < courts.length && queue.length > 0; c++) {
+      if (occupiedKeys.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
+      let foundIdx = -1;
+      for (let i = 0; i < queue.length; i++) {
+        const m = queue[i];
+        if (!dateAllows(m.categoryId, slot.date)) continue;
+        const ps = playersOf(m);
+        // Un partido de bracket con equipos aún no definidos (rondas futuras, o
+        // llave alimentada por grupos que todavía no cerraron) no tiene jugadores
+        // conocidos -- se agenda igual sin chequeo de choque, como hacía el loop
+        // de bracket original. Si ya se conocen, sí se exige que ninguno esté
+        // jugando otro partido en esta misma franja (cruzando categorías incluso).
+        if (ps.length > 0 && !ps.every((p) => !usedPlayers.has(p))) continue;
+        foundIdx = i;
+        break;
+      }
+      if (foundIdx === -1) continue;
+      const match = queue.splice(foundIdx, 1)[0];
+      playersOf(match).forEach((p) => usedPlayers.add(p));
+      match.day = slot.date; match.time = minutesToTime(slot.timeMin); match.courtId = courts[c].id;
+    }
+    slotIndex++;
+  }
+
+  const unscheduled = queue.length;
 
   const allScheduled = categories.flatMap((c) => c.matches).filter((m) => m.day);
   let start = null, end = null;
@@ -795,8 +833,8 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   });
 
   return {
-    capacityExceeded: unscheduledGroup > 0 || curIndex > slots.length,
-    unscheduledGroup,
+    capacityExceeded: unscheduled > 0,
+    unscheduledGroup: unscheduled,
     totalSlots: slots.length,
     start, end,
   };
@@ -833,7 +871,7 @@ function findScheduleConflicts(categories) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.10.0";
+const APP_VERSION = "2.11.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1731,7 +1769,7 @@ export default function PickleballTournamentApp() {
     return {};
   };
 
-  const runScheduler = () => {
+  const runScheduler = (plan = null) => {
     if (!tournament.startDate || !tournament.endDate) {
       alert("Define primero la fecha de inicio y fin del torneo.");
       setTab("torneos");
@@ -1751,7 +1789,7 @@ export default function PickleballTournamentApp() {
       return;
     }
     const clone = structuredClone(categories);
-    const info = buildSchedule(clone, tournamentCourts, dates, tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, occupiedKeys);
+    const info = buildSchedule(clone, tournamentCourts, dates, tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, occupiedKeys, plan);
     setCategories(clone);
     setScheduleInfo(info);
     setTab("torneos");
@@ -3177,7 +3215,7 @@ function TorneosSection(props) {
 
       {subTab === "calendario" && (
         <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} role={role}
-          scheduleInfo={scheduleInfo} tournament={tournament}
+          scheduleInfo={scheduleInfo} tournament={tournament} dates={dates}
           matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM} />
       )}
 
@@ -3774,9 +3812,113 @@ function PodiumSlot({ place, label }) {
 /* =========================================================================
    TAB: CALENDARIO
    ========================================================================= */
-function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, matchDuration, setMatchDuration, breakM, setBreakM, role }) {
+// Asistente que arma el `plan` que consume buildSchedule: modo de distribución (mezcladas
+// entre categorías vs. una categoría completa por vez, con su orden) + qué categorías puede
+// jugar cada día del torneo (vacío = cualquiera). Estado local del modal, no persiste entre
+// aperturas -- mismo patrón que matchDuration/breakM (se resetea a defaults cada sesión).
+function SchedulerWizardModal({ categories, dates, onClose, onConfirm }) {
+  const [mode, setMode] = useState("mixed");
+  const [categoryOrder, setCategoryOrder] = useState(categories.map((c) => c.id));
+  const [dayCategories, setDayCategories] = useState({});
+
+  const orderedCats = categoryOrder.map((id) => categories.find((c) => c.id === id)).filter(Boolean);
+  const moveCat = (idx, dir) => {
+    const next = [...categoryOrder];
+    const target = idx + dir;
+    if (target < 0 || target >= next.length) return;
+    [next[idx], next[target]] = [next[target], next[idx]];
+    setCategoryOrder(next);
+  };
+  const toggleDayCat = (date, catId) => {
+    setDayCategories((prev) => {
+      const cur = prev[date] || [];
+      const next = cur.includes(catId) ? cur.filter((id) => id !== catId) : [...cur, catId];
+      return { ...prev, [date]: next };
+    });
+  };
+
+  const confirm = () => { onConfirm({ mode, categoryOrder, dayCategories }); onClose(); };
+
+  return (
+    <Modal onClose={onClose} maxWidth={640}>
+      <div className="p-5 sm:p-6 space-y-5">
+        <div className="flex items-start justify-between gap-3">
+          <SectionTitle sub="Cómo se reparten las rondas en el calendario. Se aplica cada vez que generes o actualices.">Asistente de distribución</SectionTitle>
+          <button onClick={onClose} className="text-gray-400 hover:text-red-500 shrink-0"><X size={18} /></button>
+        </div>
+
+        <div>
+          <Label>Modo de distribución</Label>
+          <div className="flex gap-1.5">
+            <button type="button" onClick={() => setMode("mixed")} className="flex-1 px-3 py-2.5 rounded-xl text-sm font-semibold text-left"
+              style={{ background: mode === "mixed" ? COLORS.court : "#EAEEF5", color: mode === "mixed" ? "#fff" : COLORS.ink }}>
+              Mezcladas entre categorías
+              <span className="block text-[11px] font-normal mt-0.5" style={{ color: mode === "mixed" ? "#DCE6F0" : "#6B7688" }}>Se alternan partidos de todas las categorías</span>
+            </button>
+            <button type="button" onClick={() => setMode("byCategory")} className="flex-1 px-3 py-2.5 rounded-xl text-sm font-semibold text-left"
+              style={{ background: mode === "byCategory" ? COLORS.court : "#EAEEF5", color: mode === "byCategory" ? "#fff" : COLORS.ink }}>
+              Por categoría completa
+              <span className="block text-[11px] font-normal mt-0.5" style={{ color: mode === "byCategory" ? "#DCE6F0" : "#6B7688" }}>Una categoría entera, luego la siguiente</span>
+            </button>
+          </div>
+        </div>
+
+        {mode === "byCategory" && (
+          <div>
+            <Label>Orden de las categorías</Label>
+            <div className="space-y-1.5">
+              {orderedCats.map((c, idx) => (
+                <div key={c.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: "#F5F6F9" }}>
+                  <span className="text-sm font-medium">{idx + 1}. {c.name}</span>
+                  <div className="flex gap-1">
+                    <button type="button" disabled={idx === 0} onClick={() => moveCat(idx, -1)} className="p-1 rounded disabled:opacity-30" style={{ color: COLORS.court }}><ChevronUp size={16} /></button>
+                    <button type="button" disabled={idx === orderedCats.length - 1} onClick={() => moveCat(idx, 1)} className="p-1 rounded disabled:opacity-30" style={{ color: COLORS.court }}><ChevronDown size={16} /></button>
+                  </div>
+                </div>
+              ))}
+              {orderedCats.length === 0 && <p className="text-xs text-gray-400">No hay categorías con partidos generados todavía.</p>}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <Label>Qué se juega cada día</Label>
+          <p className="text-[11px] mb-2" style={{ color: "#6B7688" }}>Marca categorías solo en los días que quieras restringir — un día sin ninguna marcada admite cualquier categoría.</p>
+          <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+            {dates.map((date) => (
+              <div key={date}>
+                <p className="text-xs font-bold mb-1" style={{ color: COLORS.courtDark }}>{formatDateHuman(date)}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {categories.map((c) => {
+                    const active = (dayCategories[date] || []).includes(c.id);
+                    return (
+                      <button key={c.id} type="button" onClick={() => toggleDayCat(date, c.id)}
+                        className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
+                        style={{ background: active ? COLORS.court : "#EAEEF5", color: active ? "#fff" : COLORS.ink }}>
+                        {c.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {dates.length === 0 && <p className="text-xs text-gray-400">Define fechas de inicio/fin del torneo en Generalidades primero.</p>}
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2.5 rounded-xl font-semibold text-sm" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+          <button onClick={confirm} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm">Generar calendario</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, role }) {
   const isAdmin = role === "admin";
   const [filterCat, setFilterCat] = useState("all");
+  const [wizardOpen, setWizardOpen] = useState(false);
   // Orden canónico de canchas = el orden en que viven en Club -- así "por horario y por
   // cancha" es estable (mismo orden cada vez que se recalcula), no el orden en que
   // buildSchedule() las fue llenando.
@@ -3809,6 +3951,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 
   return (
     <div className="mt-2 space-y-5">
+      {isAdmin && wizardOpen && (
+        <SchedulerWizardModal categories={categories} dates={dates}
+          onClose={() => setWizardOpen(false)}
+          onConfirm={(plan) => runScheduler(plan)} />
+      )}
       {isAdmin && (
         <Card>
           <SectionTitle sub="Duración de cada partido e intervalo entre partidos. Puedes ajustarlos antes o después de generar el calendario.">Duración de partidos</SectionTitle>
@@ -3835,7 +3982,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
               <SectionTitle sub={isAdmin ? "Genera (o vuelve a generar) los horarios evitando que un jugador tenga dos partidos a la vez." : "Horario generado por el organizador del torneo."}>Calendario de juego</SectionTitle>
             </div>
             {isAdmin && (
-              <button onClick={runScheduler} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
+              <button onClick={() => setWizardOpen(true)} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
                 <Clock size={16} /> {scheduleInfo ? "Actualizar calendario" : "Generar calendario"}
               </button>
             )}

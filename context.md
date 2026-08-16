@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.10.0 — con backend real
+## Estado actual: v2.11.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -169,34 +169,76 @@ navegador.
   sí es real: esa secuencialidad desperdicia canchas (no corre categorías en paralelo
   cuando sería seguro), y arreglar eso es esencialmente el mismo problema que el
   siguiente punto pendiente.
+- **v2.11.0 — Sesión 1 del rediseño de Calendario: asistente de distribución + motor
+  nuevo** (Sesión 2 — drag-and-drop manual — sigue pendiente, ver "Lo que falta" #1).
+  `buildSchedule()` se reescribió por completo: antes eran DOS loops independientes (fase
+  de grupos de TODAS las categorías mezcladas en una cola por cursor de slot compartido,
+  después brackets categoría por categoría con OTRO cursor que arrancaba donde el primero
+  había quedado) — ahora es un solo loop que consume una cola unificada por categoría
+  (grupos + bracket propio, respetando que una ronda de bracket nunca se agenda antes que
+  la anterior de su misma categoría). Nuevo parámetro `plan` (opcional, `null` = sin
+  restricciones): `{ mode: "mixed" | "byCategory", categoryOrder, dayCategories }`.
+  "mixed" intercala partidos de todas las categorías posición a posición; "byCategory"
+  concatena cada cola completa en el orden elegido (esto además corrige que antes los
+  brackets NUNCA se paralelizaban entre categorías, ver nota de v2.10.0 arriba — ahora si
+  el plan lo permite, sí). El chequeo de choque de jugador (`usedPlayers` por slot) ahora
+  también cubre partidos de bracket (antes solo cubría grupos) — corrige un hueco latente
+  donde un jugador anotado en dos categorías podía, en teoría, terminar con dos partidos
+  de bracket a la misma hora sin que nada lo evitara (aunque en la práctica nunca pasaba,
+  por ser secuencial). `findScheduleConflicts()` sigue igual, como red de seguridad.
+  Nuevo componente `SchedulerWizardModal` en `CalendarioTab`: el botón "Generar/Actualizar
+  calendario" abre el asistente en vez de correr el motor directo; arma el `plan` (modo,
+  orden de categorías con botones subir/bajar — sin librería de drag, ver nota de scope
+  más abajo — y qué categorías puede jugar cada fecha del torneo, vacío = sin
+  restricción) y se lo pasa a `runScheduler(plan)`. Estado del wizard es local, no
+  persiste entre aperturas (mismo patrón que `matchDuration`/`breakM`).
+  **Alcance acordado con el usuario** (decisiones tomadas antes de programar):
+  dropdown "qué se juega cada día" trabaja a nivel de categoría completa, NO de ronda
+  individual dentro de una fase de grupos — los partidos de grupo no guardan índice de
+  ronda hoy (`round: null` siempre, ver `makeGroupMatch`), bajar a ese nivel de
+  granularidad requeriría agregar ese campo primero; se decidió no hacerlo en esta
+  sesión. Sesión 2 (drag-and-drop) usará tap-origen→tap-destino, no arrastre físico (la
+  app se usa mucho desde el celular), y los partidos movidos a mano quedarán "pineados"
+  para que un futuro "Actualizar calendario" no los pise sin avisar.
+  **Verificación**: la app no pudo probarse end-to-end en el navegador de esta sesión — la
+  red del sandbox no resuelve el host real de Supabase (`ERR_NAME_NOT_RESOLVED`), no es un
+  bug del código. Se verificó el motor nuevo con un harness de Node aislado (funciones
+  puras copiadas 1:1 de `buildSchedule`/`findScheduleConflicts`) contra datos sintéticos:
+  modo mixto intercala categorías, modo por-categoría respeta el orden pedido, la
+  restricción por día excluye correctamente la categoría no permitida, un jugador
+  anotado en dos categorías nunca queda con doble partido a la misma hora, y una ronda de
+  bracket con equipos aún no definidos se agenda igual (sin romper) después de que
+  termine la ronda anterior de su categoría. **Falta la pasada visual real** (abrir el
+  wizard, generar un calendario de un torneo real y mirarlo) — pendiente para la próxima
+  vez que se pueda levantar el dev server contra el Supabase real o probar en producción.
 
 ## Lo que falta / próximos pasos
 
-1. **Calendario: reprogramar partidos a mano (drag-and-drop) + asistente de
-   distribución** — el pedazo grande que se descartó a propósito de v2.10.0, confirmado
-   con el usuario para hacerse en sesión aparte. Incluye:
-   - Arrastrar un partido ya agendado para moverlo a otro horario/cancha manualmente.
-   - Asistente que pregunte al organizador cómo distribuir las rondas: mezcladas entre
-     categorías (round-robin de rondas) vs. por categoría completa (una entera, luego la
-     siguiente, pidiendo el orden), y qué rondas/categorías van en cada día (dropdown de
-     día → elegir qué se juega ese día).
-   - Esto es, en la práctica, un rediseño del algoritmo de `buildSchedule` (hoy agenda
-     categorías secuencialmente, sin paralelizar) — motor de scheduling nuevo, la parte
-     más algorítmicamente densa del archivo. `findScheduleConflicts()` (v2.10.0) ya queda
-     como red de seguridad para validar cualquier resultado de este trabajo futuro.
-2. **Confirmar en el Dashboard de Supabase** (no verificable por CLI): Authentication →
+1. **Calendario: drag-and-drop manual para reprogramar partidos** (Sesión 2 del punto
+   grande de Calendario — Sesión 1, el asistente de distribución + motor nuevo, se hizo en
+   v2.11.0, ver arriba). Falta:
+   - Vista de grilla (día × cancha) con los partidos ya agendados.
+   - Mover un partido a otra celda vía tap-origen → tap-destino (no arrastre físico,
+     decidido con el usuario por el uso mobile de la app), validando en el momento
+     (cancha libre, jugadores libres) antes de aceptar el movimiento.
+   - Marcar como "pineado" un partido movido a mano para que el asistente (v2.11.0) no lo
+     recalcule/pise la próxima vez que se corra "Actualizar calendario" — requiere un
+     campo nuevo en el modelo de partido y que `buildSchedule` lo respete.
+2. **Pasada visual del asistente v2.11.0** en un torneo real (dev server contra Supabase
+   real o producción) — no se pudo hacer en la sesión que lo construyó, ver nota arriba.
+3. **Confirmar en el Dashboard de Supabase** (no verificable por CLI): Authentication →
    URL Configuration → Redirect URLs debe incluir `https://club-pickleball.vercel.app/**`
    para que el link de recuperación de contraseña (v2.2.0) redirija bien.
-3. Tab **Usuarios** sigue siendo de solo lectura — no hay edición de rol/membresía desde
+4. Tab **Usuarios** sigue siendo de solo lectura — no hay edición de rol/membresía desde
    la UI (cambiar `role`/`plan_id` a mano sigue siendo vía SQL/dashboard).
-4. **Vencimiento de membresía es solo informativo** — no hay revocación automática de
+5. **Vencimiento de membresía es solo informativo** — no hay revocación automática de
    precio de miembro al vencer. Si se necesita bloquear acceso real, falta el chequeo de
    `plan_expires_at` en `courtPriceInfo`/`memberDiscountPct`.
-5. Limpieza de archivos huérfanos en el bucket `open-play-images` de Storage no está
+6. Limpieza de archivos huérfanos en el bucket `open-play-images` de Storage no está
    implementada (borrar un Open Play no borra su imagen si otras filas de la serie la
    comparten) — costo bajo, no urgente.
-6. El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
+7. El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
    de detalle de espaciado mobile que Actividades — si el usuario pide lo mismo en otra
    pestaña, aplicar el mismo patrón (medir con JS/`getBoundingClientRect`, no a ojo).
-7. No hay tests ni linter configurados (a propósito, según CLAUDE.md) — no asumir
+8. No hay tests ni linter configurados (a propósito, según CLAUDE.md) — no asumir
    `npm test`/`npm run lint`.
