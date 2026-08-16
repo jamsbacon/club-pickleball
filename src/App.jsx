@@ -6,7 +6,7 @@ import {
   UserPlus, Pencil, Medal, Hourglass, DollarSign,
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
-  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search
+  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 
@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1082,7 +1082,7 @@ export default function PickleballTournamentApp() {
   const mapProfileRow = (p) => ({
     id: p.id, name: p.name, email: p.email, role: p.role, planId: p.plan_id,
     zone: p.zone || "", duprRating: p.dupr_rating ?? null, phone: p.phone || "",
-    createdAt: new Date(p.created_at).getTime(),
+    planExpiresAt: p.plan_expires_at || null, createdAt: new Date(p.created_at).getTime(),
   });
 
   const fetchAllProfiles = async () => {
@@ -1637,9 +1637,33 @@ export default function PickleballTournamentApp() {
     }).select().single();
     if (error) { console.error("subscribeToPlan:", error.message); return; }
     setSubscriptions((p) => [...p, mapSubscriptionRow(row)]);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId } : u)));
-    const { error: profErr } = await supabase.from("profiles").update({ plan_id: planId }).eq("id", currentUser?.id);
+    // Todos los planes pagos son mensuales -- al (re)suscribirse, vence en 1 mes desde hoy.
+    // Un plan gratuito ($0, ej. "Sin membresía") no vence.
+    const plan = membershipPlans.find((p) => p.id === planId);
+    let expiresAt = null;
+    if (plan && plan.monthlyPrice > 0) {
+      const d = new Date();
+      d.setMonth(d.getMonth() + 1);
+      expiresAt = d.toISOString().slice(0, 10);
+    }
+    setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId, planExpiresAt: expiresAt } : u)));
+    const { error: profErr } = await supabase.from("profiles").update({ plan_id: planId, plan_expires_at: expiresAt }).eq("id", currentUser?.id);
     if (profErr) console.error("subscribeToPlan (profiles):", profErr.message);
+  };
+
+  // Auto-edición de perfil (nombre, WhatsApp, zona, DUPR) desde el tab Perfil -- nunca manda
+  // role/plan_id, esos solo cambian vía subscribeToPlan o el admin (además, el trigger
+  // profiles_prevent_role_self_escalation revierte cualquier intento de cambiar el role propio).
+  const updateProfile = async (patch) => {
+    setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, ...patch } : u)));
+    const dbPatch = {};
+    if ("name" in patch) dbPatch.name = patch.name;
+    if ("zone" in patch) dbPatch.zone = patch.zone;
+    if ("phone" in patch) dbPatch.phone = patch.phone;
+    if ("duprRating" in patch) dbPatch.dupr_rating = patch.duprRating === "" ? null : patch.duprRating;
+    const { error } = await supabase.from("profiles").update(dbPatch).eq("id", currentUser?.id);
+    if (error) return { error: error.message };
+    return {};
   };
 
   const runScheduler = () => {
@@ -1765,6 +1789,10 @@ export default function PickleballTournamentApp() {
             <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts}
               addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role} />
+          )}
+
+          {effectiveTab === "perfil" && (
+            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} updateProfile={updateProfile} setTab={setTab} />
           )}
         </main>
       </div>
@@ -2061,6 +2089,7 @@ const NAV_ITEMS = [
   { id: "reservas", label: "Reservas", short: "Reservas", icon: CalendarClock, sub: "Reserva un bloque de cancha disponible", roles: ["admin", "cliente"] },
   { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin", "cliente"] },
   { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["admin", "cliente"] },
+  { id: "perfil", label: "Perfil", short: "Perfil", icon: UserCircle, sub: "Tus datos y tu membresía", roles: ["admin", "cliente"] },
 ];
 
 function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUser, visibleNav }) {
@@ -4972,6 +5001,10 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                 {orderedPlans.map((plan, idx) => {
                   const badge = badgeFor(idx);
                   const isCurrent = currentUser.planId === plan.id;
+                  // Una membresía vencida sigue siendo "el plan actual" pero debe poder
+                  // renovarse -- si no, el botón queda deshabilitado para siempre.
+                  const isExpired = isCurrent && !!currentUser.planExpiresAt && currentUser.planExpiresAt < new Date().toISOString().slice(0, 10);
+                  const locked = isCurrent && !isExpired;
                   return (
                     <th key={plan.id} className="align-bottom px-2 pb-0 text-center" style={{ minWidth: 128 }}>
                       <div className="rounded-t-2xl pt-3.5 pb-4 px-2"
@@ -4981,10 +5014,10 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                         </div>
                         <p className="text-[13px] font-extrabold uppercase tracking-wide leading-tight" style={{ color: idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : COLORS.chalk }}>{plan.name}</p>
                         {!isAdmin && (
-                          <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={isCurrent}
+                          <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={locked}
                             className="w-full mt-3 py-2 rounded-lg text-[11px] font-extrabold"
-                            style={{ background: isCurrent ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)", color: isCurrent ? "#6B7688" : badge ? badge.text : "#fff" }}>
-                            {isCurrent ? "Tu plan" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
+                            style={{ background: locked ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)", color: locked ? "#6B7688" : badge ? badge.text : "#fff" }}>
+                            {locked ? "Tu plan" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
                           </button>
                         )}
                         {isAdmin && (
@@ -5029,6 +5062,140 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
             onConfirm={(checkout) => { subscribeToPlan(selectedPlan.id, checkout); setCheckoutPlanId(null); }} onCancel={() => setCheckoutPlanId(null)} confirmLabel="Confirmar suscripción" />
         </Card>
       )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   TAB: PERFIL — datos propios (autoservicio) + resumen de la membresía.
+   Cualquier usuario (admin o cliente) tiene uno; el guardado solo toca
+   name/zone/phone/dupr_rating -- role y plan_id nunca se tocan desde aquí
+   (ver updateProfile en el componente principal y el trigger de la migración
+   profile_plan_expiry.sql que revierte cualquier intento de auto-ascenderse).
+   ========================================================================= */
+function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
+  const [name, setName] = useState(currentUser.name);
+  const [phone, setPhone] = useState(currentUser.phone || "");
+  const [zone, setZone] = useState(currentUser.zone || "");
+  const [duprRating, setDuprRating] = useState(currentUser.duprRating ?? "");
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const dirty = name !== currentUser.name || phone !== (currentUser.phone || "") ||
+    zone !== (currentUser.zone || "") || String(duprRating) !== String(currentUser.duprRating ?? "");
+
+  const save = async () => {
+    if (!name.trim()) { setError("El nombre no puede quedar vacío."); return; }
+    setError(""); setNotice(""); setSaving(true);
+    const result = await updateProfile({ name: name.trim(), phone: phone.trim(), zone: zone.trim(), duprRating: duprRating === "" ? "" : Number(duprRating) });
+    setSaving(false);
+    if (result?.error) setError(result.error);
+    else setNotice("Datos guardados.");
+  };
+
+  const plan = membershipPlans.find((p) => p.id === currentUser.planId) || membershipPlans[0] || null;
+  const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
+  const today = new Date().toISOString().slice(0, 10);
+  const isExpired = isPaidPlan && !!currentUser.planExpiresAt && currentUser.planExpiresAt < today;
+
+  return (
+    <div className="mt-2 space-y-6 max-w-2xl">
+      <SectionTitle sub="Tus datos de contacto y tu membresía.">Perfil</SectionTitle>
+
+      <Card>
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center shrink-0" style={{ background: currentUser.role === "admin" ? COLORS.clay : COLORS.court }}>
+            {currentUser.role === "admin" ? <Shield size={18} color="#fff" /> : <UserCircle size={20} color="#fff" />}
+          </div>
+          <div className="min-w-0">
+            <p className="font-bold truncate" style={{ color: COLORS.courtDark }}>{currentUser.name}</p>
+            <p className="text-xs" style={{ color: "#6B7688" }}>{currentUser.role === "admin" ? "Administrador" : "Cliente"} · miembro desde {formatDateHuman(new Date(currentUser.createdAt).toISOString().slice(0, 10))}</p>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div><Label>Nombre completo</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></div>
+          <div>
+            <Label>Correo</Label>
+            <div className="relative">
+              <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+              <input disabled style={{ ...inputStyle, paddingLeft: 32, background: "#F4F5F8", color: "#8891A0" }} value={currentUser.email} />
+            </div>
+            <p className="text-[10px] mt-1" style={{ color: "#8891A0" }}>Para cambiar el correo, contacta al club.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Nivel DUPR</Label>
+              <div className="relative">
+                <Medal size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                <input type="number" step="0.01" min="2" max="8" style={{ ...inputStyle, paddingLeft: 32 }} value={duprRating}
+                  onChange={(e) => setDuprRating(e.target.value)} placeholder="Ej. 3.5" />
+              </div>
+            </div>
+            <div>
+              <Label>WhatsApp</Label>
+              <div className="relative">
+                <Smartphone size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                <input type="tel" style={{ ...inputStyle, paddingLeft: 32 }} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="0414-1234567" />
+              </div>
+            </div>
+          </div>
+          <div>
+            <Label>Zona / sector</Label>
+            <div className="relative">
+              <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+              <input style={{ ...inputStyle, paddingLeft: 32 }} value={zone} onChange={(e) => setZone(e.target.value)} placeholder="Ej. Chacao, Caracas" />
+            </div>
+          </div>
+
+          {notice && <p className="text-xs font-semibold" style={{ color: COLORS.court }}>{notice}</p>}
+          {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
+
+          <button disabled={!dirty || saving} onClick={save} style={{ background: COLORS.courtDark, color: "#fff", opacity: !dirty || saving ? 0.5 : 1 }}
+            className="px-4 py-2.5 rounded-xl font-bold text-sm">
+            {saving ? "Guardando…" : "Guardar cambios"}
+          </button>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide" style={{ color: "#6B7688" }}>Tu membresía</p>
+            <p className="disp text-xl mt-0.5" style={{ color: COLORS.courtDark }}>{plan?.name || "Sin membresía"}</p>
+          </div>
+          <span className="px-2.5 py-1 rounded-full text-[11px] font-bold" style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
+            {isExpired ? "Vencida" : isPaidPlan ? "Activa" : "Pago por uso"}
+          </span>
+        </div>
+
+        {isPaidPlan ? (
+          <p className="text-sm" style={{ color: "#6B7688" }}>
+            {formatMoney(plan.monthlyPrice)}/mes · {isExpired ? "venció el " : "vence el "}
+            <span className="font-semibold" style={{ color: isExpired ? COLORS.clay : COLORS.ink }}>
+              {currentUser.planExpiresAt ? formatDateFull(currentUser.planExpiresAt) : "—"}
+            </span>
+          </p>
+        ) : (
+          <p className="text-sm" style={{ color: "#6B7688" }}>No tienes una membresía paga — pagas por uso en cada reserva, Open Play o clase.</p>
+        )}
+
+        {plan?.rateCard?.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {plan.rateCard.slice(0, 4).map((r) => (
+              <li key={r.label} className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
+                <Check size={12} color={COLORS.court} /> {r.label} — {r.price > 0 ? formatMoney(r.price) : "Gratis"}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <button onClick={() => setTab("membresias")} className="w-full mt-4 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5"
+          style={{ background: COLORS.clay, color: "#fff" }}>
+          <Sparkles size={14} /> {isExpired ? "Renovar membresía" : isPaidPlan ? "Ver otros planes / mejorar" : "Ver planes de membresía"}
+        </button>
+      </Card>
     </div>
   );
 }

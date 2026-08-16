@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.3.0 — con backend real
+## Estado actual: v2.4.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -106,7 +106,25 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
 - El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
   de detalle de espaciado mobile que Actividades — si el usuario pide lo mismo en otra
   pestaña, aplicar el mismo patrón (medir con JS, no solo comparar screenshots).
-- No hay edición de perfil (el propio usuario no puede cambiar su nombre/zona/DUPR/teléfono
-  desde la UI una vez registrado — solo el admin puede editar `profiles` directo en Supabase).
 - La pestaña Usuarios es solo lectura (listar + buscar); no tiene edición de rol/membresía
   desde la UI todavía (cambiar `role`/`plan_id` a mano sigue siendo vía SQL/dashboard).
+- **Tab "Perfil"** (v2.4.0, todos los roles): cada usuario edita su propio
+  name/zone/phone/dupr_rating (`updateProfile`, nunca role/plan_id) y ve su membresía —
+  plan actual, `plan_expires_at` y CTA a Membresías (`setTab("membresias")`) para
+  suscribirse/mejorar/renovar. **Vencimiento de membresía es nuevo**: todo plan pago se
+  asume mensual, `subscribeToPlan` pone `plan_expires_at = hoy + 1 mes` en cada
+  (re)suscripción; un plan gratuito no vence. `MembresiasTab` ahora distingue "tu plan
+  vigente" (bloqueado) de "tu plan vencido" (botón pasa a "Renovar") comparando
+  `plan_expires_at` con la fecha de hoy — antes de esto, un miembro vencido no podía
+  volver a suscribirse al mismo plan porque el botón quedaba deshabilitado para siempre.
+  **No hay revocación automática de beneficios al vencer** (ni cron ni chequeo de backend)
+  — el vencimiento es solo informativo/UI hasta que el usuario mismo entra a Perfil o
+  Membresías; si se necesita bloquear acceso real a precios de miembro al vencer, falta
+  ese chequeo en los call sites de `courtPriceInfo`/`memberDiscountPct`.
+- **RLS endurecida**: como Perfil ahora deja que cualquier cliente autenticado escriba su
+  propia fila de `profiles` (antes solo lo hacía `subscribeToPlan` con `plan_id`), se
+  agregó un trigger (`profiles_prevent_role_self_escalation`, migración
+  `profile_plan_expiry.sql`) que revierte cualquier intento de un no-admin de cambiarse su
+  propio `role` — la política RLS "own profile update" es a nivel de fila, no de columna,
+  así que sin este trigger un cliente podría auto-ascenderse a admin llamando al API
+  directo (no vía la UI, que nunca manda ese campo, pero sí posible desde devtools).
