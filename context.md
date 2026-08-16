@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.5.0 — con backend real
+## Estado actual: v2.6.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -113,6 +113,18 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   quería la estética de máquina de escribir).
 - Espaciado mobile en Actividades ajustado para que coincida pixel a pixel con el de
   Torneos (medido con `getBoundingClientRect`, no a ojo).
+- **Checkout de Actividades/Reservas movido a modal** (v2.6.0). Antes `EventDetail`/
+  `ClassDetail` y el flujo de Reservas (canchas disponibles → confirmar) se insertaban
+  como cards apiladas debajo de lo que el usuario ya estaba viendo — en mobile sobre todo,
+  el checkout quedaba fuera de la pantalla y había que hacer scroll para encontrarlo (mala
+  conversión). Nuevo componente reutilizable `Modal` (overlay centrado, cierra con Escape
+  o clic afuera, bloquea scroll del fondo, scroll propio si el contenido no cabe) — se usa
+  para envolver `EventDetail`/`ClassDetail` en `EventosTab` y para el paso
+  canchas-disponibles→confirmar en `ReservasTab` (ambos pasos ahora viven en el MISMO
+  modal, "Cancelar" en el checkout vuelve a la lista de canchas en vez de cerrar todo).
+  De paso, el botón "Ver más" de las cards de Actividades ahora dice **"Inscribirme"**
+  (Open Play/Clase) o **"Ver torneo"** (Torneo) — pedido explícito del usuario, mejor CTA
+  que un genérico "Ver más".
 - **Recuperación de contraseña** (v2.2.0): link "¿Olvidaste tu contraseña?" en login →
   `supabase.auth.resetPasswordForEmail()` → el evento `PASSWORD_RECOVERY` de
   `onAuthStateChange` fuerza una pantalla de "nueva contraseña" (tiene prioridad sobre

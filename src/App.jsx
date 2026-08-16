@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.5.0";
+const APP_VERSION = "2.6.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2251,6 +2251,31 @@ function Card({ children, className = "", style = {} }) {
     <div className={`rounded-[20px] p-5 md:p-6 ${className}`}
       style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, boxShadow: "0 1px 2px rgba(20,30,25,.04), 0 16px 32px -22px rgba(20,30,25,.22)", ...style }}>
       {children}
+    </div>
+  );
+}
+// Overlay genérico para flujos de inscripción/checkout (Actividades, Reservas) -- antes
+// estos paneles se insertaban en el flujo normal de la página, debajo de lo que el usuario
+// ya estaba viendo, obligando a scrollear para encontrarlos (mala conversión, sobre todo en
+// mobile). Ahora aparecen centrados sobre el contenido, con scroll propio si el contenido no
+// cabe, se cierran con Escape o tocando fuera, y bloquean el scroll del fondo mientras están
+// abiertos.
+function Modal({ onClose, children, maxWidth = 560 }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
+      style={{ background: "rgba(15,23,32,0.55)" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="w-full my-6 sm:my-0" style={{ maxWidth }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -4237,42 +4262,50 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
         </div>
       </Card>
 
+      {/* Antes "canchas disponibles" y "confirmar" se apilaban como cards debajo del horario,
+         empujando al usuario a hacer scroll para llegar al checkout. Ahora es un solo modal:
+         primero elegir cancha, luego (mismo panel) confirmar -- "Cancelar" en el checkout
+         vuelve a la lista de canchas en vez de cerrar todo, igual que ya hacía EventDetail. */}
       {selectedTime !== null && (
-        <Card>
-          <SectionTitle sub="Toca una cancha para continuar.">Canchas disponibles · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})</SectionTitle>
-          <div className="flex flex-wrap gap-2">
-            {availableCourtsAt(selectedTime).map((c) => {
-              const { base, member } = courtPriceInfo(c, selectedTime);
-              const shownPrice = isMember ? member : base;
-              const isSel = courtId === c.id;
-              return (
-                <button key={c.id} onClick={() => setCourtId(c.id)}
-                  className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5"
-                  style={{ background: isSel ? COLORS.court : "#EAEEF5", color: isSel ? "#fff" : COLORS.ink }}>
-                  {c.isPrivate && <Lock size={12} />} {c.name}
-                  <span className="text-[10px] font-semibold opacity-80">{formatMoney(shownPrice)}</span>
-                </button>
-              );
-            })}
-          </div>
-          {availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
-        </Card>
-      )}
-
-      {selectedTime !== null && court && (
-        <Card>
-          <SectionTitle>Confirmar {court.name} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})</SectionTitle>
-          {lockedPrivate ? (
-            <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
-              <Lock size={13} /> Esta cancha es privada — necesitas una membresía con acceso a canchas privadas. Revisa la sección Membresías.
+        <Modal onClose={() => { setSelectedTime(null); setCourtId(null); }}>
+          <Card>
+            <div className="flex items-start justify-between gap-3 mb-1">
+              <SectionTitle sub={court ? undefined : "Toca una cancha para continuar."}>
+                {court ? `Confirmar ${court.name}` : "Canchas disponibles"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
+              </SectionTitle>
+              <button onClick={() => { setSelectedTime(null); setCourtId(null); }} className="text-gray-300 hover:text-gray-600 shrink-0"><X size={18} /></button>
             </div>
-          ) : (
-            <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={courtPriceInfo(court, selectedTime).base}
-              discountPct={isMember ? memberDiscountPct(courtPriceInfo(court, selectedTime).base, courtPriceInfo(court, selectedTime).member) : 0}
-              club={club} defaultName={currentUser.name}
-              onConfirm={confirm} onCancel={() => setCourtId(null)} confirmLabel="Confirmar reserva" />
-          )}
-        </Card>
+
+            {!court ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  {availableCourtsAt(selectedTime).map((c) => {
+                    const { base, member } = courtPriceInfo(c, selectedTime);
+                    const shownPrice = isMember ? member : base;
+                    return (
+                      <button key={c.id} onClick={() => setCourtId(c.id)}
+                        className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5"
+                        style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                        {c.isPrivate && <Lock size={12} />} {c.name}
+                        <span className="text-[10px] font-semibold opacity-80">{formatMoney(shownPrice)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
+              </>
+            ) : lockedPrivate ? (
+              <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+                <Lock size={13} /> Esta cancha es privada — necesitas una membresía con acceso a canchas privadas. Revisa la sección Membresías.
+              </div>
+            ) : (
+              <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={courtPriceInfo(court, selectedTime).base}
+                discountPct={isMember ? memberDiscountPct(courtPriceInfo(court, selectedTime).base, courtPriceInfo(court, selectedTime).member) : 0}
+                club={club} defaultName={currentUser.name}
+                onConfirm={confirm} onCancel={() => setCourtId(null)} confirmLabel="Confirmar reserva" />
+            )}
+          </Card>
+        </Modal>
       )}
 
       <Card>
@@ -4566,9 +4599,9 @@ function RacketIcon({ size = 24, color = "currentColor", strokeWidth = 2, classN
 // name, price, a short description, when it happens, and how many spots are left/taken.
 function EventListItem({ kind, title, description, date, startTime, endTime, price, image, recurring, meta, onClick }) {
   const kindMeta = {
-    open_play: { label: "Open Play", color: COLORS.court },
-    torneo: { label: "Torneo", color: COLORS.clay },
-    clase: { label: "Clase", color: COLORS.courtDark },
+    open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
+    torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
+    clase: { label: "Clase", color: COLORS.courtDark, cta: "Inscribirme" },
   }[kind];
 
   return (
@@ -4602,7 +4635,7 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
         </div>
         <div className="flex items-center justify-between gap-2 mt-auto pt-2">
           {meta && <span className="text-[11px] font-bold" style={{ color: meta.full ? COLORS.clay : COLORS.court }}>{meta.text}</span>}
-          <span className="text-[11px] font-bold px-3 py-1 rounded-full shrink-0 ml-auto" style={{ background: COLORS.ball, color: "#fff" }}>Ver más</span>
+          <span className="text-[11px] font-bold px-3 py-1 rounded-full shrink-0 ml-auto" style={{ background: COLORS.ball, color: "#fff" }}>{kindMeta.cta}</span>
         </div>
       </div>
     </button>
@@ -4910,11 +4943,13 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         const occurrences = list.filter((o) => o.date >= todayIso);
         const e = occurrences[0] || list[list.length - 1];
         return (
-          <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
-            onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
-            onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
-            onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
-            onClose={() => setSelected(null)} />
+          <Modal onClose={() => setSelected(null)}>
+            <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
+              onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
+              onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
+              onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
+              onClose={() => setSelected(null)} />
+          </Modal>
         );
       })()}
 
@@ -4924,11 +4959,13 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         const occurrences = list.filter((c) => c.date >= todayIso);
         const e = occurrences[0] || list[list.length - 1];
         return (
-          <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
-            onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
-            onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
-            onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
-            onClose={() => setSelected(null)} />
+          <Modal onClose={() => setSelected(null)}>
+            <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
+              onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
+              onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
+              onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
+              onClose={() => setSelected(null)} />
+          </Modal>
         );
       })()}
     </div>
