@@ -805,7 +805,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.8.1";
+const APP_VERSION = "2.9.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3909,26 +3909,41 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUs
     return true;
   });
 
-  const [catId, setCatId] = useState(eligible[0]?.id || null);
-  const cat = eligible.find((c) => c.id === catId) || null;
-  const [done, setDone] = useState(null);
+  // ---- Carrito de inscripción: el jugador marca TODAS las categorías en las que quiere
+  // participar (no una a la vez), elige pareja por cada categoría de dobles, y un solo pago
+  // cubre todo el carrito. El precio es SIEMPRE el de un solo inscrito por categoría --
+  // nunca se duplica por tener pareja (la pareja paga su propia inscripción cuando ella
+  // misma se registre; ver el checkout más abajo). ----
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [partners, setPartners] = useState({}); // catId -> partner ({userId,name,ranking} o {name,email,ranking})
   const [myRanking, setMyRanking] = useState(suggestedRanking(currentUser.name) || "");
-  const [partner, setPartner] = useState(null);
+  const [showCheckout, setShowCheckout] = useState(false);
+  const [done, setDone] = useState(null); // nombres de las categorías recién confirmadas
 
-  const isDoubles = cat && cat.modality !== "individual";
-  const full = cat && cat.maxTeams && cat.teams.length >= cat.maxTeams;
-  const canCheckout = cat && (!isDoubles || partner);
   const unitPrice = tournamentRegPrice(tournament);
-  const totalPrice = unitPrice * (isDoubles ? 2 : 1);
+  const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
+  const total = unitPrice * selectedCats.length;
+  const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]?.name);
+  const canProceed = selectedCats.length > 0 && !missingPartner;
 
-  const selectCat = (id) => { setCatId(id); setDone(null); setPartner(null); };
+  const toggleCat = (id) => {
+    setDone(null);
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const setPartner = (catId, p) => setPartners((prev) => ({ ...prev, [catId]: p }));
 
   const confirm = (checkout) => {
-    const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
-    if (isDoubles) players.push(partner);
-    addTeam(cat.id, players, { ...checkout, userId: currentUser.id });
-    setDone(cat.name);
-    setPartner(null);
+    selectedCats.forEach((c) => {
+      const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
+      if (c.modality !== "individual") players.push(partners[c.id]);
+      // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito
+      // (para mostrarlo), pero cada equipo debe quedar con su propio precio individual.
+      addTeam(c.id, players, { ...checkout, priceUsd: unitPrice, priceBs: unitPrice * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+    });
+    setDone(selectedCats.map((c) => c.name));
+    setSelectedIds([]);
+    setPartners({});
+    setShowCheckout(false);
   };
 
   if (categories.length === 0) {
@@ -3936,76 +3951,123 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUs
   }
 
   return (
-    <div className="mt-2 grid md:grid-cols-[280px_1fr] gap-5">
-      <Card>
-        <SectionTitle sub="Solo se muestran las categorías en las que todavía puedes inscribirte, según tu género.">Categorías abiertas</SectionTitle>
-        {!currentUser.gender && (
-          <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2 rounded-lg mb-3 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-            <AlertTriangle size={12} className="shrink-0" /> Completa tu género en Perfil para ver solo tus categorías — por ahora se muestran todas.
-          </button>
-        )}
-        <div className="space-y-1.5">
-          {eligible.map((c) => {
-            const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
-            return (
-              <button key={c.id} onClick={() => selectCat(c.id)}
-                className="w-full text-left px-3 py-2.5 rounded-xl text-sm"
-                style={{ background: catId === c.id ? "#EAF3E6" : "#EEF1F7", color: catId === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: catId === c.id ? 700 : 500 }}>
-                <div className="flex items-center justify-between">
-                  <span className="truncate">{c.name}</span>
-                  {spotsLeft === 0 ? <Hourglass size={13} color="#8A5A16" /> : <UserPlus size={13} className="opacity-50" />}
-                </div>
-                <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
-                  {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{c.waitlist.length > 0 ? ` · ${c.waitlist.length} en espera` : ""}
-                </p>
-              </button>
-            );
-          })}
-          {eligible.length === 0 && <p className="text-xs text-gray-400 italic px-1">No hay categorías disponibles para ti en este momento — ya estás inscrito en todas las abiertas, o su calendario ya fue generado.</p>}
+    <div className="mt-2 max-w-3xl">
+      <SectionTitle sub="Elige todas las categorías en las que quieres participar -- se pagan juntas en un solo checkout.">
+        Categorías abiertas
+      </SectionTitle>
+
+      {!currentUser.gender && (
+        <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2.5 rounded-xl mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+          <AlertTriangle size={12} className="shrink-0" /> Completa tu género en Perfil para ver solo tus categorías — por ahora se muestran todas.
+        </button>
+      )}
+
+      {done && (
+        <div className="mb-4 text-sm px-4 py-3 rounded-xl flex items-start gap-2" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+          <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
+          <span>¡Listo! Quedaste inscrito en: <strong>{done.join(", ")}</strong>.</span>
         </div>
-      </Card>
+      )}
 
-      {cat && (
-        <Card>
-          <SectionTitle sub="El cupo se confirma solo, sin que el organizador tenga que hacerlo por ti.">
-            Inscribirme en {cat.name}
-          </SectionTitle>
-
-          {full && (
-            <div className="text-xs px-3 py-2 rounded-lg mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-              <Hourglass size={12} /> El cupo está lleno — te inscribirás en la lista de espera y subirás automáticamente si alguien se retira.
+      <div className="space-y-3" style={{ paddingBottom: selectedIds.length > 0 ? 96 : 0 }}>
+        {eligible.map((c) => {
+          const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
+          const isFull = spotsLeft === 0;
+          const isDoubles = c.modality !== "individual";
+          const isSelected = selectedIds.includes(c.id);
+          return (
+            <div key={c.id} className="rounded-2xl overflow-hidden" style={{ border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}`, background: isSelected ? "#F3F8F1" : COLORS.card }}>
+              <button onClick={() => toggleCat(c.id)} className="w-full text-left p-4 flex items-start gap-3">
+                <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0 mt-0.5" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
+                  {isSelected && <Check size={14} color="#fff" strokeWidth={3} />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="font-bold text-sm leading-snug">{c.name}</p>
+                    <span className="mono text-sm font-extrabold shrink-0" style={{ color: COLORS.court }}>{formatMoney(unitPrice)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1.5 flex-wrap text-[11px]" style={{ color: "#6B7688" }}>
+                    <span className="px-1.5 py-0.5 rounded-full font-bold" style={{ background: "#EEF1F7" }}>{isDoubles ? "Dobles" : "Individual"}</span>
+                    <span>{c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos</span>
+                    {isFull && (
+                      <span className="px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+                        <Hourglass size={9} /> Lista de espera
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </button>
+              {isSelected && isDoubles && (
+                <div className="px-4 pb-4 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <Label>Tu pareja en esta categoría</Label>
+                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
+                </div>
+              )}
             </div>
-          )}
+          );
+        })}
+        {eligible.length === 0 && <p className="text-xs text-gray-400 italic px-1">No hay categorías disponibles para ti en este momento — ya estás inscrito en todas las abiertas, o su calendario ya fue generado.</p>}
+      </div>
 
-          <div className="mb-4">
-            <Label>{isDoubles ? "Jugador 1 (tú)" : "Jugador"}</Label>
-            <div className="flex items-center justify-between px-3 py-2.5 rounded-xl mb-2" style={{ background: "#EEF1F7" }}>
-              <span className="text-sm font-semibold flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{currentUser.name.charAt(0).toUpperCase()}</span>
-                {currentUser.name}
-              </span>
+      {/* Barra de carrito, siempre visible mientras haya algo seleccionado -- fixed, no
+         sticky, para que no se pierda al scrollear la lista. bottom-16 en mobile deja
+         libre el MobileNav; md:left-64 deja libre el Sidebar de desktop. */}
+      {selectedIds.length > 0 && (
+        <div className="fixed bottom-16 md:bottom-5 left-0 md:left-64 right-0 z-40 px-4 md:px-10 flex justify-center pointer-events-none">
+          <div className="w-full max-w-3xl rounded-2xl px-4 md:px-5 py-3.5 flex items-center justify-between gap-3 pointer-events-auto" style={{ background: COLORS.courtDark, boxShadow: "0 16px 40px -12px rgba(15,23,32,.5)" }}>
+            <div className="min-w-0">
+              <p className="text-[11px]" style={{ color: "#93A8C9" }}>{selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"} seleccionada{selectedCats.length === 1 ? "" : "s"}</p>
+              <p className="disp text-xl leading-tight" style={{ color: COLORS.ball }}>{formatMoney(total)}</p>
+              {missingPartner && <p className="text-[10px] mt-0.5 font-semibold" style={{ color: "#F2B84B" }}>Falta elegir pareja en alguna categoría</p>}
             </div>
-            <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Tu nivel / ranking (opcional)" />
+            <button disabled={!canProceed} onClick={() => setShowCheckout(true)}
+              style={{ background: canProceed ? COLORS.clay : "rgba(255,255,255,0.1)", color: canProceed ? "#fff" : "#5B6B85" }}
+              className="px-5 py-2.5 rounded-xl font-bold text-sm shrink-0 flex items-center gap-1.5">
+              Continuar <ArrowRight size={14} />
+            </button>
           </div>
+        </div>
+      )}
 
-          {isDoubles && (
+      {showCheckout && (
+        <Modal onClose={() => setShowCheckout(false)}>
+          <Card>
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <p className="disp text-lg" style={{ color: COLORS.courtDark }}>Confirmar inscripción</p>
+                <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"}</p>
+              </div>
+              <button onClick={() => setShowCheckout(false)} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
+            </div>
+
+            <div className="space-y-1.5 mb-4">
+              {selectedCats.map((c) => {
+                const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
+                return (
+                  <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                    <div className="min-w-0">
+                      <p className="font-semibold" style={{ color: COLORS.ink }}>
+                        {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                      </p>
+                      {c.modality !== "individual" && (
+                        <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
+                      )}
+                    </div>
+                    <span className="mono text-xs font-bold shrink-0" style={{ color: COLORS.court }}>{formatMoney(unitPrice)}</span>
+                  </div>
+                );
+              })}
+            </div>
+
             <div className="mb-4">
-              <Label>Jugador 2 (tu pareja)</Label>
-              <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={setPartner} />
+              <Label>Tu nivel / ranking (opcional)</Label>
+              <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Ej. 3.5" />
             </div>
-          )}
 
-          {canCheckout && (
-            <CheckoutPanel title={`Inscripción a ${cat.name}${isDoubles ? " (dupla)" : ""}`} baseUsd={totalPrice} discountPct={0} club={club} defaultName={currentUser.name} requireName={false}
-              onConfirm={confirm} confirmLabel={full ? "Unirme a la lista de espera" : "Confirmar inscripción"} />
-          )}
-
-          {done && (
-            <div className="mt-4 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
-              <CheckCircle2 size={13} /> ¡Listo! Tu cupo quedó registrado en {done}.
-            </div>
-          )}
-        </Card>
+            <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={currentUser.name} requireName={false}
+              onConfirm={confirm} onCancel={() => setShowCheckout(false)} confirmLabel="Confirmar inscripción" />
+          </Card>
+        </Modal>
       )}
     </div>
   );

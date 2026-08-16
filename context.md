@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.8.1 — con backend real
+## Estado actual: v2.9.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -240,6 +240,25 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   muestra solo categorías femeninas/mixtas (no la masculina de prueba); sin género
   configurado (cuenta demo `cliente@club.com`, backfileada a `onboarding_completed=true`
   así que no ve el wizard) se ven todas las categorías + el aviso, que navega a Perfil.
+- **Inscripción a torneo rediseñada como carrito multi-categoría** (v2.9.0, segundo pedido
+  explícito del usuario -- el diseño de v2.8.0 seguía siendo "elige una categoría a la vez").
+  `InscripcionTab` (jugador) ahora es: lista de cards de categorías elegibles con checkbox
+  (nombre SIN truncar -- antes vivían en un sidebar de 280px con `truncate`), selección
+  múltiple; cada categoría de dobles seleccionada expande un `PartnerPicker` propio inline
+  (pareja independiente por categoría); una barra "carrito" `fixed` (no sticky) siempre
+  visible mientras haya algo seleccionado, con el total en vivo, que abre un `Modal` con el
+  resumen (categoría + pareja + precio de cada una) y el `CheckoutPanel` de pago único para
+  todo el carrito. Al confirmar, `addTeam()` se llama una vez por categoría seleccionada,
+  todas con la MISMA referencia/comprobante (un solo pago cubre el carrito completo).
+  **Corrección de precio explícitamente pedida por el usuario**: antes `totalPrice = unitPrice
+  * (isDoubles ? 2 : 1)` cobraba el doble en dobles (documentado como decisión deliberada en
+  una versión anterior de este archivo); ahora el precio es SIEMPRE `unitPrice` por categoría
+  sin importar el formato -- la pareja paga su propia inscripción cuando ella se registre,
+  no la cobra quien la invita. Verificado end-to-end: cuenta femenino selecciona 1 individual
+  + 1 dobles (con pareja invitada por correo), barra de carrito muestra "2 categorías · $40"
+  (20+20, no 60), confirma con un solo comprobante, ambos `team` quedan en la DB con
+  `priceUsd: 20` cada uno; en mobile la barra de carrito no se solapa con `MobileNav`
+  (4.5px de margen medido).
 - **Versión visible dentro de la app, no solo en login** (v2.8.1). Antes `v{APP_VERSION}`
   solo se mostraba en `AuthScreen`, así que una vez adentro no había forma de saber en qué
   versión estaba corriendo sin cerrar sesión. Ahora también aparece en `Sidebar` (debajo
