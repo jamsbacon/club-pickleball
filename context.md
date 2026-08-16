@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.7.0 — con backend real
+## Estado actual: v2.7.1 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -123,6 +123,20 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   Verificado en vivo: admin ve la lista completa de fechas con "Elegir"/borrar por fecha;
   cliente logueado en la misma serie ve directo "Inscripción a Martes de escalera · lun,
   24 ago" con el CheckoutPanel, sin lista.
+- **Modal: "hueco arriba" en mobile + ahora ocupa toda la pantalla** (v2.7.1). Causa real
+  (no era un tema de barra de direcciones del navegador, como parecía a simple vista):
+  `ReservasTab` envuelve todo en `<div className="mt-2 space-y-5">`, y el `space-y-5` de
+  Tailwind le pone `margin-top` a cualquier hijo que no sea el primero -- el `Modal`, aunque
+  es `position:fixed`, seguía recibiendo ese `margin-top` (fixed no anula margin) y quedaba
+  corrido ~20px hacia abajo, dejando el TopBar de la página visible y sin oscurecer por
+  encima del backdrop. Fix definitivo: `Modal` ahora se monta con `createPortal` directo en
+  `document.body`, fuera del árbol DOM de quien lo llama -- inmune a cualquier
+  margin/overflow/z-index de un contenedor padre (este `space-y-5` o cualquier otro futuro).
+  De paso, en mobile el panel blanco es `min-h-[100dvh]` sin el padding/margen que antes
+  dejaba ver el backdrop, recuperando ese espacio para que el checkout quepa sin scroll en
+  la mayoría de los teléfonos modernos (verificado sin scroll en 390×844; en un iPhone SE
+  de 375×667 sobran ~29px de contenido, scroll mínimo). Desktop (`sm:` y superior) no
+  cambió: sigue siendo la card centrada con el fondo oscuro alrededor.
 
 ## Decisiones de producto/UI recientes
 

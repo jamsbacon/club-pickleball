@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   Trophy, Users, MapPin, Calendar, ClipboardList, Plus, Trash2,
   ChevronRight, ChevronDown, Shuffle, ArrowUpDown, CheckCircle2,
@@ -804,7 +805,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.7.0";
+const APP_VERSION = "2.7.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2260,9 +2261,27 @@ function Card({ children, className = "", style = {} }) {
 // Overlay genérico para flujos de inscripción/checkout (Actividades, Reservas) -- antes
 // estos paneles se insertaban en el flujo normal de la página, debajo de lo que el usuario
 // ya estaba viendo, obligando a scrollear para encontrarlos (mala conversión, sobre todo en
-// mobile). Ahora aparecen centrados sobre el contenido, con scroll propio si el contenido no
-// cabe, se cierran con Escape o tocando fuera, y bloquean el scroll del fondo mientras están
-// abiertos.
+// mobile). Ahora aparecen sobre el contenido, se cierran con Escape o tocando fuera, y
+// bloquean el scroll del fondo mientras están abiertos.
+//
+// En mobile es pantalla completa de verdad (no una card flotando con el fondo oscuro
+// asomando arriba, que se veía como un hueco/error de layout): el propio wrapper blanco
+// mide min-h-[100dvh] (dvh, no vh -- así no queda un espacio muerto ni corta contenido
+// cuando el navegador muestra/oculta su barra de direcciones) y no tiene el padding/margen
+// que antes dejaba ver el backdrop por arriba. De paso eso recupera el espacio vertical que
+// antes se desperdiciaba, para que la mayoría de los checkouts quepan sin scroll. Desde
+// `sm:` para arriba (tablet/desktop) vuelve a ser la card centrada con el fondo oscuro
+// alrededor, que ahí sí se veía bien.
+//
+// Se monta con createPortal directo en <body> -- NO como hijo normal de donde se llama.
+// La causa real del "hueco arriba" en Reservas: ReservasTab envuelve todo su contenido en
+// un <div className="mt-2 space-y-5">, y Tailwind's space-y-5 le pone margin-top a CUALQUIER
+// hermano que no sea el primero -- el Modal, al ser `position: fixed`, seguía recibiendo ese
+// margin-top (fixed no anula margin) y quedaba corrido 20px hacia abajo, dejando ver el
+// TopBar de la página sin oscurecer por encima. Un portal saca al modal del árbol DOM del
+// componente que lo llama (queda colgando directo de <body>), así ningún contenedor padre
+// -- este space-y-5 o cualquier otro futuro -- puede volver a empujarlo/recortarlo por
+// margin, overflow o z-index.
 function Modal({ onClose, children, maxWidth = 560 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -2272,14 +2291,15 @@ function Modal({ onClose, children, maxWidth = 560 }) {
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; };
   }, [onClose]);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto"
-      style={{ background: "rgba(15,23,32,0.55)" }}
+  return createPortal(
+    <div className="fixed inset-0 z-50 overflow-y-auto sm:flex sm:items-center sm:justify-center sm:p-6"
+      style={{ background: "rgba(15,23,32,0.55)", margin: 0 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="w-full my-6 sm:my-0" style={{ maxWidth }}>
+      <div className="min-h-[100dvh] sm:min-h-0 w-full sm:mx-auto" style={{ background: COLORS.card, maxWidth }}>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 function SectionTitle({ children, sub }) {
