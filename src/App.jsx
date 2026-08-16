@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1110,14 +1110,14 @@ export default function PickleballTournamentApp() {
       const msg = /already registered|already exists/i.test(error.message) ? "Ya existe una cuenta con ese correo." : error.message;
       return { error: msg };
     }
-    setTab("reservas");
+    setTab("eventos");
     return {};
   };
   const loginUser = async (email, password) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     if (error) return { error: "Correo o contraseña incorrectos." };
     const { data: prof } = await supabase.from("profiles").select("role").eq("id", data.user.id).single();
-    setTab(prof?.role === "admin" ? "club" : "reservas");
+    setTab(prof?.role === "admin" ? "club" : "eventos");
     return {};
   };
   const logoutUser = async () => { await supabase.auth.signOut(); };
@@ -1907,8 +1907,9 @@ function AuthScreen({ club, registerUser, loginUser }) {
 const NAV_ITEMS = [
   { id: "club", label: "Club", short: "Club", icon: Building2, sub: "Horario, canchas y precios", roles: ["admin"] },
   { id: "estadisticas", label: "Estadísticas", short: "Stats", icon: BarChart3, sub: "Ingresos, horarios pico, membresías y zonas", roles: ["admin"] },
+  // "eventos" (id interno sin cambios) va primero -- es la sección de aterrizaje del cliente.
+  { id: "eventos", label: "Actividades", short: "Actividades", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
   { id: "reservas", label: "Reservas", short: "Reservas", icon: CalendarClock, sub: "Reserva un bloque de cancha disponible", roles: ["admin", "cliente"] },
-  { id: "eventos", label: "Eventos", short: "Eventos", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
   { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin", "cliente"] },
   { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["admin", "cliente"] },
 ];
@@ -1963,7 +1964,7 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
         <div className="grid grid-cols-2 gap-y-3">
           <StatMini label="Canchas" value={stats.courts} />
           <StatMini label="Reservas" value={stats.bookings} />
-          <StatMini label="Eventos" value={stats.events} />
+          <StatMini label="Actividades" value={stats.events} />
           <StatMini label="Miembros" value={stats.members} />
         </div>
       </div>
@@ -2003,7 +2004,7 @@ function TopBar({ tab, stats, currentUser, currentPlan, logoutUser, visibleNav }
         <div className="hidden md:flex items-center gap-4 md:gap-6">
           <TickerStat label="Canchas" value={stats.courts} />
           <TickerStat label="Reservas" value={stats.bookings} />
-          <TickerStat label="Eventos" value={stats.events} />
+          <TickerStat label="Actividades" value={stats.events} />
           <TickerStat label="Miembros" value={stats.members} />
         </div>
       </div>
@@ -2202,7 +2203,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
   return (
     <div className="mt-2 space-y-5">
       <Card>
-        <SectionTitle sub="Define el horario general del club. Estos bloques son la base de Reservas, Eventos y Torneos.">Horario en bloques</SectionTitle>
+        <SectionTitle sub="Define el horario general del club. Estos bloques son la base de Reservas, Actividades y Torneos.">Horario en bloques</SectionTitle>
         <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
           <div>
             <Label>Nombre del club</Label>
@@ -4506,7 +4507,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
   return (
     <div className="mt-2 space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <SectionTitle sub="Toda la actividad programada del club: Open Plays, Torneos y Clases.">Eventos</SectionTitle>
+        <SectionTitle sub="Toda la actividad programada del club: Open Plays, Torneos y Clases.">Actividades</SectionTitle>
         {isAdmin && (
           <div className="flex gap-2">
             <button onClick={() => { setShowOpenPlayForm((s) => !s); setShowClaseForm(false); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.court, color: "#fff" }}><Plus size={14} /> Open Play</button>
