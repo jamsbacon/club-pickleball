@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.6.0";
+const APP_VERSION = "2.7.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1532,18 +1532,21 @@ export default function PickleballTournamentApp() {
   // una fila independiente por cada ocurrencia semanal -- todas comparten recurring_group_id
   // (un UUID generado acá, porque Postgres necesita el mismo valor en cada fila del lote)
   // para que la UI las agrupe/borre en bloque.
-  const addOpenPlay = async ({ recurrence, ...data }) => {
+  const addOpenPlay = async ({ recurrence, imageBlob, ...data }) => {
     try {
-      // Si hay imagen, se sube UNA sola vez a Storage y todas las ocurrencias de la serie
-      // guardan la misma URL pública -- antes cada fila repetía el data URL completo
-      // (~100-200KB duplicados por ocurrencia; con series largas eso era lo que hacía
-      // fallar el insert). OpenPlayForm ya entrega la imagen comprimida (máx. 1280px,
-      // JPEG ~75%), aquí solo se sube tal cual.
-      let imageUrl = data.image || "";
-      if (imageUrl.startsWith("data:")) {
-        const blob = await (await fetch(imageUrl)).blob();
+      // Si hay imagen, se sube UNA sola vez a Storage (como Blob directo -- ver
+      // OpenPlayForm.handleImage, que ahora usa canvas.toBlob() en vez de toDataURL()) y
+      // todas las ocurrencias de la serie guardan la misma URL pública. Antes se pasaba
+      // por un data URL base64 y luego fetch(dataURL).blob() para volver a convertirlo a
+      // Blob -- ese viaje de ida y vuelta es lo que hacía que subir una sola imagen
+      // "tardara" (codificar/decodificar un string base64 de cientos de KB en el hilo
+      // principal) y lo que más probablemente seguía haciendo fallar las series largas
+      // (fetch() sobre data: URIs muy grandes es conocido por fallar o colgarse en varios
+      // navegadores). Subir el Blob tal cual evita ambos problemas.
+      let imageUrl = "";
+      if (imageBlob) {
         const path = `${crypto.randomUUID()}.jpg`;
-        const { error: upErr } = await supabase.storage.from("open-play-images").upload(path, blob, { contentType: "image/jpeg" });
+        const { error: upErr } = await supabase.storage.from("open-play-images").upload(path, imageBlob, { contentType: "image/jpeg" });
         if (upErr) throw upErr;
         imageUrl = supabase.storage.from("open-play-images").getPublicUrl(path).data.publicUrl;
       }
@@ -4356,7 +4359,8 @@ function MultiCourtSelect({ courts, value, onChange }) {
 
 function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [name, setName] = useState("");
-  const [image, setImage] = useState("");
+  const [imageBlob, setImageBlob] = useState(null);
+  const [imageProcessing, setImageProcessing] = useState(false);
   const [level, setLevel] = useState("Todos");
   const [price, setPrice] = useState(5);
   const [memberPrice, setMemberPrice] = useState(5);
@@ -4370,33 +4374,37 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [recurUntil, setRecurUntil] = useState("");
 
   const [imageError, setImageError] = useState("");
-  // Se guarda como data URL directo en la fila (no Supabase Storage todavía), y una serie
-  // recurrente repite la MISMA imagen en cada ocurrencia -- una foto de cámara sin comprimir
-  // (varios MB) multiplicada por varias semanas hacía el insert gigante y Supabase lo
-  // rechazaba en silencio (ver addOpenPlay). Se reescala a un máximo de 1280px y se
-  // recomprime a JPEG ~75% antes de guardarla, así una serie larga se mantiene liviana.
+  // Se sube a Supabase Storage como Blob directo (ver addOpenPlay) y una serie recurrente
+  // reutiliza la misma URL en todas sus ocurrencias -- por eso aquí solo hace falta un Blob
+  // liviano, no un data URL. Se reescala a un máximo de 1280px y se recomprime a JPEG ~75%
+  // con canvas.toBlob() -- a propósito NO se usa toDataURL()/FileReader.readAsDataURL: pasar
+  // por un string base64 (y luego fetch(dataURL) para reconvertirlo a Blob al subir) es lo
+  // que hacía que cargar una imagen "tardara" y lo más probable detrás de que las series
+  // largas siguieran fallando -- fetch() sobre data: URIs grandes es frágil en varios
+  // navegadores. canvas.toBlob() + URL.createObjectURL() nunca generan ese string gigante.
   const MAX_IMAGE_DIM = 1280;
   const handleImage = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    setImageError("");
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
-        const w = Math.round(img.width * scale) || 1;
-        const h = Math.round(img.height * scale) || 1;
-        const canvas = document.createElement("canvas");
-        canvas.width = w; canvas.height = h;
-        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        setImage(canvas.toDataURL("image/jpeg", 0.75));
-      };
-      img.onerror = () => setImageError("No se pudo leer esa imagen -- prueba con otro archivo.");
-      img.src = reader.result;
+    setImageError(""); setImageProcessing(true);
+    const objectUrl = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale) || 1;
+      const h = Math.round(img.height * scale) || 1;
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      canvas.toBlob((blob) => {
+        setImageProcessing(false);
+        if (!blob) { setImageError("No se pudo procesar esa imagen -- prueba con otro archivo."); return; }
+        setImageBlob(blob);
+      }, "image/jpeg", 0.75);
     };
-    reader.onerror = () => setImageError("No se pudo leer esa imagen -- prueba con otro archivo.");
-    reader.readAsDataURL(f);
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); setImageProcessing(false); setImageError("No se pudo leer esa imagen -- prueba con otro archivo."); };
+    img.src = objectUrl;
   };
 
   const canSave = name.trim() && courtIds.length > 0 && date && startTime < endTime && Number(capacity) > 0
@@ -4406,7 +4414,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [error, setError] = useState("");
   const submit = async () => {
     setError(""); setSubmitting(true);
-    const result = await onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    const result = await onCreate({ name: name.trim(), imageBlob, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
     setSubmitting(false);
     if (result?.error) setError(result.error);
   };
@@ -4418,9 +4426,9 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         <div><Label>Nombre de la actividad</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Jueves de DUPR" /></div>
         <div>
           <Label>Imagen (opcional)</Label>
-          <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: image ? COLORS.court : "#6B7688" }}>
-            <ImageIcon size={14} /> {image ? "Imagen cargada" : "Subir imagen"}
-            <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+          <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: imageBlob ? COLORS.court : "#6B7688" }}>
+            <ImageIcon size={14} /> {imageProcessing ? "Procesando imagen…" : imageBlob ? "Imagen cargada" : "Subir imagen"}
+            <input type="file" accept="image/*" className="hidden" onChange={handleImage} disabled={imageProcessing} />
           </label>
           {imageError && <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>{imageError}</p>}
         </div>
@@ -4477,9 +4485,9 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave || submitting} onClick={submit}
-            style={{ background: canSave && !submitting ? COLORS.court : "#E5E5E5", color: canSave && !submitting ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
-            {submitting ? "Guardando…" : isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
+          <button disabled={!canSave || submitting || imageProcessing} onClick={submit}
+            style={{ background: canSave && !submitting && !imageProcessing ? COLORS.court : "#E5E5E5", color: canSave && !submitting && !imageProcessing ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
+            {submitting ? "Guardando…" : imageProcessing ? "Procesando imagen…" : isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
           </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -4645,11 +4653,16 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
 // `occurrences` is every future/today entry that shares e's recurringGroupId (or just [e]
 // for a one-off event). When there's more than one, the panel lists each date so the member
 // picks which session to check out for, instead of forcing a single date on a recurring series.
-function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose }) {
+function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
-  const [checkoutId, setCheckoutId] = useState(isSeries ? null : e.id);
+  // Un cliente se inscribe directo en la ocurrencia más próxima (occurrences[0] === e, ya
+  // vienen filtradas/ordenadas desde EventosTab) -- mismo checkout de un paso que un evento
+  // único, sin lista de fechas para elegir. El admin sigue viendo la lista completa: la
+  // necesita para poder borrar una fecha puntual de la serie sin borrar toda la serie.
+  const showDateList = isSeries && isAdmin;
+  const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
 
   return (
@@ -4659,7 +4672,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.name}</p>
           <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
             Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
-            {isSeries ? (
+            {showDateList ? (
               <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
             ) : (
               <> · {formatDateHuman(e.date)}</>
@@ -4674,7 +4687,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
       </div>
       {e.description && <p className="text-sm mb-3" style={{ color: "#3D4A5C" }}>{e.description}</p>}
 
-      {isSeries ? (
+      {showDateList ? (
         <div className="space-y-1.5 mb-4">
           <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => {
@@ -4722,11 +4735,15 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
   );
 }
 
-function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose }) {
+function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
-  const [checkoutId, setCheckoutId] = useState(isSeries ? null : e.id);
+  // Mismo criterio que EventDetail: cliente se inscribe directo en la ocurrencia más
+  // próxima, sin elegir fecha; admin sigue viendo la lista para poder borrar una fecha
+  // puntual de la serie.
+  const showDateList = isSeries && isAdmin;
+  const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
 
   return (
@@ -4736,7 +4753,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
           <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
             Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
-            {isSeries ? (
+            {showDateList ? (
               <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
             ) : (
               <> · {formatDateHuman(e.date)}</>
@@ -4750,7 +4767,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
         </div>
       </div>
 
-      {isSeries ? (
+      {showDateList ? (
         <div className="space-y-1.5 mb-4">
           <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => (
@@ -4944,7 +4961,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         const e = occurrences[0] || list[list.length - 1];
         return (
           <Modal onClose={() => setSelected(null)}>
-            <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
+            <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
               onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
               onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
               onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
@@ -4960,7 +4977,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         const e = occurrences[0] || list[list.length - 1];
         return (
           <Modal onClose={() => setSelected(null)}>
-            <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser}
+            <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
               onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
               onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
               onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}

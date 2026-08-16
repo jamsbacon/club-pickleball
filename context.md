@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.6.0 — con backend real
+## Estado actual: v2.7.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -96,6 +96,33 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   referenciando cada URL antes de borrar el objeto). Verificado end-to-end: serie de 6
   ocurrencias con imagen de 1.69MB → 1 solo archivo subido, las 6 filas comparten la
   misma URL, la URL pública sirve el JPEG (200, ~121KB) sin sesión.
+- **La serie recurrente con imagen seguía fallando después del fix de Storage, y el
+  evento único con imagen tardaba en crear** (v2.7.0). Causa real: `OpenPlayForm`
+  comprimía con `canvas.toDataURL()` (genera un string base64 de cientos de KB) y
+  `addOpenPlay` lo reconvertía a Blob con `fetch(dataURL).blob()` para subirlo a
+  Storage -- ese viaje de ida y vuelta por un string base64 gigante es lento (codificar/
+  decodificar en el hilo principal) y `fetch()` sobre `data:` URIs grandes es conocido
+  por ser frágil/colgarse en varios navegadores, lo cual explicaba tanto la lentitud del
+  caso único como que el caso recurrente (mismo upload, pero con más presión de memoria
+  por las filas extra) siguiera fallando intermitentemente. Fix: `handleImage` ahora usa
+  `URL.createObjectURL()` (no `FileReader.readAsDataURL`) para leer el archivo original y
+  `canvas.toBlob()` (no `toDataURL()`) para la versión comprimida -- nunca se crea un
+  string base64, el Blob se sube directo. Se agregó estado `imageProcessing` con label
+  "Procesando imagen…" (compresión de una foto de 4000×3000/2.8MB tarda ~2s, es normal,
+  pero antes no había feedback) y el botón de submit se deshabilita mientras tanto.
+  Verificado end-to-end: imagen de 2.82MB → serie de 11 ocurrencias creada en ~2s, 1 solo
+  archivo de ~111KB compartido por las 11 filas.
+- **Actividades recurrentes: el cliente ya no elige fecha, se inscribe directo en la más
+  próxima** (v2.7.0, pedido explícito del usuario). Antes `EventDetail`/`ClassDetail`
+  mostraban "Próximas fechas — elige una" para CUALQUIER usuario en una serie recurrente
+  -- para el cliente eso era fricción innecesaria (la mayoría solo quiere inscribirse en
+  la próxima sesión). Ahora ese selector de fechas solo se muestra si `isAdmin` (lo sigue
+  necesitando para borrar una fecha puntual de la serie sin borrar toda la serie); el
+  cliente ve el checkout de un solo paso, idéntico a un evento único, apuntando siempre a
+  `occurrences[0]` (ya viene ordenado/filtrado por fecha ≥ hoy desde `EventosTab`).
+  Verificado en vivo: admin ve la lista completa de fechas con "Elegir"/borrar por fecha;
+  cliente logueado en la misma serie ve directo "Inscripción a Martes de escalera · lun,
+  24 ago" con el CheckoutPanel, sin lista.
 
 ## Decisiones de producto/UI recientes
 
