@@ -725,6 +725,11 @@ function computeStandings(teams, teamIds, matches) {
    (round-robin, en el orden en que se crearon), luego bracket por ronda
    (bye excluidos, no ocupan cancha) — una ronda de bracket jamás se agenda
    antes que la anterior de su misma categoría.
+
+   Un partido con `locked: true` (movido a mano desde el grid de CalendarioTab,
+   ver `moveMatch`) nunca se resetea ni vuelve a la cola -- conserva su día/hora/
+   cancha tal cual, y ese lugar (más los jugadores que ocupa a esa hora) queda
+   reservado para todo lo demás, igual que un bloque ya ocupado por una reserva.
    ========================================================================= */
 function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDuration, breakM, occupiedKeys = new Set(), plan = null) {
   const slots = [];
@@ -749,8 +754,20 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     ];
   };
 
-  // reset previous schedule
-  categories.forEach((c) => c.matches.forEach((m) => { m.day = null; m.time = null; m.courtId = null; }));
+  // Partidos fijados a mano: se dejan tal cual (no se resetean, no vuelven a la cola).
+  // Todo lo demás sí se resetea, como antes.
+  const preOccupied = new Set(occupiedKeys);
+  const lockedPlayersBySlot = {}; // "date|timeMin" -> Set(jugador)
+  categories.forEach((c) => c.matches.forEach((m) => {
+    if (m.locked && m.day && m.time && m.courtId) {
+      preOccupied.add(blockKey(m.courtId, m.day, timeToMinutes(m.time)));
+      const key = `${m.day}|${timeToMinutes(m.time)}`;
+      const set = (lockedPlayersBySlot[key] = lockedPlayersBySlot[key] || new Set());
+      playersOf(m).forEach((p) => set.add(p));
+    } else {
+      m.day = null; m.time = null; m.courtId = null;
+    }
+  }));
 
   const orderedCats = (() => {
     if (plan?.mode === "byCategory" && plan.categoryOrder?.length) {
@@ -763,11 +780,12 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   // Cola propia de cada categoría: grupos (tal cual se crearon) + bracket agrupado
   // por ronda/seq y ordenado ascendente -- exactamente el mismo criterio que usaba
   // el loop de bracket original, solo que ahora se arma como lista en vez de
-  // consumirse con su propio cursor de slots independiente.
+  // consumirse con su propio cursor de slots independiente. Los fijados a mano ya
+  // tienen lugar (arriba) y no entran acá.
   const perCatQueues = orderedCats.map((cat) => {
-    const group = cat.matches.filter((m) => m.phase === "group");
+    const group = cat.matches.filter((m) => m.phase === "group" && !m.locked);
     const byRound = {};
-    cat.matches.filter((m) => m.phase !== "group" && !isByeMatch(m)).forEach((m) => {
+    cat.matches.filter((m) => m.phase !== "group" && !isByeMatch(m) && !m.locked).forEach((m) => {
       const key = m.seq != null ? m.seq : m.round;
       byRound[key] = byRound[key] || [];
       byRound[key].push(m);
@@ -795,9 +813,9 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   let slotIndex = 0;
   while (queue.length > 0 && slotIndex < slots.length) {
     const slot = slots[slotIndex];
-    const usedPlayers = new Set();
+    const usedPlayers = new Set(lockedPlayersBySlot[`${slot.date}|${slot.timeMin}`] || []);
     for (let c = 0; c < courts.length && queue.length > 0; c++) {
-      if (occupiedKeys.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
+      if (preOccupied.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
       let foundIdx = -1;
       for (let i = 0; i < queue.length; i++) {
         const m = queue[i];
@@ -868,10 +886,42 @@ function findScheduleConflicts(categories) {
   return Object.values(bySlot).filter((entries) => new Set(entries.map((e) => e.matchId)).size > 1);
 }
 
+// Valida un movimiento manual ANTES de confirmarlo (grid de CalendarioTab, tap-destino):
+// la cancha destino debe estar libre en ese bloque (cruzando cualquier módulo -- reservas,
+// open plays, clases u otro partido de torneo, vía el mismo `occupiedKeys` que usa el resto
+// de la app) y ningún jugador de este partido puede tener ya otro partido a esa hora. El
+// propio bloque de origen del partido no cuenta como "ocupado" para sí mismo (si el destino
+// es el mismo horario/cancha que ya tenía, o si se mueve dentro del mismo horario a otra
+// cancha, no debe autobloquearse).
+function checkMoveConflict(match, target, categories, occupiedKeys) {
+  const targetKey = blockKey(target.courtId, target.day, timeToMinutes(target.time));
+  const ownKey = match.day && match.courtId ? blockKey(match.courtId, match.day, timeToMinutes(match.time)) : null;
+  if (targetKey !== ownKey && occupiedKeys.has(targetKey)) {
+    return { ok: false, reason: "Esa cancha ya está ocupada a esa hora (otra reserva, evento o partido)." };
+  }
+  const cat = categories.find((c) => c.id === match.categoryId);
+  const a = cat?.teams.find((t) => t.id === match.teamAId);
+  const b = cat?.teams.find((t) => t.id === match.teamBId);
+  const myKeys = new Set([...(a?.players || []), ...(b?.players || [])].map((p) => (p.userId || p.name || "").trim().toLowerCase()).filter(Boolean));
+  if (myKeys.size === 0) return { ok: true };
+  for (const c of categories) {
+    for (const m of c.matches) {
+      if (m.id === match.id || !m.day || !m.time || isByeMatch(m)) continue;
+      if (m.day !== target.day || m.time !== target.time) continue;
+      const ta = c.teams.find((t) => t.id === m.teamAId);
+      const tb = c.teams.find((t) => t.id === m.teamBId);
+      const collision = [...(ta?.players || []), ...(tb?.players || [])]
+        .find((p) => myKeys.has((p.userId || p.name || "").trim().toLowerCase()));
+      if (collision) return { ok: false, reason: `${collision.name} ya tiene otro partido a esa hora (${c.name}).` };
+    }
+  }
+  return { ok: true };
+}
+
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.11.0";
+const APP_VERSION = "2.12.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1337,6 +1387,28 @@ export default function PickleballTournamentApp() {
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
       teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
     }).eq("id", id).then(({ error }) => { if (error) console.error("updateCategory:", error.message); });
+  };
+
+  // Reprograma un partido ya agendado a mano (grid de CalendarioTab, tap-origen →
+  // tap-destino) y lo marca `locked` para que buildSchedule() ya no lo toque la próxima
+  // vez que se corra el asistente ("Actualizar calendario"). No valida conflictos acá --
+  // CalendarioTab ya corrió `checkMoveConflict` antes de llamar y le mostró la advertencia
+  // al organizador si hacía falta; esta función solo aplica el cambio y persiste (vía
+  // updateCategory, que ya cubre el guardado en Supabase de una categoría).
+  const moveMatch = (categoryId, matchId, { day, time, courtId }) => {
+    updateCategory(categoryId, (c) => {
+      c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, day, time, courtId, locked: true } : m));
+      return c;
+    });
+  };
+  // Quita el pin de un partido movido a mano -- vuelve a quedar disponible para que
+  // buildSchedule() lo recalcule la próxima vez que se corra el asistente. Conserva su
+  // día/hora/cancha actual hasta que eso pase (no lo deja "flotando" sin horario).
+  const unlockMatch = (categoryId, matchId) => {
+    updateCategory(categoryId, (c) => {
+      c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, locked: false } : m));
+      return c;
+    });
   };
 
   // Looks up a player's suggested ranking from the directory (read-only unless the organizer overrides it).
@@ -1907,6 +1979,7 @@ export default function PickleballTournamentApp() {
               matchDuration={matchDuration} breakM={breakM}
               runScheduler={runScheduler} scheduleInfo={scheduleInfo}
               setMatchDuration={setMatchDuration} setBreakM={setBreakM}
+              occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
               submitScore={submitScore}
             />
           )}
@@ -3173,7 +3246,8 @@ function TorneosSection(props) {
     addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
-    setMatchDuration, setBreakM, submitScore, currentUser, users, club, setTab,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
+    submitScore, currentUser, users, club, setTab,
   } = props;
 
   return (
@@ -3216,7 +3290,8 @@ function TorneosSection(props) {
       {subTab === "calendario" && (
         <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} role={role}
           scheduleInfo={scheduleInfo} tournament={tournament} dates={dates}
-          matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM} />
+          matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM}
+          occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} />
       )}
 
       {subTab === "resultados" && (
@@ -3915,10 +3990,17 @@ function SchedulerWizardModal({ categories, dates, onClose, onConfirm }) {
   );
 }
 
-function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, role }) {
+function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, occupiedKeys, moveMatch, unlockMatch, role }) {
   const isAdmin = role === "admin";
   const [filterCat, setFilterCat] = useState("all");
   const [wizardOpen, setWizardOpen] = useState(false);
+  // "Editar manualmente": modo tap-origen → tap-destino para reprogramar un partido ya
+  // agendado. `selectedMatch` es el partido "origen" elegido; `moveTarget` el destino en
+  // edición en el formulario; `moveError` el motivo si `checkMoveConflict` lo rechaza.
+  const [moveMode, setMoveMode] = useState(false);
+  const [selectedMatch, setSelectedMatch] = useState(null);
+  const [moveTarget, setMoveTarget] = useState({ day: "", time: "", courtId: "" });
+  const [moveError, setMoveError] = useState("");
   // Orden canónico de canchas = el orden en que viven en Club -- así "por horario y por
   // cancha" es estable (mismo orden cada vez que se recalcula), no el orden en que
   // buildSchedule() las fue llenando.
@@ -3931,6 +4013,17 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   });
   const filtered = filterCat === "all" ? scheduled : scheduled.filter((m) => m.categoryId === filterCat);
   const conflicts = useMemo(() => findScheduleConflicts(categories), [categories]);
+  const lockedCount = scheduled.filter((m) => m.locked).length;
+
+  // Franjas horarias válidas del día (mismo cálculo que usa buildSchedule para generarlas) --
+  // lista de opciones para el selector de "Hora" del destino manual.
+  const timeSlotOptions = useMemo(() => {
+    const opts = [];
+    const startM = timeToMinutes(tournament.dailyStart), endM = timeToMinutes(tournament.dailyEnd);
+    let t = startM;
+    while (t + Number(matchDuration) <= endM) { opts.push(minutesToTime(t)); t += Number(matchDuration) + Number(breakM); }
+    return opts;
+  }, [tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM]);
 
   const catById = {}; categories.forEach((c) => catById[c.id] = c);
   const courtById = {}; courts.forEach((c) => courtById[c.id] = c);
@@ -3949,12 +4042,22 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const byDay = {};
   filtered.forEach((m) => { (byDay[m.day] = byDay[m.day] || []).push(m); });
 
+  const selectMatch = (m) => { setSelectedMatch(m); setMoveTarget({ day: m.day, time: m.time, courtId: m.courtId }); setMoveError(""); };
+  const cancelMove = () => { setSelectedMatch(null); setMoveError(""); };
+  const confirmMove = () => {
+    if (!moveTarget.day || !moveTarget.time || !moveTarget.courtId) { setMoveError("Completa día, hora y cancha destino."); return; }
+    const res = checkMoveConflict(selectedMatch, moveTarget, categories, occupiedKeys);
+    if (!res.ok) { setMoveError(res.reason); return; }
+    moveMatch(selectedMatch.categoryId, selectedMatch.id, moveTarget);
+    setSelectedMatch(null); setMoveError("");
+  };
+
   return (
     <div className="mt-2 space-y-5">
       {isAdmin && wizardOpen && (
         <SchedulerWizardModal categories={categories} dates={dates}
           onClose={() => setWizardOpen(false)}
-          onConfirm={(plan) => runScheduler(plan)} />
+          onConfirm={(plan) => { runScheduler(plan); cancelMove(); }} />
       )}
       {isAdmin && (
         <Card>
@@ -3982,9 +4085,18 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
               <SectionTitle sub={isAdmin ? "Genera (o vuelve a generar) los horarios evitando que un jugador tenga dos partidos a la vez." : "Horario generado por el organizador del torneo."}>Calendario de juego</SectionTitle>
             </div>
             {isAdmin && (
-              <button onClick={() => setWizardOpen(true)} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
-                <Clock size={16} /> {scheduleInfo ? "Actualizar calendario" : "Generar calendario"}
-              </button>
+              <div className="flex gap-2 flex-wrap">
+                {scheduled.length > 0 && (
+                  <button onClick={() => { setMoveMode((v) => !v); cancelMove(); }}
+                    style={{ background: moveMode ? COLORS.court : "#EAEEF5", color: moveMode ? "#fff" : COLORS.ink }}
+                    className="px-4 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
+                    <Pencil size={15} /> {moveMode ? "Saliendo de edición" : "Editar manualmente"}
+                  </button>
+                )}
+                <button onClick={() => setWizardOpen(true)} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
+                  <Clock size={16} /> {scheduleInfo ? "Actualizar calendario" : "Generar calendario"}
+                </button>
+              </div>
             )}
           </div>
 
@@ -4000,6 +4112,17 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                 <AlertTriangle size={14} /> No alcanzan los horarios disponibles ({scheduleInfo.unscheduledGroup} partido(s) sin ubicar). Agrega más canchas, días u horas.
               </div>
             )}
+            {lockedCount > 0 && (
+              <div className="text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                <Lock size={13} /> {lockedCount} partido(s) fijado(s) a mano — "Actualizar calendario" no los recalcula.
+              </div>
+            )}
+          </div>
+        )}
+
+        {isAdmin && moveMode && (
+          <div className="mt-3 text-xs px-3 py-2.5 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+            Modo edición activo: toca un partido de la tabla para elegir a dónde moverlo.
           </div>
         )}
 
@@ -4016,6 +4139,43 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
           </div>
         )}
       </Card>
+      )}
+
+      {isAdmin && moveMode && selectedMatch && (
+        <Card>
+          <SectionTitle sub="Se valida que la cancha esté libre y que ningún jugador tenga otro partido a esa hora antes de confirmar.">
+            Moviendo: {teamLabel(selectedMatch, "A")} vs {teamLabel(selectedMatch, "B")}
+          </SectionTitle>
+          <div className="grid sm:grid-cols-3 gap-3 items-end">
+            <div>
+              <Label>Día</Label>
+              <select style={inputStyle} value={moveTarget.day} onChange={(e) => setMoveTarget((t) => ({ ...t, day: e.target.value }))}>
+                {dates.map((d) => <option key={d} value={d}>{formatDateHuman(d)}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>Hora</Label>
+              <select style={inputStyle} value={moveTarget.time} onChange={(e) => setMoveTarget((t) => ({ ...t, time: e.target.value }))}>
+                {timeSlotOptions.map((t) => <option key={t} value={t}>{formatTimeAmPm(t)}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>Cancha</Label>
+              <select style={inputStyle} value={moveTarget.courtId} onChange={(e) => setMoveTarget((t) => ({ ...t, courtId: e.target.value }))}>
+                {courts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+          </div>
+          {moveError && (
+            <div className="mt-3 text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
+              <AlertTriangle size={14} /> {moveError}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 mt-4">
+            <button onClick={cancelMove} className="px-4 py-2.5 rounded-xl font-semibold text-sm" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+            <button onClick={confirmMove} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm">Confirmar movimiento</button>
+          </div>
+        </Card>
       )}
 
       {scheduled.length > 0 && (
@@ -4043,14 +4203,29 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                     </tr>
                   </thead>
                   <tbody>
-                    {byDay[day].map((m) => (
-                      <tr key={m.id} className="border-t" style={{ borderColor: COLORS.line }}>
-                        <td className="py-2 pr-3 mono font-semibold">{formatTimeAmPm(m.time)}</td>
-                        <td className="py-2 pr-3">{courtById[m.courtId]?.name}</td>
-                        <td className="py-2 pr-3 text-gray-500">{m.catName}{phaseTag(m)}</td>
-                        <td className="py-2 pr-3 font-medium">{teamLabel(m, "A")} <span className="text-gray-400 font-normal">vs</span> {teamLabel(m, "B")}</td>
-                      </tr>
-                    ))}
+                    {byDay[day].map((m) => {
+                      const isSelected = selectedMatch?.id === m.id;
+                      const clickable = isAdmin && moveMode;
+                      return (
+                        <tr key={m.id} className="border-t" onClick={clickable ? () => selectMatch(m) : undefined}
+                          style={{ borderColor: COLORS.line, background: isSelected ? "#FBF3E4" : undefined, cursor: clickable ? "pointer" : undefined }}>
+                          <td className="py-2 pr-3 mono font-semibold">
+                            <span className="flex items-center gap-1.5">
+                              {isAdmin && m.locked && (
+                                <button type="button" onClick={(e) => { e.stopPropagation(); unlockMatch(m.categoryId, m.id); }}
+                                  title="Fijado a mano -- clic para liberar" style={{ color: COLORS.clay }}>
+                                  <Lock size={13} />
+                                </button>
+                              )}
+                              {formatTimeAmPm(m.time)}
+                            </span>
+                          </td>
+                          <td className="py-2 pr-3">{courtById[m.courtId]?.name}</td>
+                          <td className="py-2 pr-3 text-gray-500">{m.catName}{phaseTag(m)}</td>
+                          <td className="py-2 pr-3 font-medium">{teamLabel(m, "A")} <span className="text-gray-400 font-normal">vs</span> {teamLabel(m, "B")}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

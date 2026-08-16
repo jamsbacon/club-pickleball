@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.11.0 — con backend real
+## Estado actual: v2.12.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -211,21 +211,47 @@ navegador.
   termine la ronda anterior de su categoría. **Falta la pasada visual real** (abrir el
   wizard, generar un calendario de un torneo real y mirarlo) — pendiente para la próxima
   vez que se pueda levantar el dev server contra el Supabase real o probar en producción.
+- **v2.12.0 — Sesión 2 del rediseño de Calendario: reprogramar partidos a mano**. Nuevo
+  campo `locked` en el modelo de partido (`matches[]` dentro de `categories`, JSONB, no
+  requirió migración de esquema — sigue viviendo dentro de la columna existente).
+  `buildSchedule()` (v2.11.0) ahora respeta `locked: true`: no resetea esos partidos ni los
+  vuelve a meter en la cola, y reserva su bloque (cancha+hora) y a sus jugadores en ese
+  horario para todo lo demás — igual que un bloque ya ocupado por una reserva. Dos
+  mutadores nuevos junto a `updateCategory`: `moveMatch(categoryId, matchId, {day, time,
+  courtId})` (aplica el cambio + marca `locked: true`, persiste vía `updateCategory`) y
+  `unlockMatch` (quita el pin, conserva la posición actual hasta la próxima regeneración).
+  `checkMoveConflict()` — misma lógica de choque que `findScheduleConflicts` pero para un
+  movimiento puntual — valida ANTES de confirmar: cancha libre (cruzando reservas/eventos/
+  otros partidos vía el mismo `occupiedKeys` de toda la app) y ningún jugador del partido
+  con otro partido a esa hora. En `CalendarioTab`: botón "Editar manualmente" (admin) activa
+  un modo donde tocar un partido de la tabla lo selecciona como origen; aparece una tarjeta
+  con selects de día/hora/cancha como destino (tap-origen → tap-destino con formulario, no
+  arrastre físico ni grilla visual — decidido así por scope/tiempo de la sesión, ver "Lo que
+  falta"), con la validación de `checkMoveConflict` antes de aceptar. Los partidos fijados
+  muestran un ícono de candado (clic para liberar) y un contador arriba avisa cuántos no se
+  tocarán la próxima vez que se corra "Actualizar calendario".
+  **Verificación**: mismo problema de red que v2.11.0 (el sandbox de esta sesión tampoco
+  pudo resolver el host real de Supabase) — se verificó con un segundo harness de Node
+  aislado: un partido fijado sobrevive intacto a una regeneración completa sin que nada
+  invada su cancha/horario/jugadores, y `checkMoveConflict` bloquea correctamente mover a
+  una cancha ocupada, permite un destino libre, y no se autobloquea al "mover" un partido a
+  su propio slot actual.
 
 ## Lo que falta / próximos pasos
 
-1. **Calendario: drag-and-drop manual para reprogramar partidos** (Sesión 2 del punto
-   grande de Calendario — Sesión 1, el asistente de distribución + motor nuevo, se hizo en
-   v2.11.0, ver arriba). Falta:
-   - Vista de grilla (día × cancha) con los partidos ya agendados.
-   - Mover un partido a otra celda vía tap-origen → tap-destino (no arrastre físico,
-     decidido con el usuario por el uso mobile de la app), validando en el momento
-     (cancha libre, jugadores libres) antes de aceptar el movimiento.
-   - Marcar como "pineado" un partido movido a mano para que el asistente (v2.11.0) no lo
-     recalcule/pise la próxima vez que se corra "Actualizar calendario" — requiere un
-     campo nuevo en el modelo de partido y que `buildSchedule` lo respete.
-2. **Pasada visual del asistente v2.11.0** en un torneo real (dev server contra Supabase
-   real o producción) — no se pudo hacer en la sesión que lo construyó, ver nota arriba.
+1. **Pasada visual real del rediseño de Calendario (v2.11.0 + v2.12.0)** en un torneo de
+   verdad (dev server contra Supabase real, o directo en producción) — ninguna de las dos
+   sesiones que lo construyeron pudo probarse en el navegador (la red del sandbox de esa
+   sesión no resolvía el host real de Supabase), solo se verificó el motor con harnesses de
+   Node aislados contra datos sintéticos. Falta mirar: el asistente completo de punta a
+   punta, el modo "Editar manualmente" (elegir un partido, moverlo, ver el candado de
+   fijado, liberarlo), y que el layout se vea bien en mobile (la UI nueva no se midió con
+   `getBoundingClientRect` como el resto de Actividades, ver punto 7 más abajo).
+2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 es tap-origen → formulario
+   de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha arrastrable —
+   se eligió así por scope/tiempo de esta sesión, priorizando que la validación de
+   conflictos quedara sólida. Si el usuario lo prueba y prefiere una grilla real, es un
+   trabajo de UI aparte (la lógica de `moveMatch`/`checkMoveConflict` ya no cambiaría).
 3. **Confirmar en el Dashboard de Supabase** (no verificable por CLI): Authentication →
    URL Configuration → Redirect URLs debe incluir `https://club-pickleball.vercel.app/**`
    para que el link de recuperación de contraseña (v2.2.0) redirija bien.
