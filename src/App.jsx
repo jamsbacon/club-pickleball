@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.4.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1533,42 +1533,57 @@ export default function PickleballTournamentApp() {
   // (un UUID generado acá, porque Postgres necesita el mismo valor en cada fila del lote)
   // para que la UI las agrupe/borre en bloque.
   const addOpenPlay = async ({ recurrence, ...data }) => {
-    const occurrenceDates = [data.date];
-    if (recurrence?.until && recurrence.until >= data.date) {
-      occurrenceDates.length = 0;
-      let d = new Date(data.date + "T00:00:00");
-      const until = new Date(recurrence.until + "T00:00:00");
-      while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
+    try {
+      const occurrenceDates = [data.date];
+      if (recurrence?.until && recurrence.until >= data.date) {
+        occurrenceDates.length = 0;
+        let d = new Date(data.date + "T00:00:00");
+        const until = new Date(recurrence.until + "T00:00:00");
+        while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
+      }
+      const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
+      const rows = occurrenceDates.map((dt) => ({
+        name: data.name, image: data.image || "", level: data.level, price: data.price, member_price: data.memberPrice,
+        capacity: data.capacity, description: data.description || "", court_ids: data.courtIds,
+        date: dt, start_time: data.startTime, end_time: data.endTime, recurring_group_id: seriesId,
+        occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
+      }));
+      const { data: inserted, error } = await supabase.from("open_plays").insert(rows).select();
+      if (error) throw error;
+      setOpenPlays((p) => [...p, ...inserted.map((r) => mapOpenPlayRow({ ...r, open_play_registrations: [] }))]);
+      return {};
+    } catch (err) {
+      // Motivo típico: imagen sin comprimir repetida en cada ocurrencia de una serie larga
+      // hace el request gigante y el servidor lo rechaza (antes esto fallaba en silencio y
+      // el formulario se cerraba igual -- ver OpenPlayForm/EventosTab para el resto del fix).
+      console.error("addOpenPlay:", err?.message || err);
+      return { error: err?.message || "No se pudo crear la actividad. Si tiene imagen, intenta con una más liviana." };
     }
-    const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
-    const rows = occurrenceDates.map((dt) => ({
-      name: data.name, image: data.image || "", level: data.level, price: data.price, member_price: data.memberPrice,
-      capacity: data.capacity, description: data.description || "", court_ids: data.courtIds,
-      date: dt, start_time: data.startTime, end_time: data.endTime, recurring_group_id: seriesId,
-      occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
-    }));
-    const { data: inserted, error } = await supabase.from("open_plays").insert(rows).select();
-    if (error) { console.error("addOpenPlay:", error.message); return; }
-    setOpenPlays((p) => [...p, ...inserted.map((r) => mapOpenPlayRow({ ...r, open_play_registrations: [] }))]);
   };
   // Mismo patrón de expansión que addOpenPlay, para clases recurrentes.
   const addClass = async ({ recurrence, ...data }) => {
-    const occurrenceDates = [data.date];
-    if (recurrence?.until && recurrence.until >= data.date) {
-      occurrenceDates.length = 0;
-      let d = new Date(data.date + "T00:00:00");
-      const until = new Date(recurrence.until + "T00:00:00");
-      while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
+    try {
+      const occurrenceDates = [data.date];
+      if (recurrence?.until && recurrence.until >= data.date) {
+        occurrenceDates.length = 0;
+        let d = new Date(data.date + "T00:00:00");
+        const until = new Date(recurrence.until + "T00:00:00");
+        while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
+      }
+      const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
+      const rows = occurrenceDates.map((dt) => ({
+        academy_name: data.academyName, level: data.level, price: data.price, member_price: data.memberPrice,
+        court_ids: data.courtIds, date: dt, start_time: data.startTime, end_time: data.endTime,
+        recurring_group_id: seriesId, occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
+      }));
+      const { data: inserted, error } = await supabase.from("classes").insert(rows).select();
+      if (error) throw error;
+      setClasses((p) => [...p, ...inserted.map((r) => mapClassRow({ ...r, class_registrations: [] }))]);
+      return {};
+    } catch (err) {
+      console.error("addClass:", err?.message || err);
+      return { error: err?.message || "No se pudo crear la clase." };
     }
-    const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
-    const rows = occurrenceDates.map((dt) => ({
-      academy_name: data.academyName, level: data.level, price: data.price, member_price: data.memberPrice,
-      court_ids: data.courtIds, date: dt, start_time: data.startTime, end_time: data.endTime,
-      recurring_group_id: seriesId, occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
-    }));
-    const { data: inserted, error } = await supabase.from("classes").insert(rows).select();
-    if (error) { console.error("addClass:", error.message); return; }
-    setClasses((p) => [...p, ...inserted.map((r) => mapClassRow({ ...r, class_registrations: [] }))]);
   };
   const removeOpenPlay = (id) => {
     setOpenPlays((p) => p.filter((e) => e.id !== id));
@@ -4310,16 +4325,47 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurUntil, setRecurUntil] = useState("");
 
+  const [imageError, setImageError] = useState("");
+  // Se guarda como data URL directo en la fila (no Supabase Storage todavía), y una serie
+  // recurrente repite la MISMA imagen en cada ocurrencia -- una foto de cámara sin comprimir
+  // (varios MB) multiplicada por varias semanas hacía el insert gigante y Supabase lo
+  // rechazaba en silencio (ver addOpenPlay). Se reescala a un máximo de 1280px y se
+  // recomprime a JPEG ~75% antes de guardarla, así una serie larga se mantiene liviana.
+  const MAX_IMAGE_DIM = 1280;
   const handleImage = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    setImageError("");
     const reader = new FileReader();
-    reader.onload = () => setImage(reader.result);
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale) || 1;
+        const h = Math.round(img.height * scale) || 1;
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        setImage(canvas.toDataURL("image/jpeg", 0.75));
+      };
+      img.onerror = () => setImageError("No se pudo leer esa imagen -- prueba con otro archivo.");
+      img.src = reader.result;
+    };
+    reader.onerror = () => setImageError("No se pudo leer esa imagen -- prueba con otro archivo.");
     reader.readAsDataURL(f);
   };
 
   const canSave = name.trim() && courtIds.length > 0 && date && startTime < endTime && Number(capacity) > 0
     && (!isRecurring || (recurUntil && recurUntil >= date));
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async () => {
+    setError(""); setSubmitting(true);
+    const result = await onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    setSubmitting(false);
+    if (result?.error) setError(result.error);
+  };
 
   return (
     <Card className="mt-3">
@@ -4332,6 +4378,7 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
             <ImageIcon size={14} /> {image ? "Imagen cargada" : "Subir imagen"}
             <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
           </label>
+          {imageError && <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>{imageError}</p>}
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div><Label>Nivel recomendado</Label>
@@ -4383,10 +4430,12 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
           )}
         </div>
 
+        {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
+
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ name: name.trim(), image, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
-            style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
-            {isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
+          <button disabled={!canSave || submitting} onClick={submit}
+            style={{ background: canSave && !submitting ? COLORS.court : "#E5E5E5", color: canSave && !submitting ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
+            {submitting ? "Guardando…" : isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
           </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -4409,6 +4458,15 @@ function ClaseForm({ courts, onCreate, onCancel }) {
 
   const canSave = academyName.trim() && courtIds.length > 0 && date && startTime < endTime
     && (!isRecurring || (recurUntil && recurUntil >= date));
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async () => {
+    setError(""); setSubmitting(true);
+    const result = await onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    setSubmitting(false);
+    if (result?.error) setError(result.error);
+  };
 
   return (
     <Card className="mt-3">
@@ -4461,10 +4519,12 @@ function ClaseForm({ courts, onCreate, onCancel }) {
           )}
         </div>
 
+        {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
+
         <div className="flex gap-2 pt-1">
-          <button disabled={!canSave} onClick={() => onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null })}
-            style={{ background: canSave ? COLORS.court : "#E5E5E5", color: canSave ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
-            {isRecurring ? "Crear serie recurrente" : "Crear Clase"}
+          <button disabled={!canSave || submitting} onClick={submit}
+            style={{ background: canSave && !submitting ? COLORS.court : "#E5E5E5", color: canSave && !submitting ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
+            {submitting ? "Guardando…" : isRecurring ? "Crear serie recurrente" : "Crear Clase"}
           </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -4787,8 +4847,19 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         )}
       </div>
 
-      {isAdmin && showOpenPlayForm && <div className="mb-5"><OpenPlayForm courts={courts} onCreate={(d) => { addOpenPlay(d); setShowOpenPlayForm(false); }} onCancel={() => setShowOpenPlayForm(false)} /></div>}
-      {isAdmin && showClaseForm && <div className="mb-5"><ClaseForm courts={courts} onCreate={(d) => { addClass(d); setShowClaseForm(false); }} onCancel={() => setShowClaseForm(false)} /></div>}
+      {/* onCreate espera el resultado real de Supabase -- el formulario solo se cierra si la
+         inserción tuvo éxito; si falla (ej. imagen muy pesada en una serie larga), se queda
+         abierto y OpenPlayForm/ClaseForm muestran el error en vez de perder los datos. */}
+      {isAdmin && showOpenPlayForm && (
+        <div className="mb-5">
+          <OpenPlayForm courts={courts} onCreate={async (d) => { const r = await addOpenPlay(d); if (!r?.error) setShowOpenPlayForm(false); return r; }} onCancel={() => setShowOpenPlayForm(false)} />
+        </div>
+      )}
+      {isAdmin && showClaseForm && (
+        <div className="mb-5">
+          <ClaseForm courts={courts} onCreate={async (d) => { const r = await addClass(d); if (!r?.error) setShowClaseForm(false); return r; }} onCancel={() => setShowClaseForm(false)} />
+        </div>
+      )}
 
       {/* Chips antes que el buscador, con el mismo mb-5 (y cero margen arriba) que usa
          TorneosSection para sus propios chips de sub-navegación. */}

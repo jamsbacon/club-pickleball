@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.4.0 — con backend real
+## Estado actual: v2.4.1 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -65,6 +65,21 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
 - **RLS de `open_play_registrations`/`class_registrations`** estaba limitada a
   dueño/admin, lo que rompía el cálculo de "cupos disponibles" (necesita el conteo
   total). Se corrigió a lectura pública, mismo criterio que `bookings`.
+- **Crear Open Play recurrente con imagen sacaba del formulario sin crear nada**
+  (v2.4.1). Dos bugs combinados: (1) `image` es un data URL guardado tal cual en cada fila
+  — una serie recurrente crea una fila por ocurrencia y repetía la MISMA imagen sin
+  comprimir en cada una, así que una foto de celular (1-3MB) por 8-10 semanas hacía un
+  INSERT de decenas de MB que Supabase rechazaba; (2) `onCreate` en `EventosTab` no
+  esperaba el resultado — cerraba el formulario (`setShowOpenPlayForm(false)`) de
+  inmediato sin importar si el insert había fallado, así que el error solo quedaba en
+  consola y el usuario veía el formulario desaparecer sin explicación. Fix: `OpenPlayForm`
+  reescala la imagen a máx. 1280px y la recomprime a JPEG ~75% antes de guardarla
+  (~1.7MB → ~120KB en la prueba); `addOpenPlay`/`addClass` ahora devuelven
+  `{error}`/`{}` (con try/catch para no dejar escapar errores de red/parseo sin capturar),
+  y el formulario espera ese resultado — solo se cierra si tuvo éxito, si no se queda
+  abierto mostrando el error. Mismo patrón aplicado a `ClaseForm` por consistencia aunque
+  no maneja imágenes. Verificado end-to-end: serie de 11 ocurrencias con una imagen de
+  prueba de 1.69MB se creó sin problema, ninguna fila superó ~160KB de imagen guardada.
 
 ## Decisiones de producto/UI recientes
 
