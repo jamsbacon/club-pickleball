@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.12.0";
+const APP_VERSION = "2.13.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1282,22 +1282,43 @@ export default function PickleballTournamentApp() {
     regStart: r.reg_start || "", regEnd: r.reg_end || "", regularPrice: r.regular_price ?? "",
     courtIds: r.court_ids || [],
   });
-  const [tournament, setTournament] = useState({
-    id: null, name: "Copa Verano Pickleball",
-    startDate: "", endDate: "", dailyStart: "08:00", dailyEnd: "20:00",
-    presaleStart: "", presaleEnd: "", presalePrice: "", regularPrice: "",
-    regStart: "", regEnd: "", playDays: [], courtIds: [],
-  });
+  // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
+  // (antes esto era una fila única fija, `.limit(1)`, y no había forma de crear uno nuevo
+  // desde la UI). `activeTournamentId` es cuál se está viendo/editando ahora mismo dentro de
+  // la pestaña Torneos (null = se muestra la lista, ver TournamentsListTab); `tournament` es
+  // ese torneo puntual, derivado, tal como lo esperan TorneosSection y todo lo que cuelga de
+  // ahí (no cambiaron su forma de recibir "el torneo" y "sus categorías", solo cuál les llega).
+  const [tournaments, setTournaments] = useState([]);
   useEffect(() => {
-    supabase.from("tournaments").select("*").limit(1).then(({ data, error }) => {
+    supabase.from("tournaments").select("*").order("created_at", { ascending: false }).then(({ data, error }) => {
       if (error) { console.error("fetch tournaments:", error.message); return; }
-      if (data?.[0]) setTournament(mapTournamentRow(data[0]));
+      setTournaments((data || []).map(mapTournamentRow));
     });
   }, []);
-  // Actualiza local al toque y persiste en `tournaments` en segundo plano (mismo patrón que updateClub).
+  const [activeTournamentId, setActiveTournamentId] = useState(null);
+  const tournament = tournaments.find((t) => t.id === activeTournamentId) || null;
+
+  // Crea un torneo nuevo y lo deja abierto para editar de inmediato (antes no existía ESTA
+  // función -- el único torneo que había se sembró directo en la base de datos, nunca se creó
+  // desde la app). Arranca con los mismos defaults sensatos que tenía la fila única sembrada.
+  const createTournament = async (name) => {
+    const { data, error } = await supabase.from("tournaments").insert({
+      name: name?.trim() || "Nuevo torneo", daily_start: "08:00", daily_end: "20:00",
+    }).select().single();
+    if (error) { console.error("createTournament:", error.message); return { error: error.message }; }
+    const created = mapTournamentRow(data);
+    setTournaments((prev) => [created, ...prev]);
+    setActiveTournamentId(created.id);
+    setActiveCatId(null);
+    return { data: created };
+  };
+
+  // Actualiza local al toque y persiste en `tournaments` en segundo plano (mismo patrón que
+  // updateClub) -- ahora actualiza SOLO la fila del torneo activo dentro del array completo.
   const updateTournament = (patch) => {
-    setTournament((t) => ({ ...t, ...patch }));
-    if (!tournament.id) return;
+    if (!tournament) return;
+    const id = tournament.id;
+    setTournaments((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     const dbPatch = {};
     if ("name" in patch) dbPatch.name = patch.name;
     if ("startDate" in patch) dbPatch.start_date = patch.startDate || null;
@@ -1312,7 +1333,7 @@ export default function PickleballTournamentApp() {
     if ("regEnd" in patch) dbPatch.reg_end = patch.regEnd || null;
     if ("regularPrice" in patch) dbPatch.regular_price = patch.regularPrice === "" ? null : patch.regularPrice;
     if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
-    supabase.from("tournaments").update(dbPatch).eq("id", tournament.id).then(({ error }) => {
+    supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
   };
@@ -1321,11 +1342,15 @@ export default function PickleballTournamentApp() {
   const [breakM, setBreakM] = useState(10);
 
   const mapCategoryRow = (r) => ({
-    id: r.id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
+    id: r.id, tournamentId: r.tournament_id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
     maxTeams: r.max_teams, seedMode: r.seed_mode, bestOf: r.best_of, bracketSize: r.bracket_size,
     teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
     drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
   });
+  // `categories` trae TODAS las categorías de TODOS los torneos del club (no se filtra en la
+  // query) -- necesario para que occupiedKeys (más abajo) bloquee canchas cruzando torneos.
+  // Cada pantalla de un torneo puntual (TorneosSection) recibe el subconjunto ya filtrado por
+  // `tournamentId` al armar sus props, nunca este array completo directo.
   const [categories, setCategories] = useState([]);
   useEffect(() => {
     supabase.from("categories").select("*").order("created_at").then(({ data, error }) => {
@@ -1351,9 +1376,11 @@ export default function PickleballTournamentApp() {
   const activeCat = categories.find((c) => c.id === activeCatId) || null;
   const currentPlan = membershipPlans.find((p) => p.id === currentUser?.planId) || membershipPlans[0];
 
+  // `tournament` es null mientras se está viendo la lista de torneos (nadie seleccionado
+  // todavía) -- dates queda vacío en ese caso, nadie lo necesita hasta entrar a uno puntual.
   const dates = useMemo(
-    () => filterDatesByPlayDays(dateRange(tournament.startDate, tournament.endDate), tournament.playDays),
-    [tournament.startDate, tournament.endDate, tournament.playDays]
+    () => (tournament ? filterDatesByPlayDays(dateRange(tournament.startDate, tournament.endDate), tournament.playDays) : []),
+    [tournament]
   );
 
   // Every block already claimed by a booking, an Open Play, a class or a scheduled tournament
@@ -1842,6 +1869,7 @@ export default function PickleballTournamentApp() {
   };
 
   const runScheduler = (plan = null) => {
+    if (!tournament) return;
     if (!tournament.startDate || !tournament.endDate) {
       alert("Define primero la fecha de inicio y fin del torneo.");
       setTab("torneos");
@@ -1860,9 +1888,13 @@ export default function PickleballTournamentApp() {
       setTab("torneos");
       return;
     }
-    const clone = structuredClone(categories);
+    // `categories` trae las de TODOS los torneos -- acá solo debe entrar/tocarse el
+    // subconjunto del torneo activo, si no las categorías de otros torneos se mezclarían en
+    // este calendario (y peor, un setCategories(clone) con solo estas pisaría a las demás).
+    const scoped = categories.filter((c) => c.tournamentId === tournament.id);
+    const clone = structuredClone(scoped);
     const info = buildSchedule(clone, tournamentCourts, dates, tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, occupiedKeys, plan);
-    setCategories(clone);
+    setCategories((prev) => prev.map((c) => clone.find((cc) => cc.id === c.id) || c));
     setScheduleInfo(info);
     setTab("torneos");
     // buildSchedule pudo tocar matches/groups de varias categorías a la vez -- upsert en bloque
@@ -1963,25 +1995,34 @@ export default function PickleballTournamentApp() {
               addOpenPlay={addOpenPlay} addClass={addClass} removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
-              tournament={tournament} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab} />
+              tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
+              openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }} />
           )}
 
           {effectiveTab === "torneos" && (
-            <TorneosSection
-              role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
-              tournament={tournament} setTournament={updateTournament} dates={dates}
-              categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
-              addCategory={addCategory} removeCategory={removeCategory}
-              addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-              generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
-              suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
-              setCategoryFormat={setCategoryFormat} courts={courts}
-              matchDuration={matchDuration} breakM={breakM}
-              runScheduler={runScheduler} scheduleInfo={scheduleInfo}
-              setMatchDuration={setMatchDuration} setBreakM={setBreakM}
-              occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
-              submitScore={submitScore}
-            />
+            activeTournamentId && tournament ? (
+              <TorneosSection
+                role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
+                tournament={tournament} setTournament={updateTournament} dates={dates}
+                categories={categories.filter((c) => c.tournamentId === tournament.id)}
+                activeCat={activeCat} setActiveCatId={setActiveCatId}
+                addCategory={addCategory} removeCategory={removeCategory}
+                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
+                generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
+                suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
+                setCategoryFormat={setCategoryFormat} courts={courts}
+                matchDuration={matchDuration} breakM={breakM}
+                runScheduler={runScheduler} scheduleInfo={scheduleInfo}
+                setMatchDuration={setMatchDuration} setBreakM={setBreakM}
+                occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
+                submitScore={submitScore}
+                onBackToList={() => { setActiveTournamentId(null); setActiveCatId(null); }}
+              />
+            ) : (
+              <TournamentsListTab tournaments={tournaments} categories={categories} role={role}
+                onSelect={(id) => { setActiveTournamentId(id); setActiveCatId(null); }}
+                onCreate={createTournament} />
+            )
           )}
 
           {effectiveTab === "membresias" && (
@@ -3233,6 +3274,82 @@ const TORNEO_SUB_ITEMS = [
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
 ];
 
+// Pantalla de aterrizaje de la pestaña Torneos: lista todos los torneos del club (el admin
+// puede crear tantos como quiera -- cada uno con sus propias categorías/participantes/
+// calendario/resultados, ver nota de `categories` en el componente principal). El cliente ve
+// la misma lista, sin el botón de crear, y "Ver torneo" en vez de "Editar".
+function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate }) {
+  const isAdmin = role === "admin";
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const catCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).length;
+  const teamCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).reduce((s, c) => s + c.teams.length, 0);
+
+  const submitCreate = async () => {
+    setCreating(true);
+    const res = await onCreate(name);
+    setCreating(false);
+    if (!res?.error) { setShowForm(false); setName(""); }
+  };
+
+  return (
+    <div className="mt-2 space-y-5">
+      {isAdmin && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SectionTitle sub="Cada torneo tiene sus propias categorías, participantes, calendario y resultados.">Torneos del club</SectionTitle>
+            <button onClick={() => setShowForm((s) => !s)} style={{ background: COLORS.clay, color: "#fff" }} className="px-4 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2 h-fit">
+              <Plus size={16} /> Crear nuevo torneo
+            </button>
+          </div>
+          {showForm && (
+            <div className="mt-4 flex flex-wrap gap-2 items-end">
+              <div className="flex-1 min-w-[220px]">
+                <Label>Nombre del torneo</Label>
+                <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Copa Otoño 2026" autoFocus />
+              </div>
+              <button disabled={creating} onClick={submitCreate} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-2.5 rounded-xl font-bold text-sm h-fit disabled:opacity-60">
+                {creating ? "Creando…" : "Crear"}
+              </button>
+              <button onClick={() => { setShowForm(false); setName(""); }} className="px-4 py-2.5 rounded-xl font-semibold text-sm h-fit" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {tournaments.length === 0 && (
+        <Card>
+          <p className="text-sm text-gray-400">
+            {isAdmin ? 'Todavía no hay torneos creados -- pulsa "Crear nuevo torneo" para empezar.' : "Todavía no hay torneos publicados."}
+          </p>
+        </Card>
+      )}
+
+      {tournaments.length > 0 && (
+        <div className="grid sm:grid-cols-2 gap-4">
+          {tournaments.map((t) => (
+            <Card key={t.id}>
+              <h3 className="font-bold text-base mb-1">{t.name}</h3>
+              <p className="text-xs text-gray-400 mb-3">
+                {t.startDate && t.endDate ? `${formatDateHuman(t.startDate)} → ${formatDateHuman(t.endDate)}` : "Fechas por definir"}
+              </p>
+              <div className="flex flex-wrap gap-2 mb-4">
+                <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{catCountFor(t.id)} categoría(s)</span>
+                <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{teamCountFor(t.id)} equipo(s) inscritos</span>
+              </div>
+              <button onClick={() => onSelect(t.id)} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-2 rounded-xl font-bold text-sm w-full">
+                {isAdmin ? "Editar" : "Ver torneo"}
+              </button>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TorneosSection(props) {
   const { role } = props;
   const visibleSubItems = TORNEO_SUB_ITEMS.filter((it) => it.roles.includes(role));
@@ -3247,11 +3364,19 @@ function TorneosSection(props) {
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
-    submitScore, currentUser, users, club, setTab,
+    submitScore, currentUser, users, club, setTab, onBackToList,
   } = props;
 
   return (
     <div>
+      {/* El club organiza varios torneos -- esta pantalla siempre es UN torneo puntual
+          (TournamentsListTab, el padre, es quien lista todos y deja elegir). "Volver a
+          Torneos" regresa a esa lista sin perder los demás torneos ni sus datos. */}
+      <button onClick={onBackToList} className="flex items-center gap-1.5 text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>
+        <ChevronLeft size={14} /> Volver a Torneos
+      </button>
+      <h2 className="disp text-xl md:text-[22px] mb-4" style={{ color: COLORS.courtDark }}>{tournament.name}</h2>
+
       <div className="flex gap-2 mb-5 overflow-x-auto pb-1">
         {visibleSubItems.map((it) => (
           <button key={it.id} onClick={() => setSubTab(it.id)}
@@ -5429,17 +5554,16 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournament, categories, setTab, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState("");
   const [filterKind, setFilterKind] = useState("all");
   const isAdmin = role === "admin";
-  const hasTournamentActivity = categories.some((c) => c.teams.length > 0);
   const todayIso = new Date().toISOString().slice(0, 10);
 
-  const noEvents = openPlays.length === 0 && classes.length === 0 && !hasTournamentActivity;
+  const noEvents = openPlays.length === 0 && classes.length === 0 && tournaments.length === 0;
 
   // Recurring Open Plays are stored as one entry per occurrence (sharing a recurringGroupId)
   // so registrations/court blocks stay per-date. Group them back into one card per series —
@@ -5499,16 +5623,22 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         onClick: () => setSelected({ kind: "clase", key }),
       });
     });
-    items.push({
-      key: "torneo", kind: "torneo", title: tournament.name || "Torneo del club",
-      description: hasTournamentActivity ? `${categories.length} categoría(s) abiertas.` : "Configúralo en la pestaña Torneos.",
-      date: tournament.startDate, startTime: tournament.dailyStart, endTime: tournament.dailyEnd,
-      price: "Ver detalles", image: null, recurring: false,
-      meta: { text: hasTournamentActivity ? `${categories.reduce((s, c) => s + c.teams.length, 0)} equipos inscritos` : "Sin categorías aún" },
-      onClick: () => setTab("torneos"),
+    // El club organiza varios torneos a la vez -- una tarjeta por cada uno, igual que Open
+    // Plays/Clases (antes esto era una sola tarjeta fija para el único torneo que existía).
+    tournaments.forEach((t) => {
+      const tCats = categories.filter((c) => c.tournamentId === t.id);
+      const hasActivity = tCats.some((c) => c.teams.length > 0);
+      items.push({
+        key: `t-${t.id}`, kind: "torneo", title: t.name || "Torneo del club",
+        description: hasActivity ? `${tCats.length} categoría(s) abiertas.` : "Sin categorías aún.",
+        date: t.startDate, startTime: t.dailyStart, endTime: t.dailyEnd,
+        price: "Ver detalles", image: null, recurring: false,
+        meta: { text: hasActivity ? `${tCats.reduce((s, c) => s + c.teams.length, 0)} equipos inscritos` : "Sin categorías aún" },
+        onClick: () => openTournament(t.id),
+      });
     });
     return items;
-  }, [openPlaySeries, classSeries, tournament, categories, hasTournamentActivity, todayIso]);
+  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament]);
 
   const filteredItems = listItems.filter((it) => {
     if (filterKind !== "all" && it.kind !== filterKind) return false;

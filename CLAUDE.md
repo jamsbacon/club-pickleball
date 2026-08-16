@@ -75,6 +75,25 @@ Membership plans themselves only carry `monthlyPrice`, `privateCourtAccess`, `de
 
 Club identity (name, colors) lives in the `COLORS` design tokens ([src/App.jsx:723](src/App.jsx:723), navy `court`/`courtDark` + orange `ball`/`ballDark`) and `club.name` (seeded as "Pickle Hub"). Most secondary text/background colors are inline hex literals rather than COLORS references — if rebranding again, grep for hex literals rather than assuming everything routes through `COLORS`.
 
+### Multi-tournament: `tournaments[]` + `activeTournamentId`, but `categories` stays global
+
+The club runs many tournaments (not one). `tournaments` is the full list (main component
+state); `activeTournamentId` (also main-component state) picks which one is currently open
+for editing/viewing inside the "torneos" tab — `null` renders `TournamentsListTab` (pick one
+or, if admin, create one), a set id renders `TorneosSection` scoped to that single
+`tournament` (derived: `tournaments.find(t => t.id === activeTournamentId)`). **`categories`
+is fetched unfiltered — every category from every tournament, in one flat array** — because
+`occupiedKeys` needs to block courts across all tournaments at once, not just the one being
+edited. Every category carries `tournamentId` (`mapCategoryRow`); any screen that should only
+see one tournament's categories filters by it at the point where props are built for that
+screen (`categories.filter(c => c.tournamentId === tournament.id)`, done once where
+`TorneosSection`/`EventosTab` are rendered) — never assume the `categories` prop you receive
+is already scoped just because it "feels like" it should be for that tab. `runScheduler`
+follows the same rule: it must clone/schedule only the active tournament's slice of
+`categories`, then merge that slice back into the full array — cloning the whole thing would
+mix other tournaments' matches into this one's calendar, and overwriting `categories` with just
+the scheduled slice would silently delete every other tournament's categories from state.
+
 ### Torneo admin controls vs. player self-service
 
 Inside `TorneosSection`, `TORNEO_SUB_ITEMS` gates which sub-tabs a role can even see, but **visibility of a sub-tab is not the same as write access within it** — `CalendarioTab` is visible to both roles (players need to see the schedule) but only renders the match-duration inputs and the "Generar/Actualizar calendario" button when `role === "admin"`; check `isAdmin` inside a shared tab before assuming a `roles` entry on `TORNEO_SUB_ITEMS` is sufficient gating. `InscripcionTab` branches early into two entirely different components based on role: `InscripcionAdminForm` (unchanged free-text roster entry, no payment) for admins, vs. the player self-service flow (this file) for everyone else — don't try to unify them further, they serve different jobs (organizer registering a walk-in vs. a player registering themselves with a real checkout).

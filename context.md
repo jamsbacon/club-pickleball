@@ -7,10 +7,11 @@
 ## Qué es
 
 App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, torneos
-con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
+con brackets (varios a la vez, el club organiza torneos con frecuencia — desde v2.13.0),
+Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.12.0 — con backend real
+## Estado actual: v2.13.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -236,35 +237,78 @@ navegador.
   invada su cancha/horario/jugadores, y `checkMoveConflict` bloquea correctamente mover a
   una cancha ocupada, permite un destino libre, y no se autobloquea al "mover" un partido a
   su propio slot actual.
+- **v2.13.0 — Sesión 1 de multi-torneo: crear torneos + lista admin**. Hasta acá la app era
+  de un solo torneo *por diseño* (el comentario del propio schema decía "fila única, como
+  club") — no existía ninguna función para crear un torneo desde la UI, el único que había
+  se sembró directo en la base. El pedido real del usuario: el club organiza varios torneos
+  con frecuencia, cada uno con sus propias categorías/fechas/horarios/inscripción, y el
+  cliente se inscribe en los que le calcen (no un solo torneo "activo" a la vez).
+  Cambios: `tournament` (objeto único) → `tournaments` (array completo) + `activeTournamentId`
+  (cuál se está viendo/editando; `null` = lista). Nueva `createTournament(name)` (insert +
+  dejarlo abierto para editar, RLS ya lo permitía -- `admin write tournaments` ya era `for
+  all`, no hizo falta migración). **El fix importante y no visible**: la consulta de
+  `categories` nunca filtraba por torneo (traía TODAS las de TODOS los torneos mezcladas) --
+  se mantiene así a propósito (occupiedKeys necesita ver los partidos de todos los torneos
+  para no chocar canchas entre ellos) pero ahora cada categoría carga `tournamentId`
+  (`mapCategoryRow`) y cada pantalla de un torneo puntual recibe el subconjunto ya filtrado.
+  `runScheduler` tenía el mismo problema en la otra dirección: clonaba y programaba TODAS las
+  categorías de TODOS los torneos juntas, y el guardado pisaba el array completo -- ahora
+  clona/programa solo el subconjunto del torneo activo y lo mezcla de vuelta sin tocar los
+  demás. Nuevo `TournamentsListTab` (pantalla de aterrizaje de la pestaña Torneos): tarjetas
+  con nombre/fechas/cantidad de categorías y equipos, "Editar" (admin) o "Ver torneo"
+  (cliente), + "Crear nuevo torneo" (admin). `TorneosSection` (la pantalla de 6 sub-pestañas
+  que ya existía) ahora es "un torneo puntual" con un botón "← Volver a Torneos" arriba, en
+  vez de ser LA pantalla de torneo. Documentado en detalle en CLAUDE.md ("Multi-tournament:
+  `tournaments[]` + `activeTournamentId`, pero `categories` sigue global").
+  **Verificación**: mismo problema de red que v2.11.0/v2.12.0 -- tampoco se pudo probar en el
+  navegador (ni el sandbox local ni Claude in Chrome, que el usuario no llegó a conectar en
+  esta sesión). Se hizo revisión de código línea por línea de cada punto de acceso a
+  `tournament`/`categories` en el archivo (grep de `\btournament\b` completo) para confirmar
+  que no quedó ninguna referencia colgante al modelo viejo, más build limpio. **Falta la
+  pasada visual real, más que en las sesiones anteriores** — este cambio toca flujos de
+  usuario (crear torneo, navegar la lista, volver), no solo un algoritmo interno.
+  **Sesión 2 pendiente** (acordada con el usuario): tarjeta por torneo + botón "Crear
+  torneo" dentro de Actividades -- de hecho, para no dejar la app rota, `EventosTab` YA se
+  actualizó en esta sesión para mostrar una tarjeta por torneo (antes tenía una fija
+  hardcodeada) en vez de solo el botón; lo que falta de la Sesión 2 es el botón "+ Crear
+  torneo" ahí mismo (hoy solo se crea desde la pestaña Torneos) y cualquier pulido visual
+  que el usuario pida después de ver las tarjetas en uso.
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real del rediseño de Calendario (v2.11.0 + v2.12.0)** en un torneo de
-   verdad (dev server contra Supabase real, o directo en producción) — ninguna de las dos
-   sesiones que lo construyeron pudo probarse en el navegador (la red del sandbox de esa
-   sesión no resolvía el host real de Supabase), solo se verificó el motor con harnesses de
-   Node aislados contra datos sintéticos. Falta mirar: el asistente completo de punta a
-   punta, el modo "Editar manualmente" (elegir un partido, moverlo, ver el candado de
-   fijado, liberarlo), y que el layout se vea bien en mobile (la UI nueva no se midió con
-   `getBoundingClientRect` como el resto de Actividades, ver punto 7 más abajo).
-2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 es tap-origen → formulario
-   de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha arrastrable —
-   se eligió así por scope/tiempo de esta sesión, priorizando que la validación de
-   conflictos quedara sólida. Si el usuario lo prueba y prefiere una grilla real, es un
+1. **Pasada visual real de TODO lo que se construyó sin poder probarlo en el navegador**
+   (v2.11.0, v2.12.0 y v2.13.0 — tres sesiones seguidas bloqueadas por la misma limitación de
+   red del entorno, el usuario intentó conectar Claude in Chrome como alternativa pero no
+   llegó a terminarlo). Orden sugerido para revisar: (a) multi-torneo — crear un torneo
+   desde cero, ver que aparezca en la lista, editarlo, volver a la lista, que el cliente lo
+   vea y pueda inscribirse; (b) el asistente de distribución del Calendario de punta a
+   punta; (c) "Editar manualmente" (elegir un partido, moverlo, candado de fijado,
+   liberarlo); (d) que todo el layout nuevo se vea bien en mobile (nada de esto se midió con
+   `getBoundingClientRect` como el resto de Actividades, ver el punto de UI mobile más
+   abajo).
+2. **Sesión 2 de multi-torneo (acordada con el usuario)**: botón "+ Crear torneo" dentro de
+   Actividades (hoy el admin solo puede crear desde la pestaña Torneos → lista →
+   "Crear nuevo torneo"; `EventosTab` ya muestra una tarjeta por torneo desde v2.13.0, pero
+   sin el botón de creación ahí mismo) + cualquier pulido que salga de la pasada visual del
+   punto 1.
+3. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen
+   → formulario de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha
+   arrastrable — se eligió así por scope/tiempo de esa sesión, priorizando que la validación
+   de conflictos quedara sólida. Si el usuario lo prueba y prefiere una grilla real, es un
    trabajo de UI aparte (la lógica de `moveMatch`/`checkMoveConflict` ya no cambiaría).
-3. **Confirmar en el Dashboard de Supabase** (no verificable por CLI): Authentication →
+4. **Confirmar en el Dashboard de Supabase** (no verificable por CLI): Authentication →
    URL Configuration → Redirect URLs debe incluir `https://club-pickleball.vercel.app/**`
    para que el link de recuperación de contraseña (v2.2.0) redirija bien.
-4. Tab **Usuarios** sigue siendo de solo lectura — no hay edición de rol/membresía desde
+5. Tab **Usuarios** sigue siendo de solo lectura — no hay edición de rol/membresía desde
    la UI (cambiar `role`/`plan_id` a mano sigue siendo vía SQL/dashboard).
-5. **Vencimiento de membresía es solo informativo** — no hay revocación automática de
+6. **Vencimiento de membresía es solo informativo** — no hay revocación automática de
    precio de miembro al vencer. Si se necesita bloquear acceso real, falta el chequeo de
    `plan_expires_at` en `courtPriceInfo`/`memberDiscountPct`.
-6. Limpieza de archivos huérfanos en el bucket `open-play-images` de Storage no está
+7. Limpieza de archivos huérfanos en el bucket `open-play-images` de Storage no está
    implementada (borrar un Open Play no borra su imagen si otras filas de la serie la
    comparten) — costo bajo, no urgente.
-7. El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
+8. El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
    de detalle de espaciado mobile que Actividades — si el usuario pide lo mismo en otra
    pestaña, aplicar el mismo patrón (medir con JS/`getBoundingClientRect`, no a ojo).
-8. No hay tests ni linter configurados (a propósito, según CLAUDE.md) — no asumir
+9. No hay tests ni linter configurados (a propósito, según CLAUDE.md) — no asumir
    `npm test`/`npm run lint`.
