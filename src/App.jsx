@@ -805,7 +805,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.7.1";
+const APP_VERSION = "2.8.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1083,6 +1083,7 @@ export default function PickleballTournamentApp() {
   const mapProfileRow = (p) => ({
     id: p.id, name: p.name, email: p.email, role: p.role, planId: p.plan_id,
     zone: p.zone || "", duprRating: p.dupr_rating ?? null, phone: p.phone || "",
+    gender: p.gender || null, birthDate: p.birth_date || null, onboardingCompleted: p.onboarding_completed,
     planExpiresAt: p.plan_expires_at || null, createdAt: new Date(p.created_at).getTime(),
   });
 
@@ -1107,15 +1108,16 @@ export default function PickleballTournamentApp() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const registerUser = async ({ name, email, password, zone, duprRating, phone }) => {
-    if (!name.trim() || !email.trim() || !password) return { error: "Completa todos los campos." };
+  // Registro simplificado: solo correo + contraseña. El resto (nombre, género, fecha de
+  // nacimiento, DUPR, domicilio) se pide justo después en el wizard de Onboarding -- el
+  // trigger handle_new_user() crea el perfil con onboarding_completed=false, lo que hace
+  // que el gate de más abajo (antes de renderizar la app) le muestre el wizard en vez de
+  // dejarlo pasar directo.
+  const registerUser = async ({ email, password }) => {
+    if (!email.trim() || !password) return { error: "Completa todos los campos." };
     const { error } = await supabase.auth.signUp({
       email: email.trim(), password,
-      options: { data: {
-        name: name.trim(), role: "cliente", zone: (zone || "").trim(),
-        dupr_rating: duprRating === "" || duprRating == null ? "" : String(duprRating),
-        phone: (phone || "").trim(),
-      } },
+      options: { data: { role: "cliente" } },
     });
     if (error) {
       const msg = /already registered|already exists/i.test(error.message) ? "Ya existe una cuenta con ese correo." : error.message;
@@ -1691,6 +1693,9 @@ export default function PickleballTournamentApp() {
     if ("zone" in patch) dbPatch.zone = patch.zone;
     if ("phone" in patch) dbPatch.phone = patch.phone;
     if ("duprRating" in patch) dbPatch.dupr_rating = patch.duprRating === "" ? null : patch.duprRating;
+    if ("gender" in patch) dbPatch.gender = patch.gender || null;
+    if ("birthDate" in patch) dbPatch.birth_date = patch.birthDate || null;
+    if ("onboardingCompleted" in patch) dbPatch.onboarding_completed = patch.onboardingCompleted;
     const { error } = await supabase.from("profiles").update(dbPatch).eq("id", currentUser?.id);
     if (error) return { error: error.message };
     return {};
@@ -1759,6 +1764,21 @@ export default function PickleballTournamentApp() {
     );
   }
 
+  // Cuenta recién creada (registro solo pide correo+contraseña) -- el trigger de Supabase
+  // crea el perfil con onboarding_completed=false, así que antes de dejarlo entrar a la app
+  // se le pide el resto de sus datos (nombre, género, fecha de nacimiento, DUPR, domicilio)
+  // en un wizard de un paso a la vez. Las cuentas admin nunca pasan por aquí (se crean por
+  // SQL, no por este formulario) ni las que ya existían antes de este flag (quedaron con
+  // onboarding_completed=true al migrar la columna).
+  if (currentUser.role === "cliente" && !currentUser.onboardingCompleted) {
+    return (
+      <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
+        <GlobalStyles />
+        <Onboarding currentUser={currentUser} club={club} updateProfile={updateProfile} logoutUser={logoutUser} />
+      </div>
+    );
+  }
+
   const role = currentUser.role;
   const visibleNav = NAV_ITEMS.filter((it) => it.roles.includes(role));
   const effectiveTab = visibleNav.some((it) => it.id === tab) ? tab : visibleNav[0].id;
@@ -1800,7 +1820,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "torneos" && (
             <TorneosSection
-              role={role} currentUser={currentUser} users={users} club={club}
+              role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
               tournament={tournament} setTournament={updateTournament} dates={dates}
               categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
               addCategory={addCategory} removeCategory={removeCategory}
@@ -1859,49 +1879,16 @@ function GlobalStyles() {
    ========================================================================= */
 function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePassword, forceReset }) {
   const [mode, setMode] = useState(forceReset ? "reset" : "login");
-  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newPassword2, setNewPassword2] = useState("");
-  const [zone, setZone] = useState("");
-  const [duprRating, setDuprRating] = useState("");
-  const [phone, setPhone] = useState("");
-  const [zoneStatus, setZoneStatus] = useState({ loading: false, error: null, auto: false });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState(""); // mensaje de éxito (no es error), p.ej. "te enviamos un correo"
 
   // La sesión temporal de recuperación viene del padre (App) -- mientras dure, no se puede
   // salir de esta pantalla ni volver a login/register.
   useEffect(() => { if (forceReset) setMode("reset"); }, [forceReset]);
-
-  const detectZone = () => {
-    if (!navigator.geolocation) {
-      setZoneStatus({ loading: false, error: "Tu navegador no soporta geolocalización — escribe tu zona.", auto: false });
-      return;
-    }
-    setZoneStatus({ loading: true, error: null, auto: false });
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        try {
-          const { latitude, longitude } = pos.coords;
-          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=14`);
-          const data = await res.json();
-          const addr = data.address || {};
-          const detected = addr.suburb || addr.neighbourhood || addr.city_district || addr.town || addr.city || addr.county || addr.state || "";
-          if (detected) setZoneStatus({ loading: false, error: null, auto: true });
-          else setZoneStatus({ loading: false, error: "No se pudo identificar la zona — escríbela manualmente.", auto: false });
-          if (detected) setZone(detected);
-        } catch {
-          setZoneStatus({ loading: false, error: "No se pudo consultar la ubicación — escríbela manualmente.", auto: false });
-        }
-      },
-      () => setZoneStatus({ loading: false, error: "Permiso de ubicación denegado — escríbela manualmente.", auto: false }),
-      { timeout: 8000 }
-    );
-  };
-
-  useEffect(() => { if (mode === "register") detectZone(); }, [mode]);
 
   const [submitting, setSubmitting] = useState(false);
   const submit = async () => {
@@ -1911,7 +1898,11 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
     setSubmitting(true);
     let result;
     if (mode === "login") result = await loginUser(email, password);
-    else if (mode === "register") result = await registerUser({ name, email, password, zone, duprRating, phone });
+    // El registro solo pide correo + contraseña -- el resto (nombre, género, fecha de
+    // nacimiento, DUPR, domicilio) se completa en el wizard de Onboarding que se muestra
+    // automáticamente justo después de crear la cuenta (ver el gate en el componente
+    // principal, antes de renderizar la app).
+    else if (mode === "register") result = await registerUser({ email, password });
     else if (mode === "recover") {
       result = await resetPasswordUser(email);
       // Mensaje genérico a propósito -- no confirma si el correo existe o no en el sistema.
@@ -1981,9 +1972,6 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
           )}
 
           <div className="space-y-3">
-            {mode === "register" && (
-              <div><Label>Nombre completo</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre" /></div>
-            )}
             {(mode === "login" || mode === "register" || mode === "recover") && (
               <div>
                 <Label>Correo</Label>
@@ -2011,27 +1999,9 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
             )}
 
             {mode === "register" && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label>Nivel DUPR</Label>
-                  <div className="relative">
-                    <Medal size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                    <input type="number" step="0.01" min="2" max="8" style={{ ...inputStyle, paddingLeft: 32 }} value={duprRating}
-                      onChange={(e) => setDuprRating(e.target.value)} placeholder="Ej. 3.5" />
-                  </div>
-                </div>
-                <div>
-                  <Label>WhatsApp</Label>
-                  <div className="relative">
-                    <Smartphone size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                    <input type="tel" style={{ ...inputStyle, paddingLeft: 32 }} value={phone}
-                      onChange={(e) => setPhone(e.target.value)} placeholder="0414-1234567" />
-                  </div>
-                </div>
-                <p className="text-[10px] col-span-2 -mt-1" style={{ color: "#6B7688" }}>
-                  El DUPR es opcional si aún no lo sabes — ayuda a ubicarte en torneos y Open Plays de tu nivel. El WhatsApp es para avisos de reservas y pagos.
-                </p>
-              </div>
+              <p className="text-[11px] -mt-1" style={{ color: "#6B7688" }}>
+                Al crear tu cuenta te pediremos tu nombre, nivel DUPR y algunos datos más — toma menos de un minuto.
+              </p>
             )}
 
             {mode === "reset" && (
@@ -2053,24 +2023,6 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
                   </div>
                 </div>
               </>
-            )}
-
-            {mode === "register" && (
-              <div>
-                <Label>Zona / sector</Label>
-                <div className="relative">
-                  <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                  <input style={{ ...inputStyle, paddingLeft: 32 }} value={zone}
-                    onChange={(e) => { setZone(e.target.value); setZoneStatus((s) => ({ ...s, auto: false, error: null })); }}
-                    placeholder="Ej. Chacao, Caracas" />
-                </div>
-                <div className="flex items-center justify-between mt-1 gap-2">
-                  <p className="text-[10px]" style={{ color: zoneStatus.error ? "#B23A1B" : zoneStatus.auto ? COLORS.court : "#6B7688" }}>
-                    {zoneStatus.loading ? "Detectando tu ubicación…" : zoneStatus.auto ? "Detectada automáticamente — puedes editarla." : zoneStatus.error || "Se usa para las estadísticas del club."}
-                  </p>
-                  <button type="button" onClick={detectZone} className="text-[10px] font-bold shrink-0" style={{ color: COLORS.court }}>Detectar de nuevo</button>
-                </div>
-              </div>
             )}
 
             {notice && <p className="text-xs font-semibold" style={{ color: COLORS.court }}>{notice}</p>}
@@ -2102,6 +2054,183 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
             Regístrate normal o usa una de las cuentas demo para entrar rápido a la vista de cliente o de administrador.
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   ONBOARDING — wizard de un paso a la vez, se muestra justo después de crear
+   la cuenta (registro solo pide correo+contraseña). Pide nombre, género,
+   fecha de nacimiento (obligatorios), y DUPR/domicilio (opcionales, se
+   pueden dejar en blanco y completar después desde Perfil). Al terminar,
+   pone onboarding_completed=true en el mismo update -- eso es lo que hace
+   que el gate del componente principal deje de mostrar este wizard.
+   ========================================================================= */
+const ONBOARDING_STEPS = ["name", "gender", "birthdate", "dupr", "zone"];
+
+function Onboarding({ currentUser, club, updateProfile, logoutUser }) {
+  const [step, setStep] = useState(0);
+  const [name, setName] = useState("");
+  const [gender, setGender] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [duprRating, setDuprRating] = useState("");
+  const [zone, setZone] = useState("");
+  const [zoneStatus, setZoneStatus] = useState({ loading: false, error: null, auto: false });
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const key = ONBOARDING_STEPS[step];
+  const isLast = step === ONBOARDING_STEPS.length - 1;
+
+  const detectZone = () => {
+    if (!navigator.geolocation) {
+      setZoneStatus({ loading: false, error: "Tu navegador no soporta geolocalización — escríbelo manualmente.", auto: false });
+      return;
+    }
+    setZoneStatus({ loading: true, error: null, auto: false });
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const { latitude, longitude } = pos.coords;
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=14`);
+          const data = await res.json();
+          const addr = data.address || {};
+          const detected = addr.suburb || addr.neighbourhood || addr.city_district || addr.town || addr.city || addr.county || addr.state || "";
+          if (detected) setZoneStatus({ loading: false, error: null, auto: true });
+          else setZoneStatus({ loading: false, error: "No se pudo identificar tu ubicación — escríbela manualmente.", auto: false });
+          if (detected) setZone(detected);
+        } catch {
+          setZoneStatus({ loading: false, error: "No se pudo consultar la ubicación — escríbela manualmente.", auto: false });
+        }
+      },
+      () => setZoneStatus({ loading: false, error: "Permiso de ubicación denegado — escríbela manualmente.", auto: false }),
+      { timeout: 8000 }
+    );
+  };
+  useEffect(() => { if (key === "zone") detectZone(); }, [key]);
+
+  const requiredOk = {
+    name: name.trim().length > 0,
+    gender: !!gender,
+    birthdate: !!birthDate,
+    dupr: true,
+    zone: true,
+  }[key];
+
+  const goNext = async () => {
+    if (!requiredOk) return;
+    if (!isLast) { setStep((s) => s + 1); return; }
+    setError(""); setSubmitting(true);
+    const result = await updateProfile({
+      name: name.trim(), gender, birthDate,
+      duprRating: duprRating === "" ? "" : Number(duprRating),
+      zone: zone.trim(), onboardingCompleted: true,
+    });
+    setSubmitting(false);
+    if (result?.error) setError(result.error);
+  };
+  const goBack = () => { setError(""); setStep((s) => Math.max(0, s - 1)); };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: COLORS.courtDark }}>
+      <div className="w-full max-w-md">
+        <div className="flex flex-col items-center mb-6">
+          <div style={{ background: COLORS.ball }} className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-lg">
+            <Trophy size={22} color={COLORS.courtDark} strokeWidth={2.5} />
+          </div>
+          <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
+          <h1 className="disp text-xl text-center" style={{ color: COLORS.chalk }}>¡Bienvenido a {club.name || "tu club"}!</h1>
+        </div>
+
+        <div className="flex items-center justify-center gap-1.5 mb-5">
+          {ONBOARDING_STEPS.map((s, i) => (
+            <span key={s} className="h-1.5 rounded-full transition-all" style={{ width: i === step ? 26 : 8, background: i <= step ? COLORS.ball : "rgba(255,255,255,0.22)" }} />
+          ))}
+        </div>
+
+        <div className="rounded-[20px] p-6" style={{ background: COLORS.chalk }}>
+          {key === "name" && (
+            <div>
+              <SectionTitle sub="Así te verán los demás jugadores del club.">¿Cómo te llamas?</SectionTitle>
+              <Label>Nombre y apellido</Label>
+              <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. María Pérez" autoFocus
+                onKeyDown={(e) => e.key === "Enter" && goNext()} />
+            </div>
+          )}
+
+          {key === "gender" && (
+            <div>
+              <SectionTitle sub="Se usa para mostrarte las categorías del torneo que te corresponden.">¿Cuál es tu género?</SectionTitle>
+              <div className="grid grid-cols-2 gap-3">
+                {[{ v: "masculino", l: "Masculino" }, { v: "femenino", l: "Femenino" }].map((o) => (
+                  <button key={o.v} type="button" onClick={() => setGender(o.v)} className="py-5 rounded-2xl text-sm font-bold"
+                    style={{ background: gender === o.v ? COLORS.court : "#EEF1F7", color: gender === o.v ? "#fff" : COLORS.ink, border: `1.5px solid ${gender === o.v ? COLORS.court : COLORS.line}` }}>
+                    {o.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {key === "birthdate" && (
+            <div>
+              <SectionTitle sub="La usamos solo para tu perfil del club.">¿Cuándo naciste?</SectionTitle>
+              <Label>Fecha de nacimiento</Label>
+              <input type="date" style={inputStyle} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} max={new Date().toISOString().slice(0, 10)} />
+            </div>
+          )}
+
+          {key === "dupr" && (
+            <div>
+              <SectionTitle sub="Si no lo sabes todavía, puedes dejarlo en blanco y completarlo después desde tu Perfil.">¿Cuál es tu nivel DUPR?</SectionTitle>
+              <Label>Nivel DUPR (opcional)</Label>
+              <div className="relative">
+                <Medal size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                <input type="number" step="0.01" min="2" max="8" style={{ ...inputStyle, paddingLeft: 32 }} value={duprRating}
+                  onChange={(e) => setDuprRating(e.target.value)} placeholder="Ej. 3.5" onKeyDown={(e) => e.key === "Enter" && goNext()} />
+              </div>
+            </div>
+          )}
+
+          {key === "zone" && (
+            <div>
+              <SectionTitle sub="Se usa para las estadísticas del club -- de dónde vienen sus jugadores.">¿Dónde vives?</SectionTitle>
+              <Label>Domicilio (opcional)</Label>
+              <div className="relative">
+                <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                <input style={{ ...inputStyle, paddingLeft: 32 }} value={zone}
+                  onChange={(e) => { setZone(e.target.value); setZoneStatus((s) => ({ ...s, auto: false, error: null })); }}
+                  placeholder="Ej. Chacao, Caracas" onKeyDown={(e) => e.key === "Enter" && goNext()} />
+              </div>
+              <div className="flex items-center justify-between mt-1 gap-2">
+                <p className="text-[10px]" style={{ color: zoneStatus.error ? "#B23A1B" : zoneStatus.auto ? COLORS.court : "#6B7688" }}>
+                  {zoneStatus.loading ? "Detectando tu ubicación…" : zoneStatus.auto ? "Detectada automáticamente — puedes editarla." : zoneStatus.error || "Puedes escribirlo a mano."}
+                </p>
+                <button type="button" onClick={detectZone} className="text-[10px] font-bold shrink-0" style={{ color: COLORS.court }}>Detectar de nuevo</button>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="text-xs font-semibold mt-3" style={{ color: "#B23A1B" }}>{error}</p>}
+
+          <div className="flex gap-2 mt-6">
+            {step > 0 && (
+              <button onClick={goBack} className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1" style={{ background: "#EDEFF4", color: COLORS.ink }}>
+                <ChevronLeft size={14} /> Atrás
+              </button>
+            )}
+            <button disabled={!requiredOk || submitting} onClick={goNext}
+              style={{ background: requiredOk && !submitting ? COLORS.clay : "#E5E5E5", color: requiredOk && !submitting ? "#fff" : "#999" }}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5">
+              {submitting ? "Guardando…" : isLast ? "Terminar" : "Siguiente"} {!submitting && !isLast && <ArrowRight size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <button onClick={logoutUser} className="w-full text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
+          Cerrar sesión y continuar más tarde
+        </button>
       </div>
     </div>
   );
@@ -2949,7 +3078,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
-    setMatchDuration, setBreakM, submitScore, currentUser, users, club,
+    setMatchDuration, setBreakM, submitScore, currentUser, users, club, setTab,
   } = props;
 
   return (
@@ -2980,7 +3109,7 @@ function TorneosSection(props) {
 
       {subTab === "inscripcion" && (
         <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking}
-          role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} />
+          role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} setTab={setTab} />
       )}
 
       {subTab === "calendario" && (
@@ -3757,20 +3886,25 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
   );
 }
 
-function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUser, users, club, tournament }) {
+function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUser, users, club, tournament, setTab }) {
   const isAdmin = role === "admin";
 
   // ---- Admin path: unchanged manual roster entry (free-text names), no payment step —
   // this mirrors what CategoriasTab's organizer roster editor already does. ----
   if (isAdmin) return <InscripcionAdminForm categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking} />;
 
-  // ---- Player self-registration: only categories still open to the current user, no free-text
-  // name for themselves, a searched/invited partner for doubles, and a real checkout step. ----
+  // ---- Player self-registration: only categories still open to the current user (y que
+  // correspondan a su género -- una categoría 'mixto' es visible para cualquiera), no
+  // free-text name for themselves, a searched/invited partner for doubles, and a real
+  // checkout step. Si el jugador todavía no completó su género en el perfil, no se puede
+  // filtrar -- se le muestran todas y se le avisa que complete su perfil. ----
   const eligible = categories.filter((c) => {
     const drawStarted = c.matches && c.matches.length > 0;
     if (drawStarted) return false;
     const alreadyIn = [...c.teams, ...c.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
-    return !alreadyIn;
+    if (alreadyIn) return false;
+    if (currentUser.gender && c.gender !== "mixto" && c.gender !== currentUser.gender) return false;
+    return true;
   });
 
   const [catId, setCatId] = useState(eligible[0]?.id || null);
@@ -3802,7 +3936,12 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUs
   return (
     <div className="mt-2 grid md:grid-cols-[280px_1fr] gap-5">
       <Card>
-        <SectionTitle sub="Solo se muestran las categorías en las que todavía puedes inscribirte.">Categorías abiertas</SectionTitle>
+        <SectionTitle sub="Solo se muestran las categorías en las que todavía puedes inscribirte, según tu género.">Categorías abiertas</SectionTitle>
+        {!currentUser.gender && (
+          <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2 rounded-lg mb-3 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            <AlertTriangle size={12} className="shrink-0" /> Completa tu género en Perfil para ver solo tus categorías — por ahora se muestran todas.
+          </button>
+        )}
         <div className="space-y-1.5">
           {eligible.map((c) => {
             const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
@@ -5234,17 +5373,20 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
   const [phone, setPhone] = useState(currentUser.phone || "");
   const [zone, setZone] = useState(currentUser.zone || "");
   const [duprRating, setDuprRating] = useState(currentUser.duprRating ?? "");
+  const [gender, setGender] = useState(currentUser.gender || "");
+  const [birthDate, setBirthDate] = useState(currentUser.birthDate || "");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   const dirty = name !== currentUser.name || phone !== (currentUser.phone || "") ||
-    zone !== (currentUser.zone || "") || String(duprRating) !== String(currentUser.duprRating ?? "");
+    zone !== (currentUser.zone || "") || String(duprRating) !== String(currentUser.duprRating ?? "") ||
+    gender !== (currentUser.gender || "") || birthDate !== (currentUser.birthDate || "");
 
   const save = async () => {
     if (!name.trim()) { setError("El nombre no puede quedar vacío."); return; }
     setError(""); setNotice(""); setSaving(true);
-    const result = await updateProfile({ name: name.trim(), phone: phone.trim(), zone: zone.trim(), duprRating: duprRating === "" ? "" : Number(duprRating) });
+    const result = await updateProfile({ name: name.trim(), phone: phone.trim(), zone: zone.trim(), duprRating: duprRating === "" ? "" : Number(duprRating), gender, birthDate });
     setSaving(false);
     if (result?.error) setError(result.error);
     else setNotice("Datos guardados.");
@@ -5297,8 +5439,25 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
               </div>
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Género</Label>
+              <div className="flex gap-1.5">
+                {[{ v: "masculino", l: "Masculino" }, { v: "femenino", l: "Femenino" }].map((o) => (
+                  <button key={o.v} type="button" onClick={() => setGender(o.v)} className="flex-1 py-2.5 rounded-xl text-xs font-bold"
+                    style={{ background: gender === o.v ? COLORS.court : "#EEF1F7", color: gender === o.v ? "#fff" : COLORS.ink }}>
+                    {o.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label>Fecha de nacimiento</Label>
+              <input type="date" style={inputStyle} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} max={new Date().toISOString().slice(0, 10)} />
+            </div>
+          </div>
           <div>
-            <Label>Zona / sector</Label>
+            <Label>Domicilio</Label>
             <div className="relative">
               <MapPinned size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
               <input style={{ ...inputStyle, paddingLeft: 32 }} value={zone} onChange={(e) => setZone(e.target.value)} placeholder="Ej. Chacao, Caracas" />

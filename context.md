@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.7.1 — con backend real
+## Estado actual: v2.8.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -212,3 +212,31 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   propio `role` — la política RLS "own profile update" es a nivel de fila, no de columna,
   así que sin este trigger un cliente podría auto-ascenderse a admin llamando al API
   directo (no vía la UI, que nunca manda ese campo, pero sí posible desde devtools).
+- **Registro simplificado + Onboarding moderno + torneo filtrado por género** (v2.8.0,
+  pedido explícito del usuario). Tres piezas:
+  1. `AuthScreen` modo "register" ahora solo pide correo + contraseña (antes también
+     nombre/DUPR/WhatsApp/zona ahí mismo). Nuevo componente `Onboarding` -- wizard de un
+     paso a la vez, se muestra automáticamente justo después de crear la cuenta (gate en
+     el componente principal, antes de renderizar la app:
+     `currentUser.role === "cliente" && !currentUser.onboardingCompleted`). Pide nombre y
+     apellido, género (Masculino/Femenino, obligatorios) y fecha de nacimiento
+     (obligatoria); DUPR y domicilio quedan opcionales/saltables (domicilio reutiliza el
+     campo `zone` que ya existía, con la misma detección por geolocalización que antes
+     vivía en el registro). `profiles.onboarding_completed` nuevo (default `true` para
+     backfill de cuentas existentes, `false` explícito en el trigger para cuentas nuevas)
+     es el flag que decide si se muestra el wizard.
+  2. `profiles.gender` nuevo (check `masculino`/`femenino`, nullable) y `profiles.birth_date`
+     nuevo (nullable, sin regla de negocio todavía -- no hay categorías juveniles/senior).
+     Editables después desde Perfil.
+  3. `InscripcionTab` (inscripción de jugador a torneo) filtra `eligible` categories por
+     género: si `currentUser.gender` está seteado, solo se muestran categorías de ese mismo
+     género o `mixto`. Si el jugador no completó su género, se le muestran todas con un
+     aviso ("Completa tu género en Perfil...") que navega directo a Perfil (`TorneosSection`
+     y `InscripcionTab` ahora reciben `setTab` para esto). El resto del flujo (elegir
+     categoría → pareja si es dobles → `CheckoutPanel` con el total) ya era prácticamente un
+     checkout de un paso, no se reestructuró.
+  Verificado end-to-end: cuenta nueva → wizard completo (incluido saltar DUPR/domicilio) →
+  aterriza en Actividades con los datos guardados; con género "femenino" la Inscripción
+  muestra solo categorías femeninas/mixtas (no la masculina de prueba); sin género
+  configurado (cuenta demo `cliente@club.com`, backfileada a `onboarding_completed=true`
+  así que no ve el wizard) se ven todas las categorías + el aviso, que navega a Perfil.
