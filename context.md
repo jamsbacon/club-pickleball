@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.4.1 — con backend real
+## Estado actual: v2.5.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -80,6 +80,22 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   abierto mostrando el error. Mismo patrón aplicado a `ClaseForm` por consistencia aunque
   no maneja imágenes. Verificado end-to-end: serie de 11 ocurrencias con una imagen de
   prueba de 1.69MB se creó sin problema, ninguna fila superó ~160KB de imagen guardada.
+- **Imágenes de Open Play movidas a Supabase Storage** (v2.5.0, bucket público
+  `open-play-images`, migración `open_play_images_storage.sql`). El fix anterior
+  (comprimir antes de guardar) evitaba el crash pero seguía guardando la MISMA imagen
+  duplicada como data URL en cada fila de la serie (una por ocurrencia) — el usuario
+  hizo notar que no era óptimo. Ahora `addOpenPlay` sube el archivo comprimido una sola
+  vez y todas las ocurrencias de la serie guardan la misma URL pública
+  (`open_plays.image` pasó de ~120-160KB por fila a ~120 caracteres). Políticas RLS en
+  `storage.objects`: lectura pública, escritura solo admin (`public.is_admin()`).
+  **Sin limpieza automática todavía**: borrar un Open Play (`removeOpenPlay`) o una serie
+  completa (`removeOpenPlaySeries`) no borra el archivo del bucket — varias filas pueden
+  compartir la misma imagen, así que no es seguro borrarla solo porque se borre una fila;
+  el archivo queda huérfano en Storage (costo de almacenamiento bajo, no es un bug de
+  datos, pero si se quiere limpieza real habría que rastrear cuántas filas siguen
+  referenciando cada URL antes de borrar el objeto). Verificado end-to-end: serie de 6
+  ocurrencias con imagen de 1.69MB → 1 solo archivo subido, las 6 filas comparten la
+  misma URL, la URL pública sirve el JPEG (200, ~121KB) sin sesión.
 
 ## Decisiones de producto/UI recientes
 

@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.4.1";
+const APP_VERSION = "2.5.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1534,6 +1534,20 @@ export default function PickleballTournamentApp() {
   // para que la UI las agrupe/borre en bloque.
   const addOpenPlay = async ({ recurrence, ...data }) => {
     try {
+      // Si hay imagen, se sube UNA sola vez a Storage y todas las ocurrencias de la serie
+      // guardan la misma URL pública -- antes cada fila repetía el data URL completo
+      // (~100-200KB duplicados por ocurrencia; con series largas eso era lo que hacía
+      // fallar el insert). OpenPlayForm ya entrega la imagen comprimida (máx. 1280px,
+      // JPEG ~75%), aquí solo se sube tal cual.
+      let imageUrl = data.image || "";
+      if (imageUrl.startsWith("data:")) {
+        const blob = await (await fetch(imageUrl)).blob();
+        const path = `${crypto.randomUUID()}.jpg`;
+        const { error: upErr } = await supabase.storage.from("open-play-images").upload(path, blob, { contentType: "image/jpeg" });
+        if (upErr) throw upErr;
+        imageUrl = supabase.storage.from("open-play-images").getPublicUrl(path).data.publicUrl;
+      }
+
       const occurrenceDates = [data.date];
       if (recurrence?.until && recurrence.until >= data.date) {
         occurrenceDates.length = 0;
@@ -1543,7 +1557,7 @@ export default function PickleballTournamentApp() {
       }
       const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
       const rows = occurrenceDates.map((dt) => ({
-        name: data.name, image: data.image || "", level: data.level, price: data.price, member_price: data.memberPrice,
+        name: data.name, image: imageUrl, level: data.level, price: data.price, member_price: data.memberPrice,
         capacity: data.capacity, description: data.description || "", court_ids: data.courtIds,
         date: dt, start_time: data.startTime, end_time: data.endTime, recurring_group_id: seriesId,
         occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
@@ -1553,9 +1567,6 @@ export default function PickleballTournamentApp() {
       setOpenPlays((p) => [...p, ...inserted.map((r) => mapOpenPlayRow({ ...r, open_play_registrations: [] }))]);
       return {};
     } catch (err) {
-      // Motivo típico: imagen sin comprimir repetida en cada ocurrencia de una serie larga
-      // hace el request gigante y el servidor lo rechaza (antes esto fallaba en silencio y
-      // el formulario se cerraba igual -- ver OpenPlayForm/EventosTab para el resto del fix).
       console.error("addOpenPlay:", err?.message || err);
       return { error: err?.message || "No se pudo crear la actividad. Si tiene imagen, intenta con una más liviana." };
     }
