@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.1.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4507,7 +4507,11 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
   return (
     <div className="mt-2 space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <SectionTitle sub="Toda la actividad programada del club: Open Plays, Torneos y Clases.">Actividades</SectionTitle>
+        {/* Oculto en mobile: el TopBar ya muestra "Actividades" + esta misma descripción justo
+           arriba, así que repetirlo acá solo empuja el buscador y las tarjetas más abajo. */}
+        <div className="hidden md:block">
+          <SectionTitle sub="Toda la actividad programada del club: Open Plays, Torneos y Clases.">Actividades</SectionTitle>
+        </div>
         {isAdmin && (
           <div className="flex gap-2">
             <button onClick={() => { setShowOpenPlayForm((s) => !s); setShowClaseForm(false); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.court, color: "#fff" }}><Plus size={14} /> Open Play</button>
