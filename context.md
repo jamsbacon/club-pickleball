@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.9.0 — con backend real
+## Estado actual: v2.10.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -264,3 +264,62 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   versión estaba corriendo sin cerrar sesión. Ahora también aparece en `Sidebar` (debajo
   del nombre del club, desktop) y en `TopBar` (fila `md:hidden`, junto al badge de rol/
   membresía, mobile).
+- **Reorganización completa de la sección Torneo (admin)** (v2.10.0, pedido explícito y
+  detallado del usuario — 6 pestañas). Antes: "Torneo" (datos generales) + "Categorías"
+  (mezclaba creación + participantes + formato en un solo lugar) + "Inscripción" (admin
+  veía un roster manual duplicado del que ya vivía dentro de Categorías) + Calendario +
+  Resultados. Ahora, solo para `role === "admin"`:
+  1. **Generalidades** (antes "Torneo", mismo contenido) + selector de canchas dedicadas
+     al torneo (`tournament.court_ids uuid[]`, nuevo, reutiliza `MultiCourtSelect`).
+     Vacío = usa todas las canchas del club (retrocompatible). `runScheduler` ahora filtra
+     por esto antes de llamar a `buildSchedule`. Se eligió selector de canchas específicas
+     en vez de un número suelto porque un número no le sirve al generador -- necesita los
+     IDs reales.
+  2. **Categorías** -- ahora SOLO crear/listar/borrar categorías (se le quitó
+     `TeamRegistration` y `FormatAdvisor`/`DrawSetup`/`DrawPreview`, que se movieron).
+  3. **Participantes** (nueva) -- `TeamRegistration` (agregar equipos, ver inscritos y
+     lista de espera) por categoría. Reemplaza TANTO lo que antes vivía dentro de
+     Categorías COMO la vieja pestaña "Inscripción" admin (`InscripcionAdminForm`, ahora
+     eliminada del archivo -- `TeamRegistration` ya cubría todo lo que hacía y además
+     mostraba los equipos ya inscritos, cosa que el formulario viejo no hacía).
+  4. **Formatos** (nueva) -- `FormatAdvisor`/`DrawSetup`/`DrawPreview` por categoría,
+     extraído de donde vivía antes dentro de Categorías.
+  Categorías/Participantes/Formatos comparten la MISMA `activeCat`/`setActiveCatId` (ya
+  vivía en `TorneosSection`) vía un nuevo `CategoryPicker` reutilizable -- elegir una
+  categoría en una pestaña la mantiene elegida al pasar a las otras. La vieja pestaña
+  "Inscripción" (carrito de checkout del jugador) ahora es visible SOLO para
+  `role === "cliente"` (antes admin también la veía, mostrando el roster manual
+  redundante); `InscripcionTab` perdió su branch de admin.
+  5. **Calendario**: ahora ordena por horario Y por cancha (antes solo por horario; el
+     orden de cancha era el que buildSchedule() fuera llenando, no estable). Se agregó
+     `findScheduleConflicts()` -- escanea TODO el calendario (todas las categorías) y
+     avisa si algún jugador quedó con dos partidos en el mismo día+hora, por `userId` si
+     se registró él mismo o por nombre si es roster manual.
+     **Corrección importante sobre lo que se le dijo al usuario antes de programar**: tras
+     trazar `buildSchedule` a fondo, el algoritmo YA es conflict-safe por construcción
+     (procesa categorías secuencialmente en el tiempo, nunca las solapa) -- no había un
+     bug real que arreglar, a diferencia de lo que se planteó al principio. Lo que sí es
+     cierto: esa secuencialidad desperdicia canchas (categorías corren una después de otra
+     en vez de en paralelo cuando sería seguro), y **arreglar eso** es esencialmente el
+     mismo problema que el asistente de distribución día-por-día que quedó fuera de
+     alcance esta vez -- se deja para esa sesión dedicada. El detector que sí se agregó
+     ahora es una red de seguridad real: cubre ediciones manuales futuras del calendario
+     (drag-and-drop, también pendiente) y cualquier cambio futuro al algoritmo.
+  6. **Resultados**: nuevo filtro "Todas" (default) -- cola combinada de partidos
+     jugables de TODAS las categorías, ordenada cronológicamente igual que Calendario
+     (mismo helper `chronoSort`), con badge de categoría por fila (`MatchRow` ganó un
+     prop `catName` opcional). Filtrar a una categoría puntual sigue disponible como
+     antes (con sus tablas/bracket), y esa vista individual también quedó ordenada
+     cronológicamente (antes no lo estaba).
+  **Fuera de alcance esta vez, confirmado con el usuario**: reprogramar partidos
+  arrastrándolos a mano, y el asistente que pregunta cómo distribuir rondas/categorías
+  por día (mezclado vs. por categoría, con dropdown de día). Motor de scheduling nuevo,
+  se hace en una sesión dedicada aparte.
+  Verificado end-to-end con datos sintéticos (2 categorías compartiendo "Jugador
+  Conflicto" en el mismo día+hora en canchas distintas, más una tercera categoría sin
+  conflicto): el banner de conflictos detectó exactamente el par correcto; Calendario y
+  Resultados("Todas") mostraron las 3 canchas en el mismo orden canónico
+  (Cancha 2, Cancha 1, Cancha 4). También confirmado: cliente ve exactamente
+  Inscripción/Calendario/Resultados (sin las 4 pestañas de admin); admin navega las 6 con
+  la categoría activa persistiendo entre Categorías→Participantes→Formatos; selector de
+  canchas de Generalidades persiste y su conteo se actualiza en vivo.

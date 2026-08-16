@@ -802,10 +802,38 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   };
 }
 
+// Escanea TODO el calendario ya generado (todas las categorías juntas) y detecta si algún
+// jugador quedó con dos partidos distintos en el mismo día+hora -- sin importar cancha o
+// categoría. buildSchedule() en la práctica nunca produce esto hoy (el orden en que llena
+// slots es secuencial por categoría), pero el chequeo se deja como red de seguridad
+// explícita: cubre ediciones manuales futuras del calendario y cualquier cambio al
+// algoritmo de scheduling que sí pudiera cruzar categorías. Identifica al jugador por
+// userId cuando se registró él mismo; si no, cae a nombre normalizado (roster manual).
+function findScheduleConflicts(categories) {
+  const bySlot = {}; // "playerKey||day||time" -> [{playerName, catName, matchId, day, time}]
+  categories.forEach((cat) => {
+    cat.matches.forEach((m) => {
+      if (!m.day || !m.time || isByeMatch(m)) return;
+      const a = cat.teams.find((t) => t.id === m.teamAId);
+      const b = cat.teams.find((t) => t.id === m.teamBId);
+      const players = [...(a?.players || []), ...(b?.players || [])];
+      const seen = new Set();
+      players.forEach((p) => {
+        const key = p.userId || (p.name || "").trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        const slotKey = `${key}||${m.day}||${m.time}`;
+        (bySlot[slotKey] = bySlot[slotKey] || []).push({ playerName: p.name, catName: cat.name, matchId: m.id, day: m.day, time: m.time });
+      });
+    });
+  });
+  return Object.values(bySlot).filter((entries) => new Set(entries.map((e) => e.matchId)).size > 1);
+}
+
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.9.0";
+const APP_VERSION = "2.10.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1164,12 +1192,13 @@ export default function PickleballTournamentApp() {
     dailyStart: r.daily_start, dailyEnd: r.daily_end, playDays: r.play_days || [],
     presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "", presalePrice: r.presale_price ?? "",
     regStart: r.reg_start || "", regEnd: r.reg_end || "", regularPrice: r.regular_price ?? "",
+    courtIds: r.court_ids || [],
   });
   const [tournament, setTournament] = useState({
     id: null, name: "Copa Verano Pickleball",
     startDate: "", endDate: "", dailyStart: "08:00", dailyEnd: "20:00",
     presaleStart: "", presaleEnd: "", presalePrice: "", regularPrice: "",
-    regStart: "", regEnd: "", playDays: [],
+    regStart: "", regEnd: "", playDays: [], courtIds: [],
   });
   useEffect(() => {
     supabase.from("tournaments").select("*").limit(1).then(({ data, error }) => {
@@ -1194,6 +1223,7 @@ export default function PickleballTournamentApp() {
     if ("regStart" in patch) dbPatch.reg_start = patch.regStart || null;
     if ("regEnd" in patch) dbPatch.reg_end = patch.regEnd || null;
     if ("regularPrice" in patch) dbPatch.regular_price = patch.regularPrice === "" ? null : patch.regularPrice;
+    if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
     supabase.from("tournaments").update(dbPatch).eq("id", tournament.id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
@@ -1712,8 +1742,16 @@ export default function PickleballTournamentApp() {
       setTab("club");
       return;
     }
+    // Generalidades deja elegir un subconjunto de canchas dedicadas al torneo -- si no se
+    // eligió ninguna (default), se sigue usando el club completo, igual que antes.
+    const tournamentCourts = tournament.courtIds?.length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
+    if (tournamentCourts.length === 0) {
+      alert("Las canchas elegidas para el torneo ya no existen -- revisa Generalidades.");
+      setTab("torneos");
+      return;
+    }
     const clone = structuredClone(categories);
-    const info = buildSchedule(clone, courts, dates, tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, occupiedKeys);
+    const info = buildSchedule(clone, tournamentCourts, dates, tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, occupiedKeys);
     setCategories(clone);
     setScheduleInfo(info);
     setTab("torneos");
@@ -2449,8 +2487,9 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 /* =========================================================================
    TAB: TORNEO
    ========================================================================= */
-function TorneoTab({ tournament, setTournament: updateTournament, dates }) {
+function TorneoTab({ tournament, setTournament: updateTournament, dates, courts }) {
   const set = (k, v) => updateTournament({ [k]: v });
+  const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
   return (
     <div className="grid md:grid-cols-2 gap-5 mt-2">
       <Card>
@@ -2497,6 +2536,16 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates }) {
             </div>
             <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
               {(tournament.playDays || []).length === 0 ? "Sin días marcados: se juega todos los días del rango." : "Solo se generarán partidos en los días marcados, dentro del rango de fechas."}
+            </p>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <Label>Canchas disponibles para el torneo</Label>
+              <span className="mono text-xs font-bold" style={{ color: COLORS.court }}>{selectedCourts.length} cancha{selectedCourts.length === 1 ? "" : "s"}</span>
+            </div>
+            <MultiCourtSelect courts={courts} value={tournament.courtIds || []} onChange={(ids) => set("courtIds", ids)} />
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+              {(tournament.courtIds || []).length === 0 ? "Ninguna marcada: el calendario usa todas las canchas del club." : "El calendario del torneo solo usará estas canchas -- el resto queda libre para reservas normales."}
             </p>
           </div>
           {dates.length > 0 && (
@@ -3059,10 +3108,16 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
 /* =========================================================================
    TAB: CATEGORIAS
    ========================================================================= */
+// El admin (quien crea/edita el torneo) ve 6 pestañas: Generalidades, Categorías,
+// Participantes, Formatos, Calendario, Resultados. El cliente solo ve su autoservicio
+// (Inscripción, con el carrito de checkout) más Calendario/Resultados -- Participantes es
+// el equivalente admin de "agregar/ver inscritos por categoría", así que no se duplica.
 const TORNEO_SUB_ITEMS = [
-  { id: "config", label: "Torneo", roles: ["admin"] },
+  { id: "config", label: "Generalidades", roles: ["admin"] },
   { id: "categorias", label: "Categorías", roles: ["admin"] },
-  { id: "inscripcion", label: "Inscripción", roles: ["admin", "cliente"] },
+  { id: "participantes", label: "Participantes", roles: ["admin"] },
+  { id: "formatos", label: "Formatos", roles: ["admin"] },
+  { id: "inscripcion", label: "Inscripción", roles: ["cliente"] },
   { id: "calendario", label: "Calendario", roles: ["admin", "cliente"] },
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
 ];
@@ -3095,21 +3150,27 @@ function TorneosSection(props) {
         ))}
       </div>
 
-      {subTab === "config" && role === "admin" && <TorneoTab tournament={tournament} setTournament={setTournament} dates={dates} />}
+      {subTab === "config" && role === "admin" && <TorneoTab tournament={tournament} setTournament={setTournament} dates={dates} courts={courts} />}
 
       {subTab === "categorias" && role === "admin" && (
-        <CategoriasTab
-          categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
-          addCategory={addCategory} removeCategory={removeCategory}
-          addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-          generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
-          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
-          setCategoryFormat={setCategoryFormat} courts={courts} dates={dates} tournament={tournament}
-          matchDuration={matchDuration} breakM={breakM}
-        />
+        <CategoriasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+          addCategory={addCategory} removeCategory={removeCategory} />
       )}
 
-      {subTab === "inscripcion" && (
+      {subTab === "participantes" && role === "admin" && (
+        <ParticipantesTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+          addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
+          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} />
+      )}
+
+      {subTab === "formatos" && role === "admin" && (
+        <FormatosTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+          generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
+          setCategoryFormat={setCategoryFormat} courts={courts} dates={dates} tournament={tournament}
+          matchDuration={matchDuration} breakM={breakM} />
+      )}
+
+      {subTab === "inscripcion" && role === "cliente" && (
         <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking}
           role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} setTab={setTab} />
       )}
@@ -3128,40 +3189,112 @@ function TorneosSection(props) {
   );
 }
 
-function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking, setCategoryFormat, courts, dates, tournament, matchDuration, breakM }) {
+// Sidebar de categorías compartida entre Categorías/Participantes/Formatos -- las tres
+// pestañas navegan la MISMA `activeCat`/`setActiveCatId` (viven en TorneosSection), así que
+// elegir una categoría en una se mantiene elegida al pasar a las otras. `onCreateClick` solo
+// se pasa desde Categorías -- es la única pestaña donde se crean categorías nuevas.
+function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, emptyHint }) {
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-sm">Categorías</h3>
+        {onCreateClick && <button onClick={onCreateClick} style={{ color: COLORS.court }}><Plus size={18} /></button>}
+      </div>
+      <div className="space-y-1.5">
+        {categories.map((c) => (
+          <button key={c.id} onClick={() => setActiveCatId(c.id)}
+            className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between group"
+            style={{ background: activeCat?.id === c.id ? "#EAF3E6" : "transparent", color: activeCat?.id === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: activeCat?.id === c.id ? 700 : 500 }}>
+            <span className="truncate">{c.name}</span>
+            <ChevronRight size={14} className="opacity-40 group-hover:opacity-100" />
+          </button>
+        ))}
+        {categories.length === 0 && <p className="text-xs text-gray-400 italic px-1">{emptyHint || "Crea tu primera categoría."}</p>}
+      </div>
+    </Card>
+  );
+}
+
+// Solo creación/listado/borrado de categorías -- agregar participantes vive en Participantes,
+// definir el formato vive en Formatos (antes las tres cosas estaban mezcladas aquí).
+function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory }) {
   const [showNew, setShowNew] = useState(categories.length === 0);
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <div>
-        <Card>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-bold text-sm">Categorías</h3>
-            <button onClick={() => setShowNew(true)} style={{ color: COLORS.court }}><Plus size={18} /></button>
-          </div>
-          <div className="space-y-1.5">
-            {categories.map((c) => (
-              <button key={c.id} onClick={() => setActiveCatId(c.id)}
-                className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between group"
-                style={{ background: activeCat?.id === c.id ? "#EAF3E6" : "transparent", color: activeCat?.id === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: activeCat?.id === c.id ? 700 : 500 }}>
-                <span className="truncate">{c.name}</span>
-                <ChevronRight size={14} className="opacity-40 group-hover:opacity-100" />
-              </button>
-            ))}
-            {categories.length === 0 && <p className="text-xs text-gray-400 italic px-1">Crea tu primera categoría.</p>}
-          </div>
-        </Card>
+        <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId} onCreateClick={() => setShowNew(true)} />
         {showNew && <NewCategoryForm onCreate={(...args) => { addCategory(...args); setShowNew(false); }} onCancel={() => setShowNew(false)} />}
       </div>
 
       <div>
         {activeCat ? (
-          <CategoryDetail cat={activeCat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-            generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeCategory={removeCategory}
-            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
-            setCategoryFormat={setCategoryFormat} categories={categories} courts={courts} dates={dates}
-            tournament={tournament} matchDuration={matchDuration} breakM={breakM} />
+          <Card>
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="disp text-lg" style={{ color: COLORS.courtDark }}>{activeCat.name}</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {activeCat.format ? FORMAT_LABELS[activeCat.format] : "Formato por definir"} · {activeCat.teams.length}{activeCat.maxTeams ? `/${activeCat.maxTeams}` : ""} equipo(s) inscrito(s)
+                  {activeCat.waitlist.length > 0 && ` · ${activeCat.waitlist.length} en lista de espera`}
+                </p>
+              </div>
+              <button onClick={() => removeCategory(activeCat.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+            </div>
+            <p className="text-xs mt-3" style={{ color: "#6B7688" }}>
+              Agrega o revisa sus inscritos en la pestaña <b>Participantes</b>, y define cómo se juega en <b>Formatos</b>.
+            </p>
+          </Card>
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona o crea una categoría para comenzar.</p></Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Ver/agregar participantes por categoría -- reemplaza tanto al editor de roster que antes
+// vivía dentro de Categorías (TeamRegistration) como al formulario admin de la vieja pestaña
+// Inscripción (InscripcionAdminForm, ahora retirado): TeamRegistration ya cubre todo lo que
+// hacía aquel formulario y además muestra los equipos/lista de espera ya inscritos.
+function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking }) {
+  return (
+    <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
+      <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+        emptyHint="Crea una categoría primero en la pestaña Categorías." />
+      <div>
+        {activeCat ? (
+          <TeamRegistration cat={activeCat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
+            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} />
+        ) : (
+          <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus participantes.</p></Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Formato de competencia por categoría -- recomendación (FormatAdvisor) mientras no tiene
+// formato, luego armar/ver el draw (DrawSetup/DrawPreview). Antes vivía mezclado dentro de
+// Categorías; misma lógica, solo movida a su propia pestaña.
+function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, closeGroupsAndSeedBracket, setCategoryFormat, courts, dates, tournament, matchDuration, breakM }) {
+  return (
+    <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
+      <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+        emptyHint="Crea una categoría primero en la pestaña Categorías." />
+      <div>
+        {activeCat ? (
+          <div className="space-y-5">
+            {!activeCat.format ? (
+              <FormatAdvisor cat={activeCat} categories={categories} courts={courts} dates={dates} tournament={tournament}
+                matchDuration={matchDuration} breakM={breakM} onSelect={(f) => setCategoryFormat(activeCat.id, f)} />
+            ) : (
+              <>
+                <DrawSetup cat={activeCat} generateDraw={generateDraw} onChangeFormat={() => setCategoryFormat(activeCat.id, null)} />
+                {activeCat.drawGenerated && <DrawPreview cat={activeCat} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} />}
+              </>
+            )}
+          </div>
+        ) : (
+          <Card><p className="text-sm text-gray-400">Selecciona una categoría para definir su formato.</p></Card>
         )}
       </div>
     </div>
@@ -3230,37 +3363,6 @@ function NewCategoryForm({ onCreate, onCancel }) {
   );
 }
 
-function CategoryDetail({ cat, addTeam, removeTeam, removeFromWaitlist, generateDraw, closeGroupsAndSeedBracket, removeCategory, suggestedRanking, upsertPlayerRanking, setCategoryFormat, categories, courts, dates, tournament, matchDuration, breakM }) {
-  return (
-    <div className="space-y-5">
-      <Card>
-        <div className="flex items-start justify-between">
-          <div>
-            <h3 className="disp text-lg" style={{ color: COLORS.courtDark }}>{cat.name}</h3>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {cat.format ? FORMAT_LABELS[cat.format] : "Formato por definir"} · {cat.teams.length}{cat.maxTeams ? `/${cat.maxTeams}` : ""} equipo(s) inscrito(s)
-              {cat.waitlist.length > 0 && ` · ${cat.waitlist.length} en lista de espera`}
-            </p>
-          </div>
-          <button onClick={() => removeCategory(cat.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
-        </div>
-      </Card>
-
-      <TeamRegistration cat={cat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-        suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} />
-
-      {!cat.format ? (
-        <FormatAdvisor cat={cat} categories={categories} courts={courts} dates={dates} tournament={tournament}
-          matchDuration={matchDuration} breakM={breakM} onSelect={(f) => setCategoryFormat(cat.id, f)} />
-      ) : (
-        <>
-          <DrawSetup cat={cat} generateDraw={generateDraw} onChangeFormat={() => setCategoryFormat(cat.id, null)} />
-          {cat.drawGenerated && <DrawPreview cat={cat} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} />}
-        </>
-      )}
-    </div>
-  );
-}
 
 /* Player-name + ranking field: autofills the ranking from the app-wide directory
    (by prior tournament results) and only lets the organizer override it. */
@@ -3675,9 +3777,18 @@ function PodiumSlot({ place, label }) {
 function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, matchDuration, setMatchDuration, breakM, setBreakM, role }) {
   const isAdmin = role === "admin";
   const [filterCat, setFilterCat] = useState("all");
+  // Orden canónico de canchas = el orden en que viven en Club -- así "por horario y por
+  // cancha" es estable (mismo orden cada vez que se recalcula), no el orden en que
+  // buildSchedule() las fue llenando.
+  const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
   const allMatches = categories.flatMap((c) => c.matches.map((m) => ({ ...m, catName: c.name })));
-  const scheduled = allMatches.filter((m) => m.day).sort((a, b) => (a.day + a.time).localeCompare(b.day + b.time));
+  const scheduled = allMatches.filter((m) => m.day).sort((a, b) => {
+    const byTime = (a.day + a.time).localeCompare(b.day + b.time);
+    if (byTime !== 0) return byTime;
+    return (courtOrder[a.courtId] ?? 0) - (courtOrder[b.courtId] ?? 0);
+  });
   const filtered = filterCat === "all" ? scheduled : scheduled.filter((m) => m.categoryId === filterCat);
+  const conflicts = useMemo(() => findScheduleConflicts(categories), [categories]);
 
   const catById = {}; categories.forEach((c) => catById[c.id] = c);
   const courtById = {}; courts.forEach((c) => courtById[c.id] = c);
@@ -3742,6 +3853,19 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                 <AlertTriangle size={14} /> No alcanzan los horarios disponibles ({scheduleInfo.unscheduledGroup} partido(s) sin ubicar). Agrega más canchas, días u horas.
               </div>
             )}
+          </div>
+        )}
+
+        {conflicts.length > 0 && (
+          <div className="mt-3 text-xs px-3 py-2.5 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
+            <p className="font-bold flex items-center gap-1.5"><AlertTriangle size={14} /> {conflicts.length} jugador(es) con dos partidos al mismo horario</p>
+            <ul className="mt-1.5 space-y-0.5">
+              {conflicts.map((entries, i) => (
+                <li key={i}>
+                  <b>{entries[0].playerName}</b> — {formatDateHuman(entries[0].day)} {formatTimeAmPm(entries[0].time)}: {entries.map((e) => e.catName).join(" y ")}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </Card>
@@ -3888,13 +4012,9 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
   );
 }
 
-function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUser, users, club, tournament, setTab }) {
-  const isAdmin = role === "admin";
-
-  // ---- Admin path: unchanged manual roster entry (free-text names), no payment step —
-  // this mirrors what CategoriasTab's organizer roster editor already does. ----
-  if (isAdmin) return <InscripcionAdminForm categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking} />;
-
+// Solo cliente -- el equivalente admin ("agregar/ver participantes por categoría") vive en
+// su propia pestaña Participantes (ver TorneosSection), no aquí.
+function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, users, club, tournament, setTab }) {
   // ---- Player self-registration: only categories still open to the current user (y que
   // correspondan a su género -- una categoría 'mixto' es visible para cualquiera), no
   // free-text name for themselves, a searched/invited partner for doubles, and a real
@@ -4073,116 +4193,77 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, role, currentUs
   );
 }
 
-// Organizer-side manual roster entry — kept exactly as before (free-text names, no payment
-// step) for adding walk-in players the admin is registering on someone's behalf.
-function InscripcionAdminForm({ categories, addTeam, suggestedRanking }) {
-  const [catId, setCatId] = useState(categories[0]?.id || null);
-  const cat = categories.find((c) => c.id === catId) || null;
-  const [done, setDone] = useState(false);
-
-  const isDoubles = cat && cat.modality !== "individual";
-  const [p1, setP1] = useState(""); const [r1, setR1] = useState("");
-  const [p2, setP2] = useState(""); const [r2, setR2] = useState("");
-
-  if (categories.length === 0) {
-    return <Card className="mt-2"><p className="text-sm text-gray-400">Todavía no hay categorías abiertas para inscripción.</p></Card>;
-  }
-
-  const full = cat && cat.maxTeams && cat.teams.length >= cat.maxTeams;
-
-  const submit = () => {
-    if (!cat || !p1.trim()) return;
-    if (isDoubles && !p2.trim()) return;
-    const r1Final = r1 !== "" ? r1 : suggestedRanking(p1);
-    const players = [{ name: p1.trim(), ranking: r1Final || 0 }];
-    if (isDoubles) {
-      const r2Final = r2 !== "" ? r2 : suggestedRanking(p2);
-      players.push({ name: p2.trim(), ranking: r2Final || 0 });
-    }
-    addTeam(cat.id, players);
-    setP1(""); setR1(""); setP2(""); setR2("");
-    setDone(true);
-  };
-
-  return (
-    <div className="mt-2 grid md:grid-cols-[280px_1fr] gap-5">
-      <Card>
-        <SectionTitle sub="Elige la categoría en la que quieres registrar un equipo.">Categorías abiertas</SectionTitle>
-        <div className="space-y-1.5">
-          {categories.map((c) => {
-            const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
-            return (
-              <button key={c.id} onClick={() => { setCatId(c.id); setDone(false); }}
-                className="w-full text-left px-3 py-2.5 rounded-xl text-sm"
-                style={{ background: catId === c.id ? "#EAF3E6" : "#EEF1F7", color: catId === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: catId === c.id ? 700 : 500 }}>
-                <div className="flex items-center justify-between">
-                  <span className="truncate">{c.name}</span>
-                  {spotsLeft === 0 ? <Hourglass size={13} color="#8A5A16" /> : <UserPlus size={13} className="opacity-50" />}
-                </div>
-                <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
-                  {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{c.waitlist.length > 0 ? ` · ${c.waitlist.length} en espera` : ""}
-                </p>
-              </button>
-            );
-          })}
-        </div>
-      </Card>
-
-      {cat && (
-        <Card>
-          <SectionTitle sub="Registro manual de un equipo — por ejemplo, un jugador que se inscribe presencialmente.">
-            Registrar equipo en {cat.name}
-          </SectionTitle>
-
-          {full && (
-            <div className="text-xs px-3 py-2 rounded-lg mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-              <Hourglass size={12} /> El cupo está lleno — se inscribirá en la lista de espera.
-            </div>
-          )}
-
-          <div className={`grid gap-3 mb-4 ${isDoubles ? "sm:grid-cols-2" : ""}`}>
-            <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} ranking={r1} setRanking={setR1} suggestedRanking={suggestedRanking} />
-            {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} ranking={r2} setRanking={setR2} suggestedRanking={suggestedRanking} />}
-          </div>
-
-          <button onClick={submit} style={{ background: COLORS.clay, color: "#fff" }} className="px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
-            <UserPlus size={16} /> {full ? "Agregar a la lista de espera" : "Registrar equipo"}
-          </button>
-
-          {done && (
-            <div className="mt-4 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
-              <CheckCircle2 size={13} /> Equipo registrado en {cat.name}.
-            </div>
-          )}
-        </Card>
-      )}
-    </div>
-  );
-}
-
 /* =========================================================================
    TAB: RESULTADOS
    ========================================================================= */
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket }) {
-  const [catId, setCatId] = useState(categories[0]?.id || null);
-  const cat = categories.find((c) => c.id === catId) || categories[0] || null;
+// Orden cronológico compartido por Resultados y Calendario: día+hora, luego cancha (según
+// el orden en Club) -- así ambas pestañas listan los partidos en el mismo orden.
+function chronoSort(matches, courtOrder) {
+  return [...matches].sort((a, b) => {
+    if (!a.day && !b.day) return 0;
+    if (!a.day) return 1;
+    if (!b.day) return -1;
+    const byTime = (a.day + a.time).localeCompare(b.day + b.time);
+    if (byTime !== 0) return byTime;
+    return (courtOrder[a.courtId] ?? 0) - (courtOrder[b.courtId] ?? 0);
+  });
+}
 
-  if (!cat) return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket }) {
+  // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
+  // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
+  // Filtrar a una categoría puntual (con sus tablas/bracket) sigue disponible como antes.
+  const [catId, setCatId] = useState("all");
+  const cat = catId === "all" ? null : categories.find((c) => c.id === catId) || null;
+  const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
+
+  if (categories.length === 0) {
+    return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
+  }
+
+  const catChips = (
+    <div className="flex flex-wrap gap-2">
+      <button onClick={() => setCatId("all")} className="px-3 py-1.5 rounded-full text-xs font-semibold"
+        style={{ background: catId === "all" ? COLORS.court : "#EAEEF5", color: catId === "all" ? "#fff" : COLORS.ink }}>Todas</button>
+      {categories.map((c) => (
+        <button key={c.id} onClick={() => setCatId(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
+          style={{ background: catId === c.id ? COLORS.court : "#EAEEF5", color: catId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
+      ))}
+    </div>
+  );
+
+  if (catId === "all") {
+    const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
+    const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m)).map((m) => ({ ...m, __cat: c }))), courtOrder);
+    return (
+      <div className="mt-2 space-y-5">
+        {catChips}
+        <Card>
+          <SectionTitle sub="Todos los partidos jugables de todas las categorías, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.">Cargar resultados</SectionTitle>
+          <div className="space-y-3">
+            {allPlayable.map((m) => (
+              <MatchRow key={m.id} m={m} cat={m.__cat} catName={m.__cat.name} courtById={courtById}
+                teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
+                onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
+            ))}
+            {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">Genera primero el draw de alguna categoría.</p>}
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!cat) return <Card className="mt-2"><p className="text-sm text-gray-400">Categoría no encontrada.</p></Card>;
 
   const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
-  const playableMatches = cat.matches.filter((m) => !isByeMatch(m));
+  const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m)), courtOrder);
   const isDouble = cat.format === "doble_eliminacion";
   const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
 
   return (
     <div className="mt-2 space-y-5">
-      <div className="flex flex-wrap gap-2">
-        {categories.map((c) => (
-          <button key={c.id} onClick={() => setCatId(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
-            style={{ background: catId === c.id ? COLORS.court : "#EAEEF5", color: catId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
-        ))}
-      </div>
+      {catChips}
 
       {cat.groups.map((g) => (
         <Card key={g.id}>
@@ -4257,7 +4338,7 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, courtById, teamName, bestOf, onSubmit }) {
+function MatchRow({ m, cat, catName, courtById, teamName, bestOf, onSubmit }) {
   const [open, setOpen] = useState(false);
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
@@ -4277,6 +4358,7 @@ function MatchRow({ m, cat, courtById, teamName, bestOf, onSubmit }) {
     <div className="rounded-xl p-3" style={{ background: m.winnerId ? "#EEF1F7" : "#FAFAF7", border: `1px solid ${COLORS.line}` }}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="text-sm">
+          {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide mr-2 align-middle" style={{ background: "#EAF0F8", color: COLORS.court }}>{catName}</span>}
           <span className={m.winnerId === m.teamAId ? "font-bold" : ""}>{labelA}</span>
           <span className="text-gray-400 mx-1.5">vs</span>
           <span className={m.winnerId === m.teamBId ? "font-bold" : ""}>{labelB}</span>
