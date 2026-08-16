@@ -26,7 +26,7 @@ function shuffle(arr) {
 }
 
 const teamRankSum = (team) =>
-  team.players.reduce((s, p) => s + (Number(p.ranking) || 0), 0);
+  (team.players || []).reduce((s, p) => s + (Number(p.ranking) || 0), 0);
 
 function nextPow2(n) {
   let p = 1;
@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "2.0.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1010,7 +1010,20 @@ export default function PickleballTournamentApp() {
   };
 
   // ---- Reservas (individual court bookings) ----
+  const mapBookingRow = (r) => ({
+    id: r.id, courtId: r.court_id, date: r.date, timeMin: r.time_min, blockMinutes: r.block_minutes,
+    userId: r.user_id, userName: r.user_name, status: r.status, paymentMethod: r.payment_method,
+    reference: r.reference, proofName: r.proof_name,
+    priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
+    createdAt: new Date(r.created_at).getTime(),
+  });
   const [bookings, setBookings] = useState([]);
+  useEffect(() => {
+    supabase.from("bookings").select("*").order("created_at").then(({ data, error }) => {
+      if (error) { console.error("fetch bookings:", error.message); return; }
+      setBookings(data.map(mapBookingRow));
+    });
+  }, []);
 
   // ---- Eventos: Open Plays y Clases (Torneos ya tiene su propio estado más abajo) ----
   const [openPlays, setOpenPlays] = useState([]);
@@ -1022,31 +1035,32 @@ export default function PickleballTournamentApp() {
   // Real checkout math for courts/Open Plays/classes reads the flat memberPrice set on each
   // item instead (see courtPriceInfo/memberDiscountPct) — the rateCard here is the plan's
   // advertised rate sheet, editable independently of what's actually been created yet.
-  const [membershipPlans, setMembershipPlans] = useState([
-    {
-      id: uid("plan"), name: "Sin membresía", monthlyPrice: 0, privateCourtAccess: false,
-      description: "Pago por uso (Pay per play), sin mensualidad.",
-      rateCard: [
-        { id: uid("rate"), label: "Reserva de cancha (1h30min)", price: 15 },
-        { id: uid("rate"), label: "Open Plays", price: 8 },
-        { id: uid("rate"), label: "Jornada de Liga", price: 10 },
-        { id: uid("rate"), label: "Mes de clases con APG", price: 80 },
-        { id: uid("rate"), label: "Sesión de Drills", price: 6 },
-      ],
-    },
-    {
-      id: uid("plan"), name: "Membresía", monthlyPrice: 50, privateCourtAccess: true,
-      description: "Precios preferenciales en canchas, Open Plays, ligas, clases y drills.",
-      rateCard: [
-        { id: uid("rate"), label: "Reserva de cancha (1h30min)", price: 5 },
-        { id: uid("rate"), label: "Open Plays", price: 0 },
-        { id: uid("rate"), label: "Jornada de Liga", price: 5 },
-        { id: uid("rate"), label: "Mes de clases con APG", price: 60 },
-        { id: uid("rate"), label: "Sesión de Drills", price: 3 },
-      ],
-    },
-  ]);
+  const mapPlanRow = (r) => ({
+    id: r.id, name: r.name, monthlyPrice: Number(r.monthly_price), privateCourtAccess: r.private_court_access,
+    description: r.description || "",
+    rateCard: (r.rate_card || []).map((it, i) => ({ id: it.id || `${r.id}-rate-${i}`, label: it.label, price: it.price })),
+  });
+  const [membershipPlans, setMembershipPlans] = useState([]);
+  const fetchMembershipPlans = async () => {
+    const { data, error } = await supabase.from("membership_plans").select("*").order("monthly_price");
+    if (error) { console.error("fetch membership_plans:", error.message); return; }
+    setMembershipPlans(data.map(mapPlanRow));
+  };
+  useEffect(() => { fetchMembershipPlans(); }, []);
+
+  const mapSubscriptionRow = (r) => ({
+    id: r.id, planId: r.plan_id, userId: r.user_id, paymentMethod: r.payment_method,
+    reference: r.reference, proofName: r.proof_name,
+    priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
+    createdAt: new Date(r.created_at).getTime(),
+  });
   const [subscriptions, setSubscriptions] = useState([]);
+  useEffect(() => {
+    supabase.from("subscriptions").select("*").order("created_at").then(({ data, error }) => {
+      if (error) { console.error("fetch subscriptions:", error.message); return; }
+      setSubscriptions(data.map(mapSubscriptionRow));
+    });
+  }, []);
 
   // ---- Cuentas (login / registro) ----
   // Backend real: Supabase Auth guarda las credenciales; la tabla `profiles` (1:1 con
@@ -1108,21 +1122,76 @@ export default function PickleballTournamentApp() {
   };
   const logoutUser = async () => { await supabase.auth.signOut(); };
 
+  const mapTournamentRow = (r) => ({
+    id: r.id, name: r.name, startDate: r.start_date || "", endDate: r.end_date || "",
+    dailyStart: r.daily_start, dailyEnd: r.daily_end, playDays: r.play_days || [],
+    presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "", presalePrice: r.presale_price ?? "",
+    regStart: r.reg_start || "", regEnd: r.reg_end || "", regularPrice: r.regular_price ?? "",
+  });
   const [tournament, setTournament] = useState({
-    name: "Copa Verano Pickleball",
+    id: null, name: "Copa Verano Pickleball",
     startDate: "", endDate: "", dailyStart: "08:00", dailyEnd: "20:00",
     presaleStart: "", presaleEnd: "", presalePrice: "", regularPrice: "",
     regStart: "", regEnd: "", playDays: [],
   });
+  useEffect(() => {
+    supabase.from("tournaments").select("*").limit(1).then(({ data, error }) => {
+      if (error) { console.error("fetch tournaments:", error.message); return; }
+      if (data?.[0]) setTournament(mapTournamentRow(data[0]));
+    });
+  }, []);
+  // Actualiza local al toque y persiste en `tournaments` en segundo plano (mismo patrón que updateClub).
+  const updateTournament = (patch) => {
+    setTournament((t) => ({ ...t, ...patch }));
+    if (!tournament.id) return;
+    const dbPatch = {};
+    if ("name" in patch) dbPatch.name = patch.name;
+    if ("startDate" in patch) dbPatch.start_date = patch.startDate || null;
+    if ("endDate" in patch) dbPatch.end_date = patch.endDate || null;
+    if ("dailyStart" in patch) dbPatch.daily_start = patch.dailyStart;
+    if ("dailyEnd" in patch) dbPatch.daily_end = patch.dailyEnd;
+    if ("playDays" in patch) dbPatch.play_days = patch.playDays;
+    if ("presaleStart" in patch) dbPatch.presale_start = patch.presaleStart || null;
+    if ("presaleEnd" in patch) dbPatch.presale_end = patch.presaleEnd || null;
+    if ("presalePrice" in patch) dbPatch.presale_price = patch.presalePrice === "" ? null : patch.presalePrice;
+    if ("regStart" in patch) dbPatch.reg_start = patch.regStart || null;
+    if ("regEnd" in patch) dbPatch.reg_end = patch.regEnd || null;
+    if ("regularPrice" in patch) dbPatch.regular_price = patch.regularPrice === "" ? null : patch.regularPrice;
+    supabase.from("tournaments").update(dbPatch).eq("id", tournament.id).then(({ error }) => {
+      if (error) console.error("updateTournament:", error.message);
+    });
+  };
+
   const [matchDuration, setMatchDuration] = useState(35);
   const [breakM, setBreakM] = useState(10);
+
+  const mapCategoryRow = (r) => ({
+    id: r.id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
+    maxTeams: r.max_teams, seedMode: r.seed_mode, bestOf: r.best_of, bracketSize: r.bracket_size,
+    teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
+    drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
+  });
   const [categories, setCategories] = useState([]);
+  useEffect(() => {
+    supabase.from("categories").select("*").order("created_at").then(({ data, error }) => {
+      if (error) { console.error("fetch categories:", error.message); return; }
+      setCategories(data.map(mapCategoryRow));
+    });
+  }, []);
   const [activeCatId, setActiveCatId] = useState(null);
   const [scheduleInfo, setScheduleInfo] = useState(null);
   // App-wide player ranking directory: { "nombre en minúsculas": { name, ranking } }
-  // In a real deployment this would be the players' historical ranking across
-  // all tournaments in the platform; here it's simulated for the current session.
+  // Vive en la tabla `player_directory` -- historial de ranking sugerido, compartido por
+  // todos los organizadores, no solo dentro de la sesión de un navegador.
   const [playerDirectory, setPlayerDirectory] = useState({});
+  useEffect(() => {
+    supabase.from("player_directory").select("*").then(({ data, error }) => {
+      if (error) { console.error("fetch player_directory:", error.message); return; }
+      const dict = {};
+      (data || []).forEach((r) => { dict[r.key] = { name: r.name, ranking: Number(r.ranking) }; });
+      setPlayerDirectory(dict);
+    });
+  }, []);
 
   const activeCat = categories.find((c) => c.id === activeCatId) || null;
   const currentPlan = membershipPlans.find((p) => p.id === currentUser?.planId) || membershipPlans[0];
@@ -1145,8 +1214,24 @@ export default function PickleballTournamentApp() {
     return set;
   }, [bookings, openPlays, classes, categories]);
 
+  // Punto único por el que pasan setCategoryFormat/addTeam/removeTeam/removeFromWaitlist/
+  // generateDraw/closeGroupsAndSeedBracket/submitScore -- persistir acá cubre los siete de una vez.
+  // NOTA: no se puede leer una variable asignada *dentro* del updater de setCategories
+  // justo después de llamarlo -- en React 18 ese updater no corre síncronamente, corre
+  // en el siguiente render. Por eso `updated` se calcula ACÁ AFUERA, a partir del
+  // `categories` del closure de este render (que si es el actual), y se usa tanto para
+  // el setState como para el guardado en Supabase.
   const updateCategory = (id, updater) => {
-    setCategories((prev) => prev.map((c) => (c.id === id ? updater({ ...c }) : c)));
+    const current = categories.find((c) => c.id === id);
+    if (!current) return;
+    const updated = updater({ ...current });
+    setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
+    supabase.from("categories").update({
+      name: updated.name, max_teams: updated.maxTeams, seed_mode: updated.seedMode,
+      best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
+      draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
+      teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
+    }).eq("id", id).then(({ error }) => { if (error) console.error("updateCategory:", error.message); });
   };
 
   // Looks up a player's suggested ranking from the directory (read-only unless the organizer overrides it).
@@ -1158,27 +1243,32 @@ export default function PickleballTournamentApp() {
   const upsertPlayerRanking = (name, ranking, force = false) => {
     const key = name.trim().toLowerCase();
     if (!key) return;
-    setPlayerDirectory((prev) => {
-      if (prev[key] && !force) return prev; // never silently overwrite an existing ranking
-      return { ...prev, [key]: { name: name.trim(), ranking: Number(ranking) || 0 } };
+    if (playerDirectory[key] && !force) return; // never silently overwrite an existing ranking
+    const entry = { name: name.trim(), ranking: Number(ranking) || 0 };
+    setPlayerDirectory((prev) => ({ ...prev, [key]: entry }));
+    supabase.from("player_directory").upsert({ key, name: entry.name, ranking: entry.ranking }).then(({ error }) => {
+      if (error) console.error("upsertPlayerRanking:", error.message);
     });
   };
 
-  const addCategory = (modality, gender, level, maxTeams) => {
-    const cat = {
-      id: uid("cat"), name: makeCategoryName(modality, gender, level), format: null,
-      modality, gender, level, maxTeams: maxTeams ? Number(maxTeams) : null,
-      seedMode: "ranking", bestOf: 3, bracketSize: 4,
-      teams: [], waitlist: [], groups: [], matches: [], drawGenerated: false, groupsClosed: false,
-    };
+  const addCategory = async (modality, gender, level, maxTeams) => {
+    const { data: row, error } = await supabase.from("categories").insert({
+      tournament_id: tournament.id, name: makeCategoryName(modality, gender, level),
+      modality, gender, level, max_teams: maxTeams ? Number(maxTeams) : null,
+      seed_mode: "ranking", best_of: 3, bracket_size: 4,
+      teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
+    }).select().single();
+    if (error) { console.error("addCategory:", error.message); return; }
+    const cat = mapCategoryRow(row);
     setCategories((p) => [...p, cat]);
     setActiveCatId(cat.id);
-    setTab("categorias");
+    setTab("torneos"); // "categorias" es una sub-pestaña de TorneosSection, no un tab de nivel superior
   };
 
   const removeCategory = (id) => {
     setCategories((p) => p.filter((c) => c.id !== id));
     if (activeCatId === id) setActiveCatId(null);
+    supabase.from("categories").delete().eq("id", id).then(({ error }) => { if (error) console.error("removeCategory:", error.message); });
   };
 
   // The format is chosen once registration numbers are known (see FormatAdvisor), not at category creation.
@@ -1333,13 +1423,31 @@ export default function PickleballTournamentApp() {
   };
 
   // ---- Reservas ----
-  const createBooking = (data) => {
-    const booking = { id: uid("book"), status: data.paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo", createdAt: Date.now(), ...data };
+  const createBooking = async (data) => {
+    const status = data.paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo";
+    const { data: row, error } = await supabase.from("bookings").insert({
+      court_id: data.courtId, date: data.date, time_min: data.timeMin, block_minutes: data.blockMinutes,
+      user_id: data.userId, user_name: data.userName, status,
+      payment_method: data.paymentMethod, reference: data.reference, proof_name: data.proofName,
+      price_usd: data.priceUsd, price_bs: data.priceBs,
+    }).select().single();
+    if (error) { console.error("createBooking:", error.message); return null; }
+    const booking = mapBookingRow(row);
     setBookings((p) => [...p, booking]);
     return booking;
   };
-  const cancelBooking = (id) => setBookings((p) => p.map((b) => (b.id === id ? { ...b, status: "cancelada" } : b)));
-  const confirmBooking = (id) => setBookings((p) => p.map((b) => (b.id === id ? { ...b, status: "confirmada" } : b)));
+  const cancelBooking = (id) => {
+    setBookings((p) => p.map((b) => (b.id === id ? { ...b, status: "cancelada" } : b)));
+    supabase.from("bookings").update({ status: "cancelada" }).eq("id", id).then(({ error }) => {
+      if (error) console.error("cancelBooking:", error.message);
+    });
+  };
+  const confirmBooking = (id) => {
+    setBookings((p) => p.map((b) => (b.id === id ? { ...b, status: "confirmada" } : b)));
+    supabase.from("bookings").update({ status: "confirmada" }).eq("id", id).then(({ error }) => {
+      if (error) console.error("confirmBooking:", error.message);
+    });
+  };
 
   // ---- Eventos: Open Plays y Clases ----
   const computeOccupiedBlocks = (courtIds, date, startTime, endTime) => {
@@ -1349,65 +1457,155 @@ export default function PickleballTournamentApp() {
     courtIds.forEach((courtId) => blocks.forEach((timeMin) => out.push({ courtId, date, timeMin })));
     return out;
   };
-  // A recurring Open Play (e.g. "Jueves de DUPR, todos los jueves a las 6pm") is stored as one
-  // independent entry per weekly occurrence — each keeps its own date, court blocks and
-  // registrations — linked by a shared recurringGroupId so the UI can group/bulk-delete them.
-  const addOpenPlay = ({ recurrence, ...data }) => {
+
+  const mapRegistrationRow = (r) => ({
+    id: r.id, userId: r.user_id, userName: r.user_name, paymentMethod: r.payment_method,
+    reference: r.reference, proofName: r.proof_name,
+    priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
+    createdAt: new Date(r.created_at).getTime(),
+  });
+  const mapOpenPlayRow = (r) => ({
+    id: r.id, type: "open_play", name: r.name, image: r.image || "", level: r.level,
+    price: Number(r.price), memberPrice: Number(r.member_price), capacity: r.capacity,
+    description: r.description || "", courtIds: r.court_ids || [], date: r.date,
+    startTime: r.start_time, endTime: r.end_time, recurringGroupId: r.recurring_group_id,
+    occupiedBlocks: r.occupied_blocks || [],
+    registrations: (r.open_play_registrations || []).map(mapRegistrationRow),
+    createdAt: new Date(r.created_at).getTime(),
+  });
+  const mapClassRow = (r) => ({
+    id: r.id, type: "clase", academyName: r.academy_name, level: r.level,
+    price: Number(r.price), memberPrice: Number(r.member_price),
+    courtIds: r.court_ids || [], date: r.date, startTime: r.start_time, endTime: r.end_time,
+    recurringGroupId: r.recurring_group_id, occupiedBlocks: r.occupied_blocks || [],
+    registrations: (r.class_registrations || []).map(mapRegistrationRow),
+    createdAt: new Date(r.created_at).getTime(),
+  });
+
+  const fetchOpenPlays = async () => {
+    const { data, error } = await supabase.from("open_plays").select("*, open_play_registrations(*)").order("date");
+    if (error) { console.error("fetch open_plays:", error.message); return; }
+    setOpenPlays(data.map(mapOpenPlayRow));
+  };
+  const fetchClasses = async () => {
+    const { data, error } = await supabase.from("classes").select("*, class_registrations(*)").order("date");
+    if (error) { console.error("fetch classes:", error.message); return; }
+    setClasses(data.map(mapClassRow));
+  };
+  useEffect(() => { fetchOpenPlays(); fetchClasses(); }, []);
+
+  // A recurring Open Play (e.g. "Jueves de DUPR, todos los jueves a las 6pm") se guarda como
+  // una fila independiente por cada ocurrencia semanal -- todas comparten recurring_group_id
+  // (un UUID generado acá, porque Postgres necesita el mismo valor en cada fila del lote)
+  // para que la UI las agrupe/borre en bloque.
+  const addOpenPlay = async ({ recurrence, ...data }) => {
+    const occurrenceDates = [data.date];
     if (recurrence?.until && recurrence.until >= data.date) {
-      const seriesId = uid("series");
-      const occurrenceDates = [];
+      occurrenceDates.length = 0;
       let d = new Date(data.date + "T00:00:00");
       const until = new Date(recurrence.until + "T00:00:00");
-      while (d <= until) {
-        occurrenceDates.push(d.toISOString().slice(0, 10));
-        d.setDate(d.getDate() + 7);
-      }
-      const entries = occurrenceDates.map((dt) => ({
-        id: uid("op"), type: "open_play", registrations: [], recurringGroupId: seriesId,
-        ...data, date: dt, occupiedBlocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
-      }));
-      setOpenPlays((p) => [...p, ...entries]);
-      return;
+      while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
     }
-    const occupiedBlocks = computeOccupiedBlocks(data.courtIds, data.date, data.startTime, data.endTime);
-    setOpenPlays((p) => [...p, { id: uid("op"), type: "open_play", registrations: [], occupiedBlocks, ...data }]);
+    const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
+    const rows = occurrenceDates.map((dt) => ({
+      name: data.name, image: data.image || "", level: data.level, price: data.price, member_price: data.memberPrice,
+      capacity: data.capacity, description: data.description || "", court_ids: data.courtIds,
+      date: dt, start_time: data.startTime, end_time: data.endTime, recurring_group_id: seriesId,
+      occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
+    }));
+    const { data: inserted, error } = await supabase.from("open_plays").insert(rows).select();
+    if (error) { console.error("addOpenPlay:", error.message); return; }
+    setOpenPlays((p) => [...p, ...inserted.map((r) => mapOpenPlayRow({ ...r, open_play_registrations: [] }))]);
   };
-  // Same weekly-expansion pattern as addOpenPlay above: a recurring class (e.g. "Lunes con
-  // Academia PickleUp") becomes one independent entry per occurrence, linked by recurringGroupId.
-  const addClass = ({ recurrence, ...data }) => {
+  // Mismo patrón de expansión que addOpenPlay, para clases recurrentes.
+  const addClass = async ({ recurrence, ...data }) => {
+    const occurrenceDates = [data.date];
     if (recurrence?.until && recurrence.until >= data.date) {
-      const seriesId = uid("series");
-      const occurrenceDates = [];
+      occurrenceDates.length = 0;
       let d = new Date(data.date + "T00:00:00");
       const until = new Date(recurrence.until + "T00:00:00");
-      while (d <= until) {
-        occurrenceDates.push(d.toISOString().slice(0, 10));
-        d.setDate(d.getDate() + 7);
-      }
-      const entries = occurrenceDates.map((dt) => ({
-        id: uid("cls"), type: "clase", registrations: [], recurringGroupId: seriesId,
-        ...data, date: dt, occupiedBlocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
-      }));
-      setClasses((p) => [...p, ...entries]);
-      return;
+      while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
     }
-    const occupiedBlocks = computeOccupiedBlocks(data.courtIds, data.date, data.startTime, data.endTime);
-    setClasses((p) => [...p, { id: uid("cls"), type: "clase", registrations: [], occupiedBlocks, ...data }]);
+    const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
+    const rows = occurrenceDates.map((dt) => ({
+      academy_name: data.academyName, level: data.level, price: data.price, member_price: data.memberPrice,
+      court_ids: data.courtIds, date: dt, start_time: data.startTime, end_time: data.endTime,
+      recurring_group_id: seriesId, occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
+    }));
+    const { data: inserted, error } = await supabase.from("classes").insert(rows).select();
+    if (error) { console.error("addClass:", error.message); return; }
+    setClasses((p) => [...p, ...inserted.map((r) => mapClassRow({ ...r, class_registrations: [] }))]);
   };
-  const removeClassSeries = (recurringGroupId) => setClasses((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
-  const removeOpenPlay = (id) => setOpenPlays((p) => p.filter((e) => e.id !== id));
-  const removeOpenPlaySeries = (recurringGroupId) => setOpenPlays((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
-  const removeClass = (id) => setClasses((p) => p.filter((e) => e.id !== id));
-  const registerForOpenPlay = (id, reg) => setOpenPlays((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, { ...reg, createdAt: Date.now() }] } : e)));
-  const registerForClass = (id, reg) => setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, { ...reg, createdAt: Date.now() }] } : e)));
+  const removeOpenPlay = (id) => {
+    setOpenPlays((p) => p.filter((e) => e.id !== id));
+    supabase.from("open_plays").delete().eq("id", id).then(({ error }) => { if (error) console.error("removeOpenPlay:", error.message); });
+  };
+  const removeOpenPlaySeries = (recurringGroupId) => {
+    setOpenPlays((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
+    supabase.from("open_plays").delete().eq("recurring_group_id", recurringGroupId).then(({ error }) => { if (error) console.error("removeOpenPlaySeries:", error.message); });
+  };
+  const removeClass = (id) => {
+    setClasses((p) => p.filter((e) => e.id !== id));
+    supabase.from("classes").delete().eq("id", id).then(({ error }) => { if (error) console.error("removeClass:", error.message); });
+  };
+  const removeClassSeries = (recurringGroupId) => {
+    setClasses((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
+    supabase.from("classes").delete().eq("recurring_group_id", recurringGroupId).then(({ error }) => { if (error) console.error("removeClassSeries:", error.message); });
+  };
+  const registerForOpenPlay = async (id, reg) => {
+    const { data: row, error } = await supabase.from("open_play_registrations").insert({
+      open_play_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
+      reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
+    }).select().single();
+    if (error) { console.error("registerForOpenPlay:", error.message); return; }
+    setOpenPlays((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
+  };
+  const registerForClass = async (id, reg) => {
+    const { data: row, error } = await supabase.from("class_registrations").insert({
+      class_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
+      reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
+    }).select().single();
+    if (error) { console.error("registerForClass:", error.message); return; }
+    setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
+  };
 
   // ---- Membresías ----
-  const addMembershipPlan = (plan) => setMembershipPlans((p) => [...p, { id: uid("plan"), ...plan }]);
-  const updateMembershipPlan = (id, patch) => setMembershipPlans((p) => p.map((pl) => (pl.id === id ? { ...pl, ...patch } : pl)));
-  const removeMembershipPlan = (id) => setMembershipPlans((p) => p.filter((pl) => pl.id !== id));
-  const subscribeToPlan = (planId, checkout) => {
-    setSubscriptions((p) => [...p, { id: uid("sub"), planId, userId: currentUser?.id, createdAt: Date.now(), ...checkout }]);
+  const addMembershipPlan = async (plan) => {
+    const { data: row, error } = await supabase.from("membership_plans").insert({
+      name: plan.name, monthly_price: plan.monthlyPrice, private_court_access: plan.privateCourtAccess,
+      description: plan.description, rate_card: plan.rateCard,
+    }).select().single();
+    if (error) { console.error("addMembershipPlan:", error.message); return; }
+    setMembershipPlans((p) => [...p, mapPlanRow(row)]);
+  };
+  const updateMembershipPlan = (id, patch) => {
+    setMembershipPlans((p) => p.map((pl) => (pl.id === id ? { ...pl, ...patch } : pl)));
+    const dbPatch = {};
+    if ("name" in patch) dbPatch.name = patch.name;
+    if ("monthlyPrice" in patch) dbPatch.monthly_price = patch.monthlyPrice;
+    if ("privateCourtAccess" in patch) dbPatch.private_court_access = patch.privateCourtAccess;
+    if ("description" in patch) dbPatch.description = patch.description;
+    if ("rateCard" in patch) dbPatch.rate_card = patch.rateCard;
+    supabase.from("membership_plans").update(dbPatch).eq("id", id).then(({ error }) => {
+      if (error) console.error("updateMembershipPlan:", error.message);
+    });
+  };
+  const removeMembershipPlan = (id) => {
+    setMembershipPlans((p) => p.filter((pl) => pl.id !== id));
+    supabase.from("membership_plans").delete().eq("id", id).then(({ error }) => {
+      if (error) console.error("removeMembershipPlan:", error.message);
+    });
+  };
+  const subscribeToPlan = async (planId, checkout) => {
+    const { data: row, error } = await supabase.from("subscriptions").insert({
+      plan_id: planId, user_id: currentUser?.id, payment_method: checkout.paymentMethod,
+      reference: checkout.reference, proof_name: checkout.proofName, price_usd: checkout.priceUsd, price_bs: checkout.priceBs,
+    }).select().single();
+    if (error) { console.error("subscribeToPlan:", error.message); return; }
+    setSubscriptions((p) => [...p, mapSubscriptionRow(row)]);
     setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId } : u)));
+    const { error: profErr } = await supabase.from("profiles").update({ plan_id: planId }).eq("id", currentUser?.id);
+    if (profErr) console.error("subscribeToPlan (profiles):", profErr.message);
   };
 
   const runScheduler = () => {
@@ -1426,6 +1624,14 @@ export default function PickleballTournamentApp() {
     setCategories(clone);
     setScheduleInfo(info);
     setTab("torneos");
+    // buildSchedule pudo tocar matches/groups de varias categorías a la vez -- upsert en bloque
+    // (updateCategory solo cubre una categoría por llamada, no sirve para este caso).
+    supabase.from("categories").upsert(clone.map((c) => ({
+      id: c.id, tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
+      max_teams: c.maxTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
+      draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
+      teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
+    }))).then(({ error }) => { if (error) console.error("runScheduler persist:", error.message); });
   };
 
   const stats = {
@@ -1491,7 +1697,7 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "torneos" && (
             <TorneosSection
               role={role} currentUser={currentUser} users={users} club={club}
-              tournament={tournament} setTournament={setTournament} dates={dates}
+              tournament={tournament} setTournament={updateTournament} dates={dates}
               categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
               addCategory={addCategory} removeCategory={removeCategory}
               addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
@@ -1857,8 +2063,8 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 /* =========================================================================
    TAB: TORNEO
    ========================================================================= */
-function TorneoTab({ tournament, setTournament, dates }) {
-  const set = (k, v) => setTournament((t) => ({ ...t, [k]: v }));
+function TorneoTab({ tournament, setTournament: updateTournament, dates }) {
+  const set = (k, v) => updateTournament({ [k]: v });
   return (
     <div className="grid md:grid-cols-2 gap-5 mt-2">
       <Card>
@@ -2650,11 +2856,11 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
       )}
 
       <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-        {cat.teams.map((t) => (
+        {(cat.teams || []).map((t) => (
           <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
             <div>
               <span className="font-semibold">{t.name}</span>
-              <span className="text-gray-500 ml-2 text-xs">{t.players.map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
+              <span className="text-gray-500 ml-2 text-xs">{(t.players || []).map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
             </div>
             <div className="flex items-center gap-3">
               <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
@@ -2662,16 +2868,16 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
             </div>
           </div>
         ))}
-        {cat.teams.length === 0 && <p className="text-xs text-gray-400 italic">Sin equipos todavía.</p>}
+        {(cat.teams || []).length === 0 && <p className="text-xs text-gray-400 italic">Sin equipos todavía.</p>}
       </div>
 
-      {cat.waitlist.length > 0 && (
+      {(cat.waitlist || []).length > 0 && (
         <div className="mt-4 pt-4 border-t" style={{ borderColor: COLORS.line }}>
           <p className="text-xs font-bold uppercase tracking-wide mb-2 flex items-center gap-1.5" style={{ color: "#8A5A16" }}>
             <Hourglass size={12} /> Lista de espera ({cat.waitlist.length})
           </p>
           <div className="space-y-1.5">
-            {cat.waitlist.map((t, i) => (
+            {(cat.waitlist || []).map((t, i) => (
               <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#FBF3E4" }}>
                 <span><span className="mono text-xs mr-2" style={{ color: "#8A5A16" }}>#{i + 1}</span>{t.name}</span>
                 <button onClick={() => removeFromWaitlist(cat.id, t.id)} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
