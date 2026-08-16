@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.1.3 — con backend real
+## Estado actual: v2.3.0 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -82,6 +82,23 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   quería la estética de máquina de escribir).
 - Espaciado mobile en Actividades ajustado para que coincida pixel a pixel con el de
   Torneos (medido con `getBoundingClientRect`, no a ojo).
+- **Recuperación de contraseña** (v2.2.0): link "¿Olvidaste tu contraseña?" en login →
+  `supabase.auth.resetPasswordForEmail()` → el evento `PASSWORD_RECOVERY` de
+  `onAuthStateChange` fuerza una pantalla de "nueva contraseña" (tiene prioridad sobre
+  `currentUser`, aunque la sesión de recuperación ya sea válida) antes de dejar pasar a la
+  app. **Pendiente de verificar en el Dashboard de Supabase** (no vía CLI/DB): que
+  Authentication → URL Configuration tenga `https://club-pickleball.vercel.app/**` en
+  Redirect URLs, o el link del correo no redirige bien.
+- **Onboarding de registro ampliado + tab "Usuarios"** (v2.3.0): el registro ahora pide
+  nivel DUPR (`profiles.dupr_rating`, opcional) y WhatsApp (`profiles.phone`) además de
+  nombre/zona — decisión de producto: el teléfono es el canal que ya usa el club para
+  pagos/reservas pendientes de verificación (mismo criterio que `pago_movil.telefono`), y
+  el DUPR es el estándar de nivel en pickleball. Nueva pestaña admin **Usuarios**
+  (`NAV_ITEMS`, solo `role === "admin"`) lista todos los `profiles` con su membresía actual
+  (`profiles.plan_id`, no el historial de `subscriptions`) — buscador por nombre/correo/tel.
+  DUPR y teléfono NO se pidieron para las cuentas ya registradas antes de esto; quedan en
+  blanco hasta que el usuario las complete en algún futuro editor de perfil (no existe
+  todavía, ver "Lo que falta").
 
 ## Lo que falta / posibles próximos pasos
 
@@ -89,5 +106,7 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
 - El resto de la UI (Reservas, Torneos, Membresías) no se ha revisado con el mismo nivel
   de detalle de espaciado mobile que Actividades — si el usuario pide lo mismo en otra
   pestaña, aplicar el mismo patrón (medir con JS, no solo comparar screenshots).
-- No hay recuperación de contraseña, ni edición de perfil, ni gestión de usuarios desde
-  la UI de admin (todo eso viviría en Supabase Auth pero no tiene pantalla propia todavía).
+- No hay edición de perfil (el propio usuario no puede cambiar su nombre/zona/DUPR/teléfono
+  desde la UI una vez registrado — solo el admin puede editar `profiles` directo en Supabase).
+- La pestaña Usuarios es solo lectura (listar + buscar); no tiene edición de rol/membresía
+  desde la UI todavía (cambiar `role`/`plan_id` a mano sigue siendo vía SQL/dashboard).

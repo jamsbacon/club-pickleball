@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.3.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1081,7 +1081,8 @@ export default function PickleballTournamentApp() {
 
   const mapProfileRow = (p) => ({
     id: p.id, name: p.name, email: p.email, role: p.role, planId: p.plan_id,
-    zone: p.zone || "", createdAt: new Date(p.created_at).getTime(),
+    zone: p.zone || "", duprRating: p.dupr_rating ?? null, phone: p.phone || "",
+    createdAt: new Date(p.created_at).getTime(),
   });
 
   const fetchAllProfiles = async () => {
@@ -1105,11 +1106,15 @@ export default function PickleballTournamentApp() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const registerUser = async ({ name, email, password, zone }) => {
+  const registerUser = async ({ name, email, password, zone, duprRating, phone }) => {
     if (!name.trim() || !email.trim() || !password) return { error: "Completa todos los campos." };
     const { error } = await supabase.auth.signUp({
       email: email.trim(), password,
-      options: { data: { name: name.trim(), role: "cliente", zone: (zone || "").trim() } },
+      options: { data: {
+        name: name.trim(), role: "cliente", zone: (zone || "").trim(),
+        dupr_rating: duprRating === "" || duprRating == null ? "" : String(duprRating),
+        phone: (phone || "").trim(),
+      } },
     });
     if (error) {
       const msg = /already registered|already exists/i.test(error.message) ? "Ya existe una cuenta con ese correo." : error.message;
@@ -1716,6 +1721,10 @@ export default function PickleballTournamentApp() {
         <main className="max-w-7xl w-full mx-auto px-4 md:px-10 pt-6 pb-28 md:pb-16 flex-1">
           {effectiveTab === "club" && role === "admin" && <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate} />}
 
+          {effectiveTab === "usuarios" && role === "admin" && (
+            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} />
+          )}
+
           {effectiveTab === "estadisticas" && role === "admin" && (
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
               membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories} />
@@ -1798,6 +1807,8 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
   const [newPassword, setNewPassword] = useState("");
   const [newPassword2, setNewPassword2] = useState("");
   const [zone, setZone] = useState("");
+  const [duprRating, setDuprRating] = useState("");
+  const [phone, setPhone] = useState("");
   const [zoneStatus, setZoneStatus] = useState({ loading: false, error: null, auto: false });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState(""); // mensaje de éxito (no es error), p.ej. "te enviamos un correo"
@@ -1842,7 +1853,7 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
     setSubmitting(true);
     let result;
     if (mode === "login") result = await loginUser(email, password);
-    else if (mode === "register") result = await registerUser({ name, email, password, zone });
+    else if (mode === "register") result = await registerUser({ name, email, password, zone, duprRating, phone });
     else if (mode === "recover") {
       result = await resetPasswordUser(email);
       // Mensaje genérico a propósito -- no confirma si el correo existe o no en el sistema.
@@ -1941,6 +1952,30 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
               </div>
             )}
 
+            {mode === "register" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label>Nivel DUPR</Label>
+                  <div className="relative">
+                    <Medal size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                    <input type="number" step="0.01" min="2" max="8" style={{ ...inputStyle, paddingLeft: 32 }} value={duprRating}
+                      onChange={(e) => setDuprRating(e.target.value)} placeholder="Ej. 3.5" />
+                  </div>
+                </div>
+                <div>
+                  <Label>WhatsApp</Label>
+                  <div className="relative">
+                    <Smartphone size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+                    <input type="tel" style={{ ...inputStyle, paddingLeft: 32 }} value={phone}
+                      onChange={(e) => setPhone(e.target.value)} placeholder="0414-1234567" />
+                  </div>
+                </div>
+                <p className="text-[10px] col-span-2 -mt-1" style={{ color: "#6B7688" }}>
+                  El DUPR es opcional si aún no lo sabes — ayuda a ubicarte en torneos y Open Plays de tu nivel. El WhatsApp es para avisos de reservas y pagos.
+                </p>
+              </div>
+            )}
+
             {mode === "reset" && (
               <>
                 <div>
@@ -2019,6 +2054,7 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
    ========================================================================= */
 const NAV_ITEMS = [
   { id: "club", label: "Club", short: "Club", icon: Building2, sub: "Horario, canchas y precios", roles: ["admin"] },
+  { id: "usuarios", label: "Usuarios", short: "Usuarios", icon: Users, sub: "Directorio de jugadores y sus membresías", roles: ["admin"] },
   { id: "estadisticas", label: "Estadísticas", short: "Stats", icon: BarChart3, sub: "Ingresos, horarios pico, membresías y zonas", roles: ["admin"] },
   // "eventos" (id interno sin cambios) va primero -- es la sección de aterrizaje del cliente.
   { id: "eventos", label: "Actividades", short: "Actividades", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
@@ -2642,6 +2678,91 @@ function LoyalClientsCard({ bookings, openPlays, classes, categories, users }) {
         </div>
       )}
     </Card>
+  );
+}
+
+/* =========================================================================
+   TAB: USUARIOS (admin) — directorio de todos los que se han registrado en
+   la app, con su membresía actual. `planId` en el perfil es la fuente de
+   verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
+   es el historial de altas, no se usa aquí más que para el contador de arriba.
+   ========================================================================= */
+function UsuariosTab({ users, subscriptions, membershipPlans }) {
+  const [query, setQuery] = useState("");
+
+  const planFor = (u) => (membershipPlans.find((p) => p.id === u.planId) || membershipPlans[0] || null);
+
+  const clients = users.filter((u) => u.role === "cliente");
+  const totalMembers = clients.filter((u) => (planFor(u)?.monthlyPrice || 0) > 0).length;
+
+  const q = query.trim().toLowerCase();
+  const filtered = [...users]
+    .filter((u) => !q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q) || (u.phone || "").includes(q))
+    .sort((a, b) => b.createdAt - a.createdAt);
+
+  return (
+    <div className="mt-2 space-y-6">
+      <SectionTitle sub="Todos los que se han registrado en la app, su nivel DUPR, contacto y qué membresía tienen activa.">Usuarios</SectionTitle>
+
+      <div className="grid sm:grid-cols-3 gap-4">
+        <StatCard label="Jugadores registrados" value={clients.length} icon={Users} />
+        <StatCard label="Con membresía activa" value={totalMembers} icon={Award} />
+        <StatCard label="Suscripciones históricas" value={subscriptions.length} icon={DollarSign} />
+      </div>
+
+      <Card>
+        <div className="relative mb-4">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+          <input style={{ ...inputStyle, paddingLeft: 32, maxWidth: 340 }} value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar por nombre, correo o teléfono…" />
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-gray-400 uppercase">
+                <th className="py-1.5 pr-3">Jugador</th>
+                <th className="py-1.5 pr-3">Contacto</th>
+                <th className="py-1.5 pr-3">Zona</th>
+                <th className="py-1.5 pr-3">DUPR</th>
+                <th className="py-1.5 pr-3">Rol</th>
+                <th className="py-1.5 pr-3">Membresía</th>
+                <th className="py-1.5 pr-3">Miembro desde</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((u) => {
+                const plan = planFor(u);
+                const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
+                return (
+                  <tr key={u.id} className="border-t" style={{ borderColor: COLORS.line }}>
+                    <td className="py-2 pr-3 font-semibold">{u.name}</td>
+                    <td className="py-2 pr-3 text-gray-500">
+                      <div>{u.email}</div>
+                      {u.phone && <div className="text-xs">{u.phone}</div>}
+                    </td>
+                    <td className="py-2 pr-3 text-gray-500">{u.zone || "—"}</td>
+                    <td className="py-2 pr-3 mono">{u.duprRating != null ? Number(u.duprRating).toFixed(2) : "—"}</td>
+                    <td className="py-2 pr-3">
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: u.role === "admin" ? "#FBEAE3" : "#EAF0F8", color: u.role === "admin" ? COLORS.clay : COLORS.court }}>
+                        {u.role === "admin" ? "Admin" : "Cliente"}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isPaidPlan ? COLORS.court : "#6B7688" }}>
+                        {plan?.name || "Sin membresía"}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3 text-gray-500">{formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10))}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filtered.length === 0 && <p className="text-sm text-gray-400 py-4">No hay usuarios que coincidan con la búsqueda.</p>}
+        </div>
+      </Card>
+    </div>
   );
 }
 
