@@ -8,6 +8,7 @@ import {
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search
 } from "lucide-react";
+import { supabase } from "./lib/supabaseClient";
 
 /* =========================================================================
    ID / UTILITY HELPERS
@@ -803,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.8.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -979,34 +980,64 @@ export default function PickleballTournamentApp() {
   const [subscriptions, setSubscriptions] = useState([]);
 
   // ---- Cuentas (login / registro) ----
-  // No hay backend real: los usuarios viven en memoria durante la sesión del navegador.
-  // Se incluyen cuentas de muestra (admin y cliente) para poder probar ambas vistas de inmediato.
-  const [users, setUsers] = useState([
-    { id: uid("user"), name: "Administrador del Club", email: "admin@club.com", password: "admin123", role: "admin", planId: null, zone: "", createdAt: Date.now() },
-    { id: uid("user"), name: "Cliente de Prueba", email: "cliente@club.com", password: "cliente123", role: "cliente", planId: null, zone: "", createdAt: Date.now() },
-  ]);
-  const [currentUserId, setCurrentUserId] = useState(null);
+  // Backend real: Supabase Auth guarda las credenciales; la tabla `profiles` (1:1 con
+  // auth.users, creada por un trigger en cuanto alguien se registra — ver supabase/schema.sql)
+  // guarda el resto (name, role, planId, zone). `users` sigue siendo la lista completa de
+  // perfiles, igual que antes, para no tocar los componentes que ya la consumen
+  // (EstadisticasTab, LoyalClientsCard, PartnerPicker, InscripcionTab) — solo cambia de dónde
+  // sale el dato: antes vivía en memoria, ahora se trae de la tabla `profiles`.
+  const [users, setUsers] = useState([]);
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const currentUserId = session?.user?.id || null;
   const currentUser = users.find((u) => u.id === currentUserId) || null;
 
-  const registerUser = ({ name, email, password, zone }) => {
+  const mapProfileRow = (p) => ({
+    id: p.id, name: p.name, email: p.email, role: p.role, planId: p.plan_id,
+    zone: p.zone || "", createdAt: new Date(p.created_at).getTime(),
+  });
+
+  const fetchAllProfiles = async () => {
+    const { data, error } = await supabase.from("profiles").select("*").order("created_at");
+    if (error) { console.error("fetchAllProfiles:", error.message); return; }
+    setUsers(data.map(mapProfileRow));
+  };
+
+  useEffect(() => {
+    fetchAllProfiles();
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((event, newSession) => {
+      setSession(newSession);
+      if (event === "SIGNED_IN") fetchAllProfiles(); // trae el perfil recién creado/logueado
+      if (event === "SIGNED_OUT") setTab("club");
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  const registerUser = async ({ name, email, password, zone }) => {
     if (!name.trim() || !email.trim() || !password) return { error: "Completa todos los campos." };
-    if (users.some((u) => u.email.toLowerCase() === email.trim().toLowerCase())) {
-      return { error: "Ya existe una cuenta con ese correo." };
+    const { error } = await supabase.auth.signUp({
+      email: email.trim(), password,
+      options: { data: { name: name.trim(), role: "cliente", zone: (zone || "").trim() } },
+    });
+    if (error) {
+      const msg = /already registered|already exists/i.test(error.message) ? "Ya existe una cuenta con ese correo." : error.message;
+      return { error: msg };
     }
-    const user = { id: uid("user"), name: name.trim(), email: email.trim(), password, role: "cliente", planId: null, zone: (zone || "").trim(), createdAt: Date.now() };
-    setUsers((p) => [...p, user]);
-    setCurrentUserId(user.id);
     setTab("reservas");
-    return { user };
+    return {};
   };
-  const loginUser = (email, password) => {
-    const user = users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase() && u.password === password);
-    if (!user) return { error: "Correo o contraseña incorrectos." };
-    setCurrentUserId(user.id);
-    setTab(user.role === "admin" ? "club" : "reservas");
-    return { user };
+  const loginUser = async (email, password) => {
+    const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) return { error: "Correo o contraseña incorrectos." };
+    const { data: prof } = await supabase.from("profiles").select("role").eq("id", data.user.id).single();
+    setTab(prof?.role === "admin" ? "club" : "reservas");
+    return {};
   };
-  const logoutUser = () => setCurrentUserId(null);
+  const logoutUser = async () => { await supabase.auth.signOut(); };
 
   const [tournament, setTournament] = useState({
     name: "Copa Verano Pickleball",
@@ -1335,6 +1366,14 @@ export default function PickleballTournamentApp() {
     members: subscriptions.length,
   };
 
+  // Mientras se resuelve la sesión de Supabase (una sola vez, al cargar) no mostramos el
+  // login todavía -- evita el parpadeo de "no hay sesión" antes de confirmar que sí la hay.
+  if (authLoading) {
+    return (
+      <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen" />
+    );
+  }
+
   if (!currentUser) {
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
@@ -1471,9 +1510,12 @@ function AuthScreen({ club, registerUser, loginUser }) {
 
   useEffect(() => { if (mode === "register") detectZone(); }, [mode]);
 
-  const submit = () => {
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
     setError("");
-    const result = mode === "login" ? loginUser(email, password) : registerUser({ name, email, password, zone });
+    setSubmitting(true);
+    const result = mode === "login" ? await loginUser(email, password) : await registerUser({ name, email, password, zone });
+    setSubmitting(false);
     if (result?.error) setError(result.error);
   };
 
@@ -1556,8 +1598,8 @@ function AuthScreen({ club, registerUser, loginUser }) {
 
             {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
-            <button onClick={submit} style={{ background: COLORS.clay, color: "#fff" }} className="w-full py-2.5 rounded-xl font-bold text-sm mt-1">
-              {mode === "login" ? "Entrar" : "Crear cuenta"}
+            <button disabled={submitting} onClick={submit} style={{ background: COLORS.clay, color: "#fff", opacity: submitting ? 0.6 : 1 }} className="w-full py-2.5 rounded-xl font-bold text-sm mt-1">
+              {submitting ? "Un momento…" : mode === "login" ? "Entrar" : "Crear cuenta"}
             </button>
           </div>
 
