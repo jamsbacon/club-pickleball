@@ -10,7 +10,7 @@ App de gestión para un club de pickleball ("Pickle Hub"): reservas de cancha, t
 con brackets, Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.8.0 — con backend real
+## Estado actual: v2.8.1 — con backend real
 
 Hasta hace poco toda la app vivía en memoria del navegador (se perdía todo al recargar).
 Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
@@ -240,3 +240,8 @@ Ya no. **Todo está migrado a Supabase** (Postgres + Auth):
   muestra solo categorías femeninas/mixtas (no la masculina de prueba); sin género
   configurado (cuenta demo `cliente@club.com`, backfileada a `onboarding_completed=true`
   así que no ve el wizard) se ven todas las categorías + el aviso, que navega a Perfil.
+- **Versión visible dentro de la app, no solo en login** (v2.8.1). Antes `v{APP_VERSION}`
+  solo se mostraba en `AuthScreen`, así que una vez adentro no había forma de saber en qué
+  versión estaba corriendo sin cerrar sesión. Ahora también aparece en `Sidebar` (debajo
+  del nombre del club, desktop) y en `TopBar` (fila `md:hidden`, junto al badge de rol/
+  membresía, mobile).

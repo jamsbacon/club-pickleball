@@ -805,7 +805,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.8.0";
+const APP_VERSION = "2.8.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2264,6 +2264,7 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
         <h1 className="disp text-lg leading-snug mt-3 line-clamp-2" style={{ color: COLORS.chalk }}>
           {club.name || "Mi Club"}
         </h1>
+        <p className="mono text-[10px] mt-1" style={{ color: "#4E6180" }}>v{APP_VERSION}</p>
       </div>
 
       <nav className="flex-1 px-3 space-y-1">
@@ -2335,6 +2336,7 @@ function TopBar({ tab, stats, currentUser, currentPlan, logoutUser, visibleNav }
           </div>
         </div>
         <div className="flex items-center gap-2.5 md:hidden shrink-0">
+          <span className="mono text-[9px]" style={{ color: "#9AA6BC" }}>v{APP_VERSION}</span>
           <span className="text-[10px] px-2.5 py-1 rounded-full font-bold" style={{ background: currentUser.role === "admin" ? COLORS.clay : "#ECEFF5", color: currentUser.role === "admin" ? "#fff" : COLORS.courtDark }}>
             {currentUser.role === "admin" ? "Admin" : currentPlan?.name || "Sin membresía"}
           </span>
