@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.1.1";
+const APP_VERSION = "2.1.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4523,11 +4523,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
       {isAdmin && showOpenPlayForm && <OpenPlayForm courts={courts} onCreate={(d) => { addOpenPlay(d); setShowOpenPlayForm(false); }} onCancel={() => setShowOpenPlayForm(false)} />}
       {isAdmin && showClaseForm && <ClaseForm courts={courts} onCreate={(d) => { addClass(d); setShowClaseForm(false); }} onCancel={() => setShowClaseForm(false)} />}
 
-      <div className="relative">
-        <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar actividades, clubes…" style={{ ...inputStyle, paddingLeft: 38 }} />
-      </div>
-
+      {/* Chips antes que el buscador: en mobile ocupan el hueco que deja el título oculto arriba. */}
       <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
         {EVENT_FILTER_CHIPS.map((f) => (
           <button key={f.value} onClick={() => setFilterKind(f.value)}
@@ -4538,16 +4534,25 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         ))}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-        {filteredItems.map((it) => (
-          <EventListItem key={it.key} kind={it.kind} title={it.title} description={it.description}
-            date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
-            recurring={it.recurring} meta={it.meta} onClick={it.onClick} />
-        ))}
-      </div>
+      {/* Buscador + resultados agrupados con su propio espaciado más chico, para que la
+         primera card quede pegada al buscador en vez del gap grande del resto de la página. */}
+      <div className="space-y-2">
+        <div className="relative">
+          <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar actividades, clubes…" style={{ ...inputStyle, paddingLeft: 38 }} />
+        </div>
 
-      {noEvents && <p className="text-xs text-gray-400 italic">Aún no hay Open Plays ni clases programadas.</p>}
-      {!noEvents && filteredItems.length === 0 && <p className="text-xs text-gray-400 italic">Ninguna actividad coincide con la búsqueda o el filtro.</p>}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          {filteredItems.map((it) => (
+            <EventListItem key={it.key} kind={it.kind} title={it.title} description={it.description}
+              date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
+              recurring={it.recurring} meta={it.meta} onClick={it.onClick} />
+          ))}
+        </div>
+
+        {noEvents && <p className="text-xs text-gray-400 italic">Aún no hay Open Plays ni clases programadas.</p>}
+        {!noEvents && filteredItems.length === 0 && <p className="text-xs text-gray-400 italic">Ninguna actividad coincide con la búsqueda o el filtro.</p>}
+      </div>
 
       {selected?.kind === "open_play" && (() => {
         const list = seriesForKey(selected.key);
