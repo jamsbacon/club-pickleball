@@ -1,16 +1,9 @@
 -- ============================================================================
 -- Pickle Hub / Club OS — esquema inicial de Supabase (Postgres)
 -- ============================================================================
--- Ya aplicado al proyecto remoto vía `supabase db push` como la migración
--- supabase/migrations/20260815205827_init.sql (idéntica a este archivo). Ese es
--- el historial real de cambios de ahora en adelante -- los próximos ajustes al
--- esquema van en NUEVAS migraciones (`supabase migration new <nombre>`), no
--- editando este archivo directamente. Este archivo se conserva como referencia
--- legible del esquema inicial completo en un solo lugar.
---
--- Aplicar a mano (alternativa si no se usa el CLI): Supabase Dashboard → SQL
--- Editor → pega este archivo completo → Run. Es seguro volver a correrlo (usa
--- IF NOT EXISTS / OR REPLACE donde aplica), pero no borra datos existentes.
+-- Cómo aplicarlo: Supabase Dashboard → SQL Editor → pega este archivo completo → Run.
+-- Es seguro volver a correrlo (usa IF NOT EXISTS / OR REPLACE donde aplica), pero no
+-- borra datos existentes por sí mismo.
 --
 -- Decisión de diseño: las entidades simples (canchas, reservas, open plays, clases,
 -- membresías) están normalizadas en tablas relacionales. El torneo (categorías, equipos,
