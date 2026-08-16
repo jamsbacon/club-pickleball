@@ -804,7 +804,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.1.2";
+const APP_VERSION = "2.1.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1986,16 +1986,18 @@ function TopBar({ tab, stats, currentUser, currentPlan, logoutUser, visibleNav }
   return (
     <div className="sticky top-0 z-30 backdrop-blur-md" style={{ background: "rgba(247,245,239,0.86)", borderBottom: `1px solid ${COLORS.line}` }}>
       <div className="max-w-7xl mx-auto px-4 md:px-10 py-4 md:py-5 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ background: COLORS.court }}>
             <Icon size={16} color={COLORS.chalk} strokeWidth={2.25} />
           </div>
-          <div>
-            <h2 className="disp text-lg leading-none" style={{ color: COLORS.courtDark }}>{meta.label}</h2>
-            <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{meta.sub}</p>
+          <div className="min-w-0">
+            <h2 className="disp text-lg leading-none truncate" style={{ color: COLORS.courtDark }}>{meta.label}</h2>
+            {/* truncate (no wrap) -- un sub largo (ej. "Open Plays, Torneos y Clases del club" en
+               Actividades) no debe empujar el badge/logout de al lado a una segunda línea en mobile. */}
+            <p className="text-xs mt-1 truncate" style={{ color: "#6B7688" }}>{meta.sub}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2.5 md:hidden">
+        <div className="flex items-center gap-2.5 md:hidden shrink-0">
           <span className="text-[10px] px-2.5 py-1 rounded-full font-bold" style={{ background: currentUser.role === "admin" ? COLORS.clay : "#ECEFF5", color: currentUser.role === "admin" ? "#fff" : COLORS.courtDark }}>
             {currentUser.role === "admin" ? "Admin" : currentPlan?.name || "Sin membresía"}
           </span>
@@ -4505,10 +4507,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
   });
 
   return (
-    <div className="mt-2 space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        {/* Oculto en mobile: el TopBar ya muestra "Actividades" + esta misma descripción justo
-           arriba, así que repetirlo acá solo empuja el buscador y las tarjetas más abajo. */}
+    <div>
+      {/* Mismo patrón que TorneosSection: nada de margen extra arriba de los chips. En mobile,
+         para quien no es admin, esta fila entera queda oculta (no solo el título) -- así no
+         deja un hueco fantasma como el título-oculto-pero-fila-visible de antes. Para admin
+         se mantiene visible en todo tamaño porque los botones de crear sí hacen falta. */}
+      <div className={`items-center justify-between flex-wrap gap-3 mb-5 ${isAdmin ? "flex" : "hidden md:flex"}`}>
         <div className="hidden md:block">
           <SectionTitle sub="Toda la actividad programada del club: Open Plays, Torneos y Clases.">Actividades</SectionTitle>
         </div>
@@ -4520,11 +4524,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         )}
       </div>
 
-      {isAdmin && showOpenPlayForm && <OpenPlayForm courts={courts} onCreate={(d) => { addOpenPlay(d); setShowOpenPlayForm(false); }} onCancel={() => setShowOpenPlayForm(false)} />}
-      {isAdmin && showClaseForm && <ClaseForm courts={courts} onCreate={(d) => { addClass(d); setShowClaseForm(false); }} onCancel={() => setShowClaseForm(false)} />}
+      {isAdmin && showOpenPlayForm && <div className="mb-5"><OpenPlayForm courts={courts} onCreate={(d) => { addOpenPlay(d); setShowOpenPlayForm(false); }} onCancel={() => setShowOpenPlayForm(false)} /></div>}
+      {isAdmin && showClaseForm && <div className="mb-5"><ClaseForm courts={courts} onCreate={(d) => { addClass(d); setShowClaseForm(false); }} onCancel={() => setShowClaseForm(false)} /></div>}
 
-      {/* Chips antes que el buscador: en mobile ocupan el hueco que deja el título oculto arriba. */}
-      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+      {/* Chips antes que el buscador, con el mismo mb-5 (y cero margen arriba) que usa
+         TorneosSection para sus propios chips de sub-navegación. */}
+      <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
         {EVENT_FILTER_CHIPS.map((f) => (
           <button key={f.value} onClick={() => setFilterKind(f.value)}
             className="px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap shrink-0"
