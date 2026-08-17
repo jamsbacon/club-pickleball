@@ -341,29 +341,35 @@ navegador.
     (la lista) -- si el admin llegaba directo a editar un torneo puntual desde Actividades,
     no tenía forma de borrarlo sin volver antes a la lista. Se agregó el mismo ícono de
     basurero junto a "← Volver a Torneos" dentro de `TorneosSection`.
-  - **Verificación**: probado en producción con Claude in Chrome, parcial. Sí se probó de
-    punta a punta: crear un Open Play de prueba → editarlo (lápiz, precio $5→$99, precarga
-    correcta, sin bloque de recurrencia) → confirmar que el cambio persiste en la tarjeta →
-    borrarlo (basurero, sigue andando después del cambio de `onCreate`→`onSubmit`). También
-    crear un torneo de prueba → borrarlo con el basurero nuevo DENTRO de Generalidades (no
-    desde la lista) → confirma que vuelve solo a la lista. Confirmado por SQL que ambas
-    pruebas no dejaron nada huérfano. **No se probó**: `updateOpenPlaySeries`/
-    `updateClassSeries` (editar toda una serie recurrente), editar una fecha puntual dentro
-    de una serie desde la lista de fechas, ni `ClaseForm` en modo edición (mismo código que
-    `OpenPlayForm`, pero no se ejercitó en vivo) -- queda para la próxima pasada.
+  - **Verificación**: completa en producción con Claude in Chrome, en dos pasadas. Primera:
+    crear un Open Play de prueba → editarlo (lápiz, precio $5→$99, precarga correcta, sin
+    bloque de recurrencia) → confirmar que persiste → borrarlo (basurero, sigue andando
+    después del cambio de `onCreate`→`onSubmit`); crear un torneo de prueba → borrarlo con
+    el basurero nuevo DENTRO de Generalidades (no desde la lista) → confirma que vuelve
+    solo a la lista. Segunda pasada (lo que había quedado pendiente): serie de Open Play de
+    3 fechas (3, 10 y 17/sept) → "Editar toda la serie" (precio 5→77) → confirmado por SQL
+    que **las 3 filas** cambiaron de precio y **ninguna** cambió de fecha → "Editar esta
+    fecha" en la ocurrencia del 10/sept nomás (precio 77→111) → confirmado por SQL que
+    **solo esa fila** cambió (3 y 17/sept siguieron en 77) -- exactamente el comportamiento
+    que el diseño prometía. Mismo circuito repetido con una serie de Clase (3 fechas,
+    "Editar toda la serie", precio 15→88) → confirmado por SQL que las 3 filas cambiaron
+    con sus fechas intactas, validando que `ClaseForm` en modo edición funciona igual que
+    `OpenPlayForm`. Las tres series de prueba se borraron con "Eliminar toda la serie" y se
+    confirmó por SQL que no quedó nada huérfano en `open_plays`, `classes` ni
+    `tournaments`. Sin probar todavía, por acotar el alcance de esta pasada: editar una
+    ocurrencia puntual dentro de una serie de Clase (`updateClass` en solitario) -- mismo
+    código que `updateOpenPlay`, ya probado, así que la confianza es alta igual.
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real de lo que sigue sin probarse en el navegador** (v2.11.0 y v2.12.0,
-   el rediseño de Calendario -- multi-torneo v2.13.x y editar/borrar v2.15.0 ya se
-   verificaron en vivo con Claude in Chrome, ver arriba). Orden sugerido: (a) el asistente
-   de distribución del Calendario de punta a punta; (b) "Editar manualmente" (elegir un
-   partido, moverlo, candado de fijado, liberarlo); (c) `updateOpenPlaySeries`/
-   `updateClassSeries` -- editar toda una serie recurrente, y editar una fecha puntual
-   dentro de una serie desde su lista de fechas (v2.15.0, no probado en vivo, ver nota de
-   verificación arriba); (d) que todo el layout nuevo se vea bien en mobile (nada de esto
-   se midió con `getBoundingClientRect` como el resto de Actividades, ver el punto de UI
-   mobile más abajo).
+1. **Pasada visual real del rediseño de Calendario** (v2.11.0 y v2.12.0) -- lo único que
+   sigue sin probarse en el navegador; multi-torneo (v2.13.x) y editar/borrar actividades
+   (v2.15.0, incluida la edición de series recurrentes) ya se verificaron de punta a punta
+   en vivo con Claude in Chrome, ver arriba. Orden sugerido: (a) el asistente de
+   distribución del Calendario de punta a punta; (b) "Editar manualmente" (elegir un
+   partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo se vea
+   bien en mobile (nada de esto se midió con `getBoundingClientRect` como el resto de
+   Actividades, ver el punto de UI mobile más abajo).
 2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen
    → formulario de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha
    arrastrable — se eligió así por scope/tiempo de esa sesión, priorizando que la validación
