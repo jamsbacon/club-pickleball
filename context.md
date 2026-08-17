@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.14.0 — con backend real
+## Estado actual: v2.15.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -311,6 +311,36 @@ navegador.
     confirmó por SQL que también se borró de la base de verdad (`select ... from
     tournaments` solo devuelve el torneo real) -- no hizo falta limpieza manual esta vez,
     a diferencia de v2.13.0.
+- **v2.15.0 — Editar y borrar cualquier actividad desde Actividades**. Pedido del usuario:
+  admin necesita editar/borrar Open Plays, Clases y Torneos sin salir de la pestaña
+  Actividades. Antes de esto **no existía ninguna forma de editar** un Open Play o una Clase
+  ya creados (solo crear y borrar) -- se agregó de cero.
+  - Cuatro mutadores nuevos: `updateOpenPlay`/`updateClass` (una fila puntual -- fecha,
+    hora, cancha, precio, etc. de esa ocurrencia sola) y `updateOpenPlaySeries`/
+    `updateClassSeries` (campos COMPARTIDOS de toda una serie recurrente -- nombre, precio,
+    nivel, cancha, horario, imagen -- la fecha de cada ocurrencia nunca se toca ahí, es lo
+    que la hace serie y no un evento repetido el mismo día). Misma dualidad
+    ocurrencia/serie que ya existía para borrar (`onRemove`/`onRemoveSeries`) -- se extendió
+    el mismo patrón a editar en vez de inventar uno nuevo. Todos refrescan desde Supabase al
+    terminar (`fetchOpenPlays`/`fetchClasses`) en vez de parchear el estado local a mano.
+  - `OpenPlayForm`/`ClaseForm` (antes solo-crear) ahora aceptan `initial` (precarga valores,
+    su presencia = modo edición) y `hideDate` (oculta el campo Fecha cuando se edita una
+    serie entera, ya que no aplica una fecha única). El bloque de "evento/clase recurrente"
+    se oculta por completo al editar (la recurrencia no es editable retroactivamente). El
+    prop se renombró de `onCreate` a `onSubmit` en ambos formularios -- mismo contrato
+    (async, devuelve un error o vacío), el nombre viejo confundía ahora que también guarda
+    ediciones.
+  - `EventDetail`/`ClassDetail`: ícono de lápiz junto al de basurero que ya tenían -- "Editar"
+    (evento único o el header cuando no es serie), "Editar toda la serie" (header cuando sí
+    es serie), y un lápiz por fila en la lista de fechas de una serie (editar esa fecha
+    puntual sin tocar el resto). Al pulsar, el modal cambia de mostrar
+    EventDetail/ClassDetail a mostrar el formulario precargado, en vez de abrir un modal
+    aparte.
+  - Torneo: "editar" ya existía (entrar a un torneo aterriza en Generalidades, que ES el
+    formulario de edición) pero "borrar" solo vivía en la tarjeta de `TournamentsListTab`
+    (la lista) -- si el admin llegaba directo a editar un torneo puntual desde Actividades,
+    no tenía forma de borrarlo sin volver antes a la lista. Se agregó el mismo ícono de
+    basurero junto a "← Volver a Torneos" dentro de `TorneosSection`.
 
 ## Lo que falta / próximos pasos
 

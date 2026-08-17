@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.14.0";
+const APP_VERSION = "2.15.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1802,6 +1802,134 @@ export default function PickleballTournamentApp() {
     setClasses((p) => p.filter((e) => e.recurringGroupId !== recurringGroupId));
     supabase.from("classes").delete().eq("recurring_group_id", recurringGroupId).then(({ error }) => { if (error) console.error("removeClassSeries:", error.message); });
   };
+
+  // Edita UNA ocurrencia puntual (una fila) -- fecha/hora/cancha propias, precio, nombre,
+  // etc. Si cambia cancha/fecha/horario, occupied_blocks se recalcula para esa fila. Refresca
+  // desde Supabase al final (fetchOpenPlays) en vez de parchear el estado local a mano --
+  // más simple y evita divergencias, el volumen de filas es chico.
+  const updateOpenPlay = async (id, { imageBlob, ...patch }) => {
+    try {
+      const dbPatch = {};
+      if ("name" in patch) dbPatch.name = patch.name;
+      if ("level" in patch) dbPatch.level = patch.level;
+      if ("price" in patch) dbPatch.price = patch.price;
+      if ("memberPrice" in patch) dbPatch.member_price = patch.memberPrice;
+      if ("capacity" in patch) dbPatch.capacity = patch.capacity;
+      if ("description" in patch) dbPatch.description = patch.description;
+      if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
+      if ("date" in patch) dbPatch.date = patch.date;
+      if ("startTime" in patch) dbPatch.start_time = patch.startTime;
+      if ("endTime" in patch) dbPatch.end_time = patch.endTime;
+      if (imageBlob) {
+        const path = `${crypto.randomUUID()}.jpg`;
+        const { error: upErr } = await supabase.storage.from("open-play-images").upload(path, imageBlob, { contentType: "image/jpeg" });
+        if (upErr) throw upErr;
+        dbPatch.image = supabase.storage.from("open-play-images").getPublicUrl(path).data.publicUrl;
+      }
+      const current = openPlays.find((o) => o.id === id);
+      dbPatch.occupied_blocks = computeOccupiedBlocks(
+        dbPatch.court_ids ?? current?.courtIds ?? [], dbPatch.date ?? current?.date,
+        dbPatch.start_time ?? current?.startTime, dbPatch.end_time ?? current?.endTime,
+      );
+      const { error } = await supabase.from("open_plays").update(dbPatch).eq("id", id);
+      if (error) throw error;
+      await fetchOpenPlays();
+      return {};
+    } catch (err) {
+      console.error("updateOpenPlay:", err?.message || err);
+      return { error: err?.message || "No se pudo actualizar la actividad." };
+    }
+  };
+  // Edita los campos COMPARTIDOS de toda una serie recurrente (nombre, precio, nivel,
+  // cancha, horario, imagen...) -- la fecha de cada ocurrencia NUNCA se toca acá, es lo que
+  // hace que sea una serie y no un solo evento repetido el mismo día. occupied_blocks se
+  // recalcula fila por fila (depende de la fecha propia de cada una) aunque no haya cambiado
+  // cancha/horario -- es barato y evita una rama de código aparte para el caso común.
+  const updateOpenPlaySeries = async (recurringGroupId, { imageBlob, ...patch }) => {
+    try {
+      const dbPatch = {};
+      if ("name" in patch) dbPatch.name = patch.name;
+      if ("level" in patch) dbPatch.level = patch.level;
+      if ("price" in patch) dbPatch.price = patch.price;
+      if ("memberPrice" in patch) dbPatch.member_price = patch.memberPrice;
+      if ("capacity" in patch) dbPatch.capacity = patch.capacity;
+      if ("description" in patch) dbPatch.description = patch.description;
+      if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
+      if ("startTime" in patch) dbPatch.start_time = patch.startTime;
+      if ("endTime" in patch) dbPatch.end_time = patch.endTime;
+      if (imageBlob) {
+        const path = `${crypto.randomUUID()}.jpg`;
+        const { error: upErr } = await supabase.storage.from("open-play-images").upload(path, imageBlob, { contentType: "image/jpeg" });
+        if (upErr) throw upErr;
+        dbPatch.image = supabase.storage.from("open-play-images").getPublicUrl(path).data.publicUrl;
+      }
+      const rows = openPlays.filter((o) => o.recurringGroupId === recurringGroupId);
+      const results = await Promise.all(rows.map((r) => supabase.from("open_plays").update({
+        ...dbPatch,
+        occupied_blocks: computeOccupiedBlocks(dbPatch.court_ids ?? r.courtIds, r.date, dbPatch.start_time ?? r.startTime, dbPatch.end_time ?? r.endTime),
+      }).eq("id", r.id)));
+      const failed = results.find((r) => r.error);
+      if (failed) throw failed.error;
+      await fetchOpenPlays();
+      return {};
+    } catch (err) {
+      console.error("updateOpenPlaySeries:", err?.message || err);
+      return { error: err?.message || "No se pudo actualizar la serie." };
+    }
+  };
+  // Mismo criterio que updateOpenPlay, para una clase puntual (sin imagen ni cupo -- las
+  // clases no tienen esos campos, ver mapClassRow).
+  const updateClass = async (id, patch) => {
+    try {
+      const dbPatch = {};
+      if ("academyName" in patch) dbPatch.academy_name = patch.academyName;
+      if ("level" in patch) dbPatch.level = patch.level;
+      if ("price" in patch) dbPatch.price = patch.price;
+      if ("memberPrice" in patch) dbPatch.member_price = patch.memberPrice;
+      if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
+      if ("date" in patch) dbPatch.date = patch.date;
+      if ("startTime" in patch) dbPatch.start_time = patch.startTime;
+      if ("endTime" in patch) dbPatch.end_time = patch.endTime;
+      const current = classes.find((c) => c.id === id);
+      dbPatch.occupied_blocks = computeOccupiedBlocks(
+        dbPatch.court_ids ?? current?.courtIds ?? [], dbPatch.date ?? current?.date,
+        dbPatch.start_time ?? current?.startTime, dbPatch.end_time ?? current?.endTime,
+      );
+      const { error } = await supabase.from("classes").update(dbPatch).eq("id", id);
+      if (error) throw error;
+      await fetchClasses();
+      return {};
+    } catch (err) {
+      console.error("updateClass:", err?.message || err);
+      return { error: err?.message || "No se pudo actualizar la clase." };
+    }
+  };
+  // Mismo criterio que updateOpenPlaySeries: campos compartidos, fecha de cada fila intacta.
+  const updateClassSeries = async (recurringGroupId, patch) => {
+    try {
+      const dbPatch = {};
+      if ("academyName" in patch) dbPatch.academy_name = patch.academyName;
+      if ("level" in patch) dbPatch.level = patch.level;
+      if ("price" in patch) dbPatch.price = patch.price;
+      if ("memberPrice" in patch) dbPatch.member_price = patch.memberPrice;
+      if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
+      if ("startTime" in patch) dbPatch.start_time = patch.startTime;
+      if ("endTime" in patch) dbPatch.end_time = patch.endTime;
+      const rows = classes.filter((c) => c.recurringGroupId === recurringGroupId);
+      const results = await Promise.all(rows.map((r) => supabase.from("classes").update({
+        ...dbPatch,
+        occupied_blocks: computeOccupiedBlocks(dbPatch.court_ids ?? r.courtIds, r.date, dbPatch.start_time ?? r.startTime, dbPatch.end_time ?? r.endTime),
+      }).eq("id", r.id)));
+      const failed = results.find((r) => r.error);
+      if (failed) throw failed.error;
+      await fetchClasses();
+      return {};
+    } catch (err) {
+      console.error("updateClassSeries:", err?.message || err);
+      return { error: err?.message || "No se pudo actualizar la serie." };
+    }
+  };
+
   const registerForOpenPlay = async (id, reg) => {
     const { data: row, error } = await supabase.from("open_play_registrations").insert({
       open_play_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
@@ -2009,7 +2137,9 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "eventos" && (
             <EventosTab club={club} courts={courts} openPlays={openPlays} classes={classes}
-              addOpenPlay={addOpenPlay} addClass={addClass} removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
+              addOpenPlay={addOpenPlay} addClass={addClass}
+              updateOpenPlay={updateOpenPlay} updateOpenPlaySeries={updateOpenPlaySeries} updateClass={updateClass} updateClassSeries={updateClassSeries}
+              removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
@@ -2035,6 +2165,7 @@ export default function PickleballTournamentApp() {
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
                 submitScore={submitScore}
                 onBackToList={() => { setActiveTournamentId(null); setActiveCatId(null); }}
+                onRemoveTournament={() => { removeTournament(tournament.id); setActiveTournamentId(null); setActiveCatId(null); }}
               />
             ) : (
               <TournamentsListTab tournaments={tournaments} categories={categories} role={role}
@@ -3391,17 +3522,27 @@ function TorneosSection(props) {
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
-    submitScore, currentUser, users, club, setTab, onBackToList,
+    submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
   } = props;
+  const isAdmin = role === "admin";
 
   return (
     <div>
       {/* El club organiza varios torneos -- esta pantalla siempre es UN torneo puntual
           (TournamentsListTab, el padre, es quien lista todos y deja elegir). "Volver a
-          Torneos" regresa a esa lista sin perder los demás torneos ni sus datos. */}
-      <button onClick={onBackToList} className="flex items-center gap-1.5 text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>
-        <ChevronLeft size={14} /> Volver a Torneos
-      </button>
+          Torneos" regresa a esa lista sin perder los demás torneos ni sus datos. El
+          borrado vive acá también (no solo en la tarjeta de la lista) para no obligar al
+          admin a volver a la lista primero si llegó directo a editar este torneo desde
+          Actividades. */}
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onBackToList} className="flex items-center gap-1.5 text-xs font-semibold" style={{ color: "#6B7688" }}>
+          <ChevronLeft size={14} /> Volver a Torneos
+        </button>
+        {isAdmin && (
+          <button onClick={onRemoveTournament} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
+            className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+        )}
+      </div>
       <h2 className="disp text-xl md:text-[22px] mb-4" style={{ color: COLORS.courtDark }}>{tournament.name}</h2>
 
       <div className="flex gap-2 mb-5 overflow-x-auto pb-1">
@@ -5136,19 +5277,25 @@ function MultiCourtSelect({ courts, value, onChange }) {
   );
 }
 
-function OpenPlayForm({ courts, onCreate, onCancel }) {
-  const [name, setName] = useState("");
+// `initial` presente = editar (una ocurrencia puntual, o los campos compartidos de una serie
+// entera si `hideDate` viene true -- ahí la fecha no se muestra porque cada ocurrencia
+// conserva la suya, ver updateOpenPlaySeries). Sin `initial` = crear, comportamiento
+// original. `onSubmit` reemplaza al viejo `onCreate` -- mismo contrato (async, devuelve
+// {error} o {}), el nombre ahora es genérico porque también se usa para guardar una edición.
+function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = false }) {
+  const isEdit = !!initial;
+  const [name, setName] = useState(initial?.name ?? "");
   const [imageBlob, setImageBlob] = useState(null);
   const [imageProcessing, setImageProcessing] = useState(false);
-  const [level, setLevel] = useState("Todos");
-  const [price, setPrice] = useState(5);
-  const [memberPrice, setMemberPrice] = useState(5);
-  const [description, setDescription] = useState("");
-  const [courtIds, setCourtIds] = useState([]);
-  const [date, setDate] = useState("");
-  const [startTime, setStartTime] = useState("18:00");
-  const [endTime, setEndTime] = useState("20:00");
-  const [capacity, setCapacity] = useState(8);
+  const [level, setLevel] = useState(initial?.level ?? "Todos");
+  const [price, setPrice] = useState(initial?.price ?? 5);
+  const [memberPrice, setMemberPrice] = useState(initial?.memberPrice ?? 5);
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [courtIds, setCourtIds] = useState(initial?.courtIds ?? []);
+  const [date, setDate] = useState(initial?.date ?? "");
+  const [startTime, setStartTime] = useState(initial?.startTime ?? "18:00");
+  const [endTime, setEndTime] = useState(initial?.endTime ?? "20:00");
+  const [capacity, setCapacity] = useState(initial?.capacity ?? 8);
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurUntil, setRecurUntil] = useState("");
 
@@ -5186,27 +5333,27 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
     img.src = objectUrl;
   };
 
-  const canSave = name.trim() && courtIds.length > 0 && date && startTime < endTime && Number(capacity) > 0
+  const canSave = name.trim() && courtIds.length > 0 && (hideDate || date) && startTime < endTime && Number(capacity) > 0
     && (!isRecurring || (recurUntil && recurUntil >= date));
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const submit = async () => {
     setError(""); setSubmitting(true);
-    const result = await onCreate({ name: name.trim(), imageBlob, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    const result = await onSubmit({ name: name.trim(), imageBlob, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
     setSubmitting(false);
     if (result?.error) setError(result.error);
   };
 
   return (
     <Card className="mt-3">
-      <h4 className="font-bold text-sm mb-4">Nuevo Open Play</h4>
+      <h4 className="font-bold text-sm mb-4">{isEdit ? (hideDate ? "Editar serie de Open Play" : "Editar Open Play") : "Nuevo Open Play"}</h4>
       <div className="space-y-3">
         <div><Label>Nombre de la actividad</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Jueves de DUPR" /></div>
         <div>
           <Label>Imagen (opcional)</Label>
           <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: imageBlob ? COLORS.court : "#6B7688" }}>
-            <ImageIcon size={14} /> {imageProcessing ? "Procesando imagen…" : imageBlob ? "Imagen cargada" : "Subir imagen"}
+            <ImageIcon size={14} /> {imageProcessing ? "Procesando imagen…" : imageBlob ? "Imagen nueva cargada" : initial?.image ? "Imagen actual -- toca para cambiarla" : "Subir imagen"}
             <input type="file" accept="image/*" className="hidden" onChange={handleImage} disabled={imageProcessing} />
           </label>
           {imageError && <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>{imageError}</p>}
@@ -5227,16 +5374,20 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
         <div><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 70 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
-          <div>
-            <Label>Fecha {isRecurring ? "del primer evento" : ""}</Label>
-            <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
-            {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
-          </div>
+          {!hideDate && (
+            <div>
+              <Label>Fecha {isRecurring ? "del primer evento" : ""}</Label>
+              <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
+              {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
+            </div>
+          )}
           <div><Label>Desde</Label><input type="time" style={inputStyle} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></div>
           <div><Label>Hasta</Label><input type="time" style={inputStyle} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></div>
         </div>
+        {hideDate && <p className="text-xs" style={{ color: "#6B7688" }}>Estás editando toda la serie -- la fecha de cada ocurrencia no cambia, solo estos campos compartidos.</p>}
         <p className="text-xs" style={{ color: "#6B7688" }}>Los bloques de horario de las canchas elegidas quedan reservados automáticamente para esta actividad — nadie más podrá reservarlos.</p>
 
+        {!isEdit && (
         <div className="rounded-xl p-3" style={{ background: "#EEF1F7" }}>
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -5260,13 +5411,14 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
             </div>
           )}
         </div>
+        )}
 
         {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
         <div className="flex gap-2 pt-1">
           <button disabled={!canSave || submitting || imageProcessing} onClick={submit}
             style={{ background: canSave && !submitting && !imageProcessing ? COLORS.court : "#E5E5E5", color: canSave && !submitting && !imageProcessing ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
-            {submitting ? "Guardando…" : imageProcessing ? "Procesando imagen…" : isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
+            {submitting ? "Guardando…" : imageProcessing ? "Procesando imagen…" : isEdit ? "Guardar cambios" : isRecurring ? "Crear serie recurrente" : "Crear Open Play"}
           </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -5275,33 +5427,34 @@ function OpenPlayForm({ courts, onCreate, onCancel }) {
   );
 }
 
-function ClaseForm({ courts, onCreate, onCancel }) {
-  const [academyName, setAcademyName] = useState("");
-  const [level, setLevel] = useState("Todos");
-  const [price, setPrice] = useState(15);
-  const [memberPrice, setMemberPrice] = useState(15);
-  const [courtIds, setCourtIds] = useState([]);
-  const [date, setDate] = useState("");
-  const [startTime, setStartTime] = useState("17:00");
-  const [endTime, setEndTime] = useState("18:00");
+function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = false }) {
+  const isEdit = !!initial;
+  const [academyName, setAcademyName] = useState(initial?.academyName ?? "");
+  const [level, setLevel] = useState(initial?.level ?? "Todos");
+  const [price, setPrice] = useState(initial?.price ?? 15);
+  const [memberPrice, setMemberPrice] = useState(initial?.memberPrice ?? 15);
+  const [courtIds, setCourtIds] = useState(initial?.courtIds ?? []);
+  const [date, setDate] = useState(initial?.date ?? "");
+  const [startTime, setStartTime] = useState(initial?.startTime ?? "17:00");
+  const [endTime, setEndTime] = useState(initial?.endTime ?? "18:00");
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurUntil, setRecurUntil] = useState("");
 
-  const canSave = academyName.trim() && courtIds.length > 0 && date && startTime < endTime
+  const canSave = academyName.trim() && courtIds.length > 0 && (hideDate || date) && startTime < endTime
     && (!isRecurring || (recurUntil && recurUntil >= date));
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const submit = async () => {
     setError(""); setSubmitting(true);
-    const result = await onCreate({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    const result = await onSubmit({ academyName: academyName.trim(), level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
     setSubmitting(false);
     if (result?.error) setError(result.error);
   };
 
   return (
     <Card className="mt-3">
-      <h4 className="font-bold text-sm mb-4">Nueva Clase</h4>
+      <h4 className="font-bold text-sm mb-4">{isEdit ? (hideDate ? "Editar serie de clases" : "Editar Clase") : "Nueva Clase"}</h4>
       <div className="space-y-3">
         <div><Label>Nombre de la Academia</Label><input style={inputStyle} value={academyName} onChange={(e) => setAcademyName(e.target.value)} placeholder="Academia PickleUp" /></div>
         <div className="grid grid-cols-2 gap-3">
@@ -5316,15 +5469,19 @@ function ClaseForm({ courts, onCreate, onCancel }) {
         <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
-          <div>
-            <Label>Fecha</Label>
-            <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
-            {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
-          </div>
+          {!hideDate && (
+            <div>
+              <Label>Fecha</Label>
+              <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
+              {date && <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>{formatDateFull(date)}</p>}
+            </div>
+          )}
           <div><Label>Desde</Label><input type="time" style={inputStyle} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></div>
           <div><Label>Hasta</Label><input type="time" style={inputStyle} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></div>
         </div>
+        {hideDate && <p className="text-xs" style={{ color: "#6B7688" }}>Estás editando toda la serie -- la fecha de cada ocurrencia no cambia, solo estos campos compartidos.</p>}
 
+        {!isEdit && (
         <div className="rounded-xl p-3" style={{ background: "#EEF1F7" }}>
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -5349,13 +5506,14 @@ function ClaseForm({ courts, onCreate, onCancel }) {
             </div>
           )}
         </div>
+        )}
 
         {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
         <div className="flex gap-2 pt-1">
           <button disabled={!canSave || submitting} onClick={submit}
             style={{ background: canSave && !submitting ? COLORS.court : "#E5E5E5", color: canSave && !submitting ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">
-            {submitting ? "Guardando…" : isRecurring ? "Crear serie recurrente" : "Crear Clase"}
+            {submitting ? "Guardando…" : isEdit ? "Guardar cambios" : isRecurring ? "Crear serie recurrente" : "Crear Clase"}
           </button>
           <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
         </div>
@@ -5432,7 +5590,7 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
 // `occurrences` is every future/today entry that shares e's recurringGroupId (or just [e]
 // for a one-off event). When there's more than one, the panel lists each date so the member
 // picks which session to check out for, instead of forcing a single date on a recurring series.
-function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose, isAdmin }) {
+function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
@@ -5459,7 +5617,9 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {isSeries && onRemoveSeries && <button onClick={onRemoveSeries} title="Eliminar toda la serie" className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {!isSeries && onRemove && <button onClick={() => onRemove(e.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
@@ -5478,6 +5638,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
                   · {slotsLeft !== null ? (isFull ? "Cupo lleno" : `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}`) : `${o.registrations.length} inscrito(s)`}
                 </span></span>
                 <div className="flex items-center gap-2">
+                  {onEdit && <button onClick={() => onEdit(o)} title="Editar esta fecha" className="text-gray-300 hover:text-gray-600"><Pencil size={13} /></button>}
                   {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
                   <button disabled={isFull} onClick={() => setCheckoutId(o.id)} className="text-xs font-bold px-2.5 py-1 rounded-lg"
                     style={{
@@ -5514,7 +5675,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
   );
 }
 
-function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onClose, isAdmin }) {
+function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
@@ -5540,7 +5701,9 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {isSeries && onRemoveSeries && <button onClick={onRemoveSeries} title="Eliminar toda la serie" className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {!isSeries && onRemove && <button onClick={() => onRemove(e.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
@@ -5553,6 +5716,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
             <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#EEF1F7" }}>
               <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">· {o.registrations.length} inscrito(s)</span></span>
               <div className="flex items-center gap-2">
+                {onEdit && <button onClick={() => onEdit(o)} title="Editar esta fecha" className="text-gray-300 hover:text-gray-600"><Pencil size={13} /></button>}
                 {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
                 <button onClick={() => setCheckoutId(o.id)} className="text-xs font-bold px-2.5 py-1 rounded-lg"
                   style={{ background: checkoutId === o.id ? COLORS.court : "#fff", color: checkoutId === o.id ? "#fff" : COLORS.court, border: `1.5px solid ${COLORS.court}` }}>
@@ -5581,10 +5745,16 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
+  // { data, isSeries } del Open Play/Clase que se está editando ahora mismo -- data trae
+  // todos los campos de OpenPlayForm/ClaseForm (una ocurrencia puntual, o la representante
+  // de la serie si isSeries). null = no hay edición en curso (se ve EventDetail/ClassDetail
+  // normal dentro del modal).
+  const [editingOpenPlay, setEditingOpenPlay] = useState(null);
+  const [editingClass, setEditingClass] = useState(null);
   const [search, setSearch] = useState("");
   const [filterKind, setFilterKind] = useState("all");
   const isAdmin = role === "admin";
@@ -5700,17 +5870,17 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         )}
       </div>
 
-      {/* onCreate espera el resultado real de Supabase -- el formulario solo se cierra si la
-         inserción tuvo éxito; si falla (ej. imagen muy pesada en una serie larga), se queda
+      {/* onSubmit espera el resultado real de Supabase -- el formulario solo se cierra si la
+         operación tuvo éxito; si falla (ej. imagen muy pesada en una serie larga), se queda
          abierto y OpenPlayForm/ClaseForm muestran el error en vez de perder los datos. */}
       {isAdmin && showOpenPlayForm && (
         <div className="mb-5">
-          <OpenPlayForm courts={courts} onCreate={async (d) => { const r = await addOpenPlay(d); if (!r?.error) setShowOpenPlayForm(false); return r; }} onCancel={() => setShowOpenPlayForm(false)} />
+          <OpenPlayForm courts={courts} onSubmit={async (d) => { const r = await addOpenPlay(d); if (!r?.error) setShowOpenPlayForm(false); return r; }} onCancel={() => setShowOpenPlayForm(false)} />
         </div>
       )}
       {isAdmin && showClaseForm && (
         <div className="mb-5">
-          <ClaseForm courts={courts} onCreate={async (d) => { const r = await addClass(d); if (!r?.error) setShowClaseForm(false); return r; }} onCancel={() => setShowClaseForm(false)} />
+          <ClaseForm courts={courts} onSubmit={async (d) => { const r = await addClass(d); if (!r?.error) setShowClaseForm(false); return r; }} onCancel={() => setShowClaseForm(false)} />
         </div>
       )}
 
@@ -5751,13 +5921,29 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         if (!list) return null;
         const occurrences = list.filter((o) => o.date >= todayIso);
         const e = occurrences[0] || list[list.length - 1];
+        const isSeries = (occurrences.length ? occurrences : list).length > 1;
+        const closeAll = () => { setSelected(null); setEditingOpenPlay(null); };
         return (
-          <Modal onClose={() => setSelected(null)}>
-            <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
-              onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
-              onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
-              onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
-              onClose={() => setSelected(null)} />
+          <Modal onClose={closeAll}>
+            {editingOpenPlay ? (
+              <OpenPlayForm courts={courts} initial={editingOpenPlay.data} hideDate={editingOpenPlay.isSeries}
+                onSubmit={async (d) => {
+                  const r = editingOpenPlay.isSeries
+                    ? await updateOpenPlaySeries(editingOpenPlay.data.recurringGroupId, d)
+                    : await updateOpenPlay(editingOpenPlay.data.id, d);
+                  if (!r?.error) closeAll();
+                  return r;
+                }}
+                onCancel={() => setEditingOpenPlay(null)} />
+            ) : (
+              <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
+                onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
+                onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
+                onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
+                onEdit={isAdmin ? (occurrence) => setEditingOpenPlay({ data: occurrence, isSeries: false }) : null}
+                onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingOpenPlay({ data: e, isSeries: true }) : null}
+                onClose={closeAll} />
+            )}
           </Modal>
         );
       })()}
@@ -5767,13 +5953,29 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
         if (!list) return null;
         const occurrences = list.filter((c) => c.date >= todayIso);
         const e = occurrences[0] || list[list.length - 1];
+        const isSeries = (occurrences.length ? occurrences : list).length > 1;
+        const closeAll = () => { setSelected(null); setEditingClass(null); };
         return (
-          <Modal onClose={() => setSelected(null)}>
-            <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
-              onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
-              onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
-              onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
-              onClose={() => setSelected(null)} />
+          <Modal onClose={closeAll}>
+            {editingClass ? (
+              <ClaseForm courts={courts} initial={editingClass.data} hideDate={editingClass.isSeries}
+                onSubmit={async (d) => {
+                  const r = editingClass.isSeries
+                    ? await updateClassSeries(editingClass.data.recurringGroupId, d)
+                    : await updateClass(editingClass.data.id, d);
+                  if (!r?.error) closeAll();
+                  return r;
+                }}
+                onCancel={() => setEditingClass(null)} />
+            ) : (
+              <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
+                onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
+                onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
+                onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
+                onEdit={isAdmin ? (occurrence) => setEditingClass({ data: occurrence, isSeries: false }) : null}
+                onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingClass({ data: e, isSeries: true }) : null}
+                onClose={closeAll} />
+            )}
           </Modal>
         );
       })()}
