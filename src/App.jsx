@@ -154,14 +154,20 @@ function memberDiscountPct(base, memberPrice) {
   return Math.max(0, Math.round((1 - m / b) * 100));
 }
 
-// Presale price wins while today falls inside [presaleStart, presaleEnd] (and is set);
-// otherwise falls back to the regular registration price. Charged per player, so a
-// doubles team pays double what a single competitor pays.
-function tournamentRegPrice(tournament) {
+// Precio TOTAL (no por-categoría) por inscribirse en `catCount` categorías de una, en el
+// mismo carrito -- 1/2/3+ categorías tienen su propio precio de bundle (el nivel "3" cubre
+// 3 o más, no hay un cuarto nivel). Presale gana mientras hoy caiga dentro de
+// [presaleStart, presaleEnd] (y esté cargado); si no, cae al precio regular de ese mismo
+// nivel. No lleva cuenta acumulada entre inscripciones separadas en momentos distintos --
+// si el jugador vuelve más tarde a anotarse en una categoría más, ese carrito nuevo arranca
+// su propio nivel 1, no se suma a lo que ya pagó antes.
+function tournamentRegPrice(tournament, catCount) {
+  const tier = Math.min(3, Math.max(1, Number(catCount) || 1));
   const today = new Date().toISOString().slice(0, 10);
   const inPresale = tournament.presaleStart && tournament.presaleEnd && today >= tournament.presaleStart && today <= tournament.presaleEnd;
-  if (inPresale && Number(tournament.presalePrice) > 0) return Number(tournament.presalePrice) || 0;
-  return Number(tournament.regularPrice) || 0;
+  const presale = Number(tournament[`presalePrice${tier}`]) || 0;
+  if (inPresale && presale > 0) return presale;
+  return Number(tournament[`regularPrice${tier}`]) || 0;
 }
 
 // Resolves a court's price for a given time-of-day, honoring an optional list of
@@ -921,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.16.1";
+const APP_VERSION = "2.17.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1278,8 +1284,10 @@ export default function PickleballTournamentApp() {
   const mapTournamentRow = (r) => ({
     id: r.id, name: r.name, status: r.status || "draft", startDate: r.start_date || "", endDate: r.end_date || "",
     dailyStart: r.daily_start, dailyEnd: r.daily_end, playDays: r.play_days || [],
-    presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "", presalePrice: r.presale_price ?? "",
-    regStart: r.reg_start || "", regEnd: r.reg_end || "", regularPrice: r.regular_price ?? "",
+    presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "",
+    presalePrice1: r.presale_price_1 ?? "", presalePrice2: r.presale_price_2 ?? "", presalePrice3: r.presale_price_3 ?? "",
+    regStart: r.reg_start || "", regEnd: r.reg_end || "",
+    regularPrice1: r.regular_price_1 ?? "", regularPrice2: r.regular_price_2 ?? "", regularPrice3: r.regular_price_3 ?? "",
     courtIds: r.court_ids || [],
   });
   // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
@@ -1346,10 +1354,14 @@ export default function PickleballTournamentApp() {
     if ("playDays" in patch) dbPatch.play_days = patch.playDays;
     if ("presaleStart" in patch) dbPatch.presale_start = patch.presaleStart || null;
     if ("presaleEnd" in patch) dbPatch.presale_end = patch.presaleEnd || null;
-    if ("presalePrice" in patch) dbPatch.presale_price = patch.presalePrice === "" ? null : patch.presalePrice;
+    if ("presalePrice1" in patch) dbPatch.presale_price_1 = patch.presalePrice1 === "" ? null : patch.presalePrice1;
+    if ("presalePrice2" in patch) dbPatch.presale_price_2 = patch.presalePrice2 === "" ? null : patch.presalePrice2;
+    if ("presalePrice3" in patch) dbPatch.presale_price_3 = patch.presalePrice3 === "" ? null : patch.presalePrice3;
     if ("regStart" in patch) dbPatch.reg_start = patch.regStart || null;
     if ("regEnd" in patch) dbPatch.reg_end = patch.regEnd || null;
-    if ("regularPrice" in patch) dbPatch.regular_price = patch.regularPrice === "" ? null : patch.regularPrice;
+    if ("regularPrice1" in patch) dbPatch.regular_price_1 = patch.regularPrice1 === "" ? null : patch.regularPrice1;
+    if ("regularPrice2" in patch) dbPatch.regular_price_2 = patch.regularPrice2 === "" ? null : patch.regularPrice2;
+    if ("regularPrice3" in patch) dbPatch.regular_price_3 = patch.regularPrice3 === "" ? null : patch.regularPrice3;
     if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
@@ -2790,6 +2802,28 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 /* =========================================================================
    TAB: TORNEO
    ========================================================================= */
+// Precio escalonado por cantidad de categorías (v2.17.0): reemplaza el precio único que
+// tenía Preventa/Inscripciones generales por tres campos -- 1 categoría, 2 categorías, 3 o
+// más -- para que inscribirse en varias de una salga más barato por categoría que hacerlo
+// una por una. `field` es el prefijo del patch ("presalePrice" o "regularPrice"); los tres
+// niveles son field+"1"/"2"/"3".
+function TieredPriceFields({ tournament, set, field }) {
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {[1, 2, 3].map((n) => (
+        <div key={n}>
+          <p className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>{n === 3 ? "3+ cat." : `${n} cat.`}</p>
+          <div className="relative">
+            <DollarSign size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" color="#78829A" />
+            <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 26, fontSize: 13 }}
+              value={tournament[`${field}${n}`]} onChange={(e) => set(`${field}${n}`, e.target.value)} placeholder="0.00" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TorneoTab({ tournament, setTournament: updateTournament, dates, courts }) {
   const set = (k, v) => updateTournament({ [k]: v });
   const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
@@ -2909,12 +2943,9 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
               </div>
             </div>
             <div>
-              <Label>Precio de preventa</Label>
-              <div className="relative">
-                <DollarSign size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-                <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 30 }} value={tournament.presalePrice}
-                  onChange={(e) => set("presalePrice", e.target.value)} placeholder="0.00" />
-              </div>
+              <Label>Precio de preventa (por cantidad de categorías)</Label>
+              <TieredPriceFields tournament={tournament} set={set} field="presalePrice" />
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Es el precio TOTAL de inscribirse en esa cantidad de categorías de una, no por-categoría multiplicado -- 3+ cubre 3 o más.</p>
             </div>
           </div>
         </Card>
@@ -2932,12 +2963,9 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
             </div>
           </div>
           <div className="mt-3">
-            <Label>Precio regular (por jugador, fuera de preventa)</Label>
-            <div className="relative">
-              <DollarSign size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
-              <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 30 }} value={tournament.regularPrice}
-                onChange={(e) => set("regularPrice", e.target.value)} placeholder="0.00" />
-            </div>
+            <Label>Precio regular, fuera de preventa (por cantidad de categorías)</Label>
+            <TieredPriceFields tournament={tournament} set={set} field="regularPrice" />
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Precio TOTAL de inscribirse en esa cantidad de categorías de una -- 3+ cubre 3 o más.</p>
           </div>
         </Card>
       </div>
@@ -4715,9 +4743,16 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const [showCheckout, setShowCheckout] = useState(false);
   const [done, setDone] = useState(null); // nombres de las categorías recién confirmadas
 
-  const unitPrice = tournamentRegPrice(tournament);
   const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
-  const total = unitPrice * selectedCats.length;
+  // Precio TOTAL del carrito según cuántas categorías se eligieron de una (1/2/3+ tienen su
+  // propio precio de bundle, ver tournamentRegPrice) -- ya NO es un precio por categoría que
+  // se multiplica. pricePerTeam reparte ese total en partes iguales entre los equipos que se
+  // van a crear, para que la suma de priceUsd guardada en cada equipo dé el total real
+  // cobrado (buildClientActivity() suma priceUsd por jugador para las estadísticas del
+  // club -- si acá se guardara el total completo en cada equipo, esa suma inflaría el
+  // ingreso real del carrito por la cantidad de categorías elegidas).
+  const total = selectedCats.length > 0 ? tournamentRegPrice(tournament, selectedCats.length) : 0;
+  const pricePerTeam = selectedCats.length > 0 ? total / selectedCats.length : 0;
   const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]?.name);
   const canProceed = selectedCats.length > 0 && !missingPartner;
 
@@ -4732,8 +4767,8 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
       if (c.modality !== "individual") players.push(partners[c.id]);
       // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito
-      // (para mostrarlo), pero cada equipo debe quedar con su propio precio individual.
-      addTeam(c.id, players, { ...checkout, priceUsd: unitPrice, priceBs: unitPrice * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+      // (para mostrarlo), pero cada equipo debe quedar con su parte proporcional.
+      addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
     });
     setDone(selectedCats.map((c) => c.name));
     setSelectedIds([]);
@@ -4750,6 +4785,24 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       <SectionTitle sub="Elige todas las categorías en las que quieres participar -- se pagan juntas en un solo checkout.">
         Categorías abiertas
       </SectionTitle>
+
+      {/* Precio de bundle: cuanto más categorías elijas de una, más barato sale por
+         categoría -- se muestra antes de la lista para que el jugador sepa el trato de
+         entrada, ya que las tarjetas de abajo ya no llevan un precio fijo por categoría
+         (dejó de tener sentido, el total depende de cuántas se elijan juntas). */}
+      {[1, 2, 3].some((n) => tournamentRegPrice(tournament, n) > 0) && (
+        <div className="flex flex-wrap gap-2 mb-4">
+          {[1, 2, 3].map((n) => {
+            const price = tournamentRegPrice(tournament, n);
+            if (!price) return null;
+            return (
+              <span key={n} className="text-xs px-3 py-1.5 rounded-full font-semibold" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                {n === 3 ? "3+" : n} categoría{n === 1 ? "" : "s"}: <b>{formatMoney(price)}</b>
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {!currentUser.gender && (
         <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2.5 rounded-xl mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
@@ -4777,10 +4830,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                   {isSelected && <Check size={14} color="#fff" strokeWidth={3} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-3">
-                    <p className="font-bold text-sm leading-snug">{c.name}</p>
-                    <span className="mono text-sm font-extrabold shrink-0" style={{ color: COLORS.court }}>{formatMoney(unitPrice)}</span>
-                  </div>
+                  <p className="font-bold text-sm leading-snug">{c.name}</p>
                   <div className="flex items-center gap-1.5 mt-1.5 flex-wrap text-[11px]" style={{ color: "#6B7688" }}>
                     <span className="px-1.5 py-0.5 rounded-full font-bold" style={{ background: "#EEF1F7" }}>{isDoubles ? "Dobles" : "Individual"}</span>
                     <span>{c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos</span>
@@ -4839,19 +4889,22 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               {selectedCats.map((c) => {
                 const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
                 return (
-                  <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
-                    <div className="min-w-0">
-                      <p className="font-semibold" style={{ color: COLORS.ink }}>
-                        {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
-                      </p>
-                      {c.modality !== "individual" && (
-                        <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
-                      )}
-                    </div>
-                    <span className="mono text-xs font-bold shrink-0" style={{ color: COLORS.court }}>{formatMoney(unitPrice)}</span>
+                  <div key={c.id} className="px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                    <p className="font-semibold" style={{ color: COLORS.ink }}>
+                      {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                    </p>
+                    {c.modality !== "individual" && (
+                      <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
+                    )}
                   </div>
                 );
               })}
+              {/* No hay precio por línea -- el total es de bundle según cuántas categorías se
+                 eligieron juntas, no una suma de precios individuales (ver tournamentRegPrice). */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm font-bold" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+                <span>Total ({selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"})</span>
+                <span className="mono">{formatMoney(total)}</span>
+              </div>
             </div>
 
             <div className="mb-4">

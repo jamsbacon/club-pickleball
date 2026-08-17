@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.16.1 — con backend real
+## Estado actual: v2.17.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -403,17 +403,58 @@ navegador.
   (confirmado por SQL, cero categorías con esa combinación antes del fix). Categorías es
   solo crear/listar/borrar (no editar), así que `NewCategoryForm` era el único punto donde
   podía armarse esta combinación.
+- **v2.17.0 — Precio de bundle por cantidad de categorías**. Pedido del usuario: agregar
+  precio por 1/2/3 categorías que se actualice solo según el jugador se va inscribiendo.
+  Antes el precio era siempre por-categoría (un solo campo, multiplicado por la cantidad
+  elegida en el carrito) -- ahora `presale_price_1/2/3` y `regular_price_1/2/3` reemplazan
+  a `presale_price`/`regular_price` (migración con backfill: precio×1/×2/×3 para no
+  cambiarle el cobro a nadie el mismo día del cambio de esquema). El nivel "3" cubre 3 o
+  más categorías, no hay un cuarto nivel.
+  - `tournamentRegPrice(tournament, catCount)` ahora recibe la cantidad y devuelve el
+    precio TOTAL de ese bundle (no un precio-por-categoría a multiplicar). Sigue
+    respetando la ventana de preventa igual que antes.
+  - `TorneoTab` (Generalidades): nuevo `TieredPriceFields` (componente chico reusado en
+    Preventa e Inscripciones generales) -- 3 inputs en vez de 1 en cada sección.
+  - `InscripcionTab` (carrito del cliente): las tarjetas de categoría ya NO llevan un precio
+    fijo (dejó de tener sentido -- el total depende de cuántas se elijan juntas); en su
+    lugar, un cartel arriba de la lista muestra los 3 niveles de entrada
+    ("1 categoría: $20 · 2 categorías: $35 · 3+ categorías: $45") y el total del carrito
+    (barra flotante + resumen del checkout) se recalcula solo con cada categoría que se
+    marca/desmarca, usando el nivel que corresponda a la cantidad seleccionada.
+  - **Detalle de plata importante**: cada equipo creado en el carrito guarda `priceUsd` =
+    total del bundle ÷ cantidad de categorías (reparto en partes iguales), no el total
+    completo repetido en cada uno -- si no, `buildClientActivity()` (que suma `priceUsd`
+    por jugador para Estadísticas) infralía el ingreso real del carrito multiplicándolo
+    por la cantidad de categorías.
+  - **Alcance decidido sin volver a preguntar**: el nivel se calcula por lo que el jugador
+    elige DENTRO de un mismo carrito/checkout -- no hay seguimiento acumulado entre
+    inscripciones separadas en momentos distintos (si se anota en 1 categoría hoy y vuelve
+    en una semana a anotarse en otra más, ese segundo carrito arranca su propio nivel 1, no
+    se suma a lo que ya pagó antes). Si el usuario necesita esa cuenta acumulada real,
+    es un cambio de diseño más grande (hay que trackear cuántas categorías tiene el
+    jugador en total en ese torneo, no solo en el carrito actual).
+  - **Verificación**: probado con un harness de Node aislado (`tournamentRegPrice` copiada
+    1:1) -- niveles 1/2/3 devuelven el bundle correcto, 4+ cae al nivel 3, preventa gana
+    sobre regular dentro de la ventana, un nivel de preventa sin cargar cae al regular de
+    ese mismo nivel, y el reparto por equipo suma exacto al total en 1/2/3/5 equipos. Sin
+    probar todavía en el navegador (queda para la próxima pasada).
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real del rediseño de Calendario** (v2.11.0 y v2.12.0) -- lo único que
-   sigue sin probarse en el navegador; todo lo demás (multi-torneo v2.13.x, editar/borrar
-   actividades v2.15.0, Borrador/Publicado v2.16.0) ya se verificó de punta a punta en vivo
-   con Claude in Chrome, ver arriba. Orden sugerido: (a) el asistente de distribución de
-   punta a punta; (b) "Editar manualmente" (elegir un
-   partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo se vea
-   bien en mobile (nada de esto se midió con `getBoundingClientRect` como el resto de
-   Actividades, ver el punto de UI mobile más abajo).
+1. **Pasada visual real de lo que sigue sin probarse en el navegador**: el rediseño de
+   Calendario (v2.11.0 y v2.12.0) y el precio de bundle por categorías (v2.17.0, recién
+   hecho, solo se probó con harness de Node) -- todo lo demás (multi-torneo v2.13.x,
+   editar/borrar actividades v2.15.0, Borrador/Publicado v2.16.0, "Mixto" en Individual
+   v2.16.1) ya se verificó de punta a punta en vivo con Claude in Chrome, ver arriba. Para
+   v2.17.0 puntualmente: cargar los 3 niveles en Generalidades, entrar como cliente a
+   Inscripción y confirmar que el cartel de precios y el total del carrito se recalculan
+   bien al marcar/desmarcar 1, 2 y 3+ categorías, completar una inscripción real y
+   confirmar en Estadísticas que el ingreso sumado da el total del carrito (no el total
+   multiplicado por la cantidad de categorías). Para Calendario: (a) el asistente de
+   distribución de punta a punta; (b) "Editar manualmente" (elegir un partido, moverlo,
+   candado de fijado, liberarlo); (c) que todo el layout nuevo se vea bien en mobile (nada
+   de esto se midió con `getBoundingClientRect` como el resto de Actividades, ver el punto
+   de UI mobile más abajo).
 2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen
    → formulario de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha
    arrastrable — se eligió así por scope/tiempo de esa sesión, priorizando que la validación
