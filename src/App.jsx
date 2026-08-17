@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.16.0";
+const APP_VERSION = "2.16.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3753,14 +3753,20 @@ function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, clos
   );
 }
 
-/* Segmented control used across the category-creation wizard */
+/* Segmented control used across the category-creation wizard. An option can carry
+   `disabled: true` (e.g. "Mixto" once la modalidad es Individual, ver NewCategoryForm) --
+   se ve atenuada y no dispara onChange, en vez de dejar armar una combinación inválida. */
 function Segmented({ options, value, onChange }) {
   return (
     <div className="flex gap-1.5 flex-wrap">
       {options.map((o) => (
-        <button key={o.value} type="button" onClick={() => onChange(o.value)}
-          className="px-3.5 py-2 rounded-xl text-sm font-semibold transition-all"
-          style={{ background: value === o.value ? COLORS.court : "#EAEEF5", color: value === o.value ? COLORS.chalk : COLORS.ink }}>
+        <button key={o.value} type="button" disabled={o.disabled} onClick={() => !o.disabled && onChange(o.value)}
+          className="px-3.5 py-2 rounded-xl text-sm font-semibold transition-all disabled:cursor-not-allowed"
+          style={{
+            background: value === o.value ? COLORS.court : "#EAEEF5",
+            color: value === o.value ? COLORS.chalk : (o.disabled ? "#B7BFCE" : COLORS.ink),
+            opacity: o.disabled ? 0.6 : 1,
+          }}>
           {o.label}
         </button>
       ))}
@@ -3775,19 +3781,27 @@ function NewCategoryForm({ onCreate, onCancel }) {
   const [maxTeams, setMaxTeams] = useState("");
   const previewName = makeCategoryName(modality, gender, level);
 
+  // "Mixto" es un género de pareja (un hombre + una mujer por equipo) -- no existe en
+  // Individual, donde cada jugador compite solo. Cambiar a Individual con "Mixto" ya
+  // elegido lo corrige solo a Masculino en vez de dejar armar esa combinación inválida.
+  const changeModality = (m) => {
+    setModality(m);
+    if (m === "individual" && gender === "mixto") setGender("masculino");
+  };
+
   return (
     <Card className="mt-3">
       <h4 className="font-bold text-sm mb-4">Nueva categoría</h4>
       <div className="space-y-4">
         <div>
           <Label>1. Modalidad</Label>
-          <Segmented value={modality} onChange={setModality}
+          <Segmented value={modality} onChange={changeModality}
             options={[{ value: "individual", label: "Individual" }, { value: "dobles", label: "Dobles" }]} />
         </div>
         <div>
           <Label>2. Género</Label>
           <Segmented value={gender} onChange={setGender}
-            options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto" }]} />
+            options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }]} />
         </div>
         <div>
           <Label>3. Nivel de habilidad</Label>

@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.16.0 — con backend real
+## Estado actual: v2.16.1 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -393,6 +393,16 @@ navegador.
     terminar (`status` de vuelta a `draft`, fechas de vuelta a vacías, por SQL) -- el
     usuario sigue teniendo que cargar sus fechas reales y publicarlo cuando esté listo,
     esta pasada no le dejó fechas inventadas puestas.
+- **v2.16.1 — "Mixto" no existe en Individual**. Bug reportado con captura: `NewCategoryForm`
+  dejaba armar Modalidad=Individual + Género=Mixto, una combinación que no tiene sentido
+  (Mixto es pareja hombre+mujer, no existe en individual). `Segmented` (el control de
+  botones usado en varios formularios) ahora acepta `disabled` por opción -- atenuada, no
+  dispara `onChange` -- y la opción "Mixto" se deshabilita apenas la modalidad es
+  Individual; si ya estaba en Mixto al cambiar a Individual, se corrige solo a Masculino en
+  vez de dejar la combinación inválida un instante. Sin datos existentes afectados
+  (confirmado por SQL, cero categorías con esa combinación antes del fix). Categorías es
+  solo crear/listar/borrar (no editar), así que `NewCategoryForm` era el único punto donde
+  podía armarse esta combinación.
 
 ## Lo que falta / próximos pasos
 
