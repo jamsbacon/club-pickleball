@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.13.0 — con backend real
+## Estado actual: v2.13.1 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -273,24 +273,41 @@ navegador.
   hardcodeada) en vez de solo el botón; lo que falta de la Sesión 2 es el botón "+ Crear
   torneo" ahí mismo (hoy solo se crea desde la pestaña Torneos) y cualquier pulido visual
   que el usuario pida después de ver las tarjetas en uso.
+- **v2.13.1 — Verificación real de multi-torneo (Claude in Chrome) + fix de texto**. El
+  usuario conectó la extensión Claude in Chrome (no estaba instalada en las sesiones
+  anteriores) -- primera vez en toda la racha de sesiones bloqueadas por red que se pudo
+  probar algo de punta a punta en un navegador real. Se verificó en producción, como admin
+  y como cliente: crear un torneo nuevo desde cero (el formulario inline con
+  "Crear"/"Cancelar" funciona), que la lista muestre ambos torneos con sus conteos de
+  categorías/equipos correctamente separados, que "Categorías" del torneo nuevo arranque
+  vacía y NO mezclada con las 3 categorías del torneo viejo (la prueba más importante --
+  confirma el fix de `tournamentId` de v2.13.0), navegación "Volver a Torneos", y que
+  Actividades muestre una tarjeta por torneo con "Ver detalles"/"Ver torneo" saltando
+  directo al torneo correcto. El torneo de prueba se creó vía UI y se borró después por SQL
+  (`npx supabase db query --linked`, no hay botón de borrar en la UI todavía -- ver punto
+  pendiente). De paso se encontró y arregló un detalle de texto real (no un bug de datos):
+  la tarjeta de un torneo con categorías creadas pero 0 equipos inscritos decía "Sin
+  categorías aún" (heredado tal cual del código de un-solo-torneo) -- ahora distingue "sin
+  categorías todavía" de "hay categorías, todavía sin inscritos".
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real de TODO lo que se construyó sin poder probarlo en el navegador**
-   (v2.11.0, v2.12.0 y v2.13.0 — tres sesiones seguidas bloqueadas por la misma limitación de
-   red del entorno, el usuario intentó conectar Claude in Chrome como alternativa pero no
-   llegó a terminarlo). Orden sugerido para revisar: (a) multi-torneo — crear un torneo
-   desde cero, ver que aparezca en la lista, editarlo, volver a la lista, que el cliente lo
-   vea y pueda inscribirse; (b) el asistente de distribución del Calendario de punta a
-   punta; (c) "Editar manualmente" (elegir un partido, moverlo, candado de fijado,
-   liberarlo); (d) que todo el layout nuevo se vea bien en mobile (nada de esto se midió con
-   `getBoundingClientRect` como el resto de Actividades, ver el punto de UI mobile más
-   abajo).
+1. **Pasada visual real de lo que sigue sin probarse en el navegador** (v2.11.0 y v2.12.0,
+   el rediseño de Calendario -- multi-torneo, v2.13.0/v2.13.1, ya se verificó en vivo con
+   Claude in Chrome, ver arriba). Orden sugerido: (a) el asistente de distribución del
+   Calendario de punta a punta; (b) "Editar manualmente" (elegir un partido, moverlo,
+   candado de fijado, liberarlo); (c) que todo el layout nuevo se vea bien en mobile (nada
+   de esto se midió con `getBoundingClientRect` como el resto de Actividades, ver el punto
+   de UI mobile más abajo).
 2. **Sesión 2 de multi-torneo (acordada con el usuario)**: botón "+ Crear torneo" dentro de
    Actividades (hoy el admin solo puede crear desde la pestaña Torneos → lista →
    "Crear nuevo torneo"; `EventosTab` ya muestra una tarjeta por torneo desde v2.13.0, pero
    sin el botón de creación ahí mismo) + cualquier pulido que salga de la pasada visual del
-   punto 1.
+   punto 1. **Encontrado al verificar v2.13.0**: no existe forma de BORRAR un torneo desde
+   la UI (`TournamentsListTab` solo tiene "Editar"/"Crear nuevo") -- para limpiar el torneo
+   de prueba de la verificación hubo que borrarlo por SQL. Si el usuario lo necesita, agregar
+   `removeTournament` es sencillo (mismo patrón que `removeCategory`), buen candidato para
+   sumar a la Sesión 2.
 3. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen
    → formulario de destino (día/hora/cancha por dropdown), no una grilla visual día×cancha
    arrastrable — se eligió así por scope/tiempo de esa sesión, priorizando que la validación

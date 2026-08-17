@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.13.0";
+const APP_VERSION = "2.13.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5627,13 +5627,17 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
     // Plays/Clases (antes esto era una sola tarjeta fija para el único torneo que existía).
     tournaments.forEach((t) => {
       const tCats = categories.filter((c) => c.tournamentId === t.id);
-      const hasActivity = tCats.some((c) => c.teams.length > 0);
+      const teamCount = tCats.reduce((s, c) => s + c.teams.length, 0);
+      // Antes esto era un solo booleano (¿hay algún equipo inscrito?) que confundía "sin
+      // categorías todavía" con "hay categorías pero nadie se anotó aún" -- distinguir los
+      // dos casos importa más ahora que hay varias tarjetas de torneo a la vez.
+      const noCatsYet = tCats.length === 0;
       items.push({
         key: `t-${t.id}`, kind: "torneo", title: t.name || "Torneo del club",
-        description: hasActivity ? `${tCats.length} categoría(s) abiertas.` : "Sin categorías aún.",
+        description: noCatsYet ? "Sin categorías aún." : `${tCats.length} categoría(s) abiertas.`,
         date: t.startDate, startTime: t.dailyStart, endTime: t.dailyEnd,
         price: "Ver detalles", image: null, recurring: false,
-        meta: { text: hasActivity ? `${tCats.reduce((s, c) => s + c.teams.length, 0)} equipos inscritos` : "Sin categorías aún" },
+        meta: { text: noCatsYet ? "Sin categorías aún" : `${teamCount} equipo(s) inscrito(s)` },
         onClick: () => openTournament(t.id),
       });
     });
