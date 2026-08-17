@@ -455,26 +455,31 @@ navegador.
     plana, y dos botones grandes que saltan directo a Participantes/Formatos (antes era
     solo texto "andá a la pestaña X", sin acción real -- necesitó pasar `setSubTab` como
     prop nuevo hasta `CategoriasTab`).
-  - **Verificación**: pendiente en el navegador (queda para la próxima pasada, junto con
-    Calendario y el precio de bundle de v2.17.0).
+  - **Verificación**: completa en producción con Claude in Chrome (reconectado en esta
+    sesión). Botón "Crear categoría" nuevo visible al pie de la lista; el clic abre
+    `NewCategoryForm` en el panel grande con el layout de 2 columnas; "Mixto" se sigue
+    deshabilitando al elegir Individual (fix de v2.16.1 intacto); se creó una categoría de
+    prueba (Dobles Masculino Open/Profesional) que aterrizó directo en la vista de detalle
+    enriquecida con badges; el botón "Participantes →" navegó de verdad a esa sub-pestaña
+    con la misma categoría seleccionada; se borró la categoría de prueba y se confirmó por
+    SQL que Copa APG quedó con exactamente sus 2 categorías originales (hubo una
+    coincidencia de nombre con categorías reales del usuario en "Inauguración PickleHub" --
+    incidente cerrado al confirmar por `tournament_id` que eran de torneos distintos).
 
 ## Lo que falta / próximos pasos
 
 1. **Pasada visual real de lo que sigue sin probarse en el navegador**: el rediseño de
-   Calendario (v2.11.0 y v2.12.0), el precio de bundle por categorías (v2.17.0) y el
-   rediseño de Categorías (v2.17.1) -- todo lo demás (multi-torneo v2.13.x, editar/borrar
-   actividades v2.15.0, Borrador/Publicado v2.16.0, "Mixto" en Individual v2.16.1) ya se
-   verificó de punta a punta en vivo con Claude in Chrome, ver arriba. Para v2.17.1
-   puntualmente: crear una categoría desde el botón nuevo y confirmar que el formulario se
-   ve bien en el panel grande (2 columnas), y que los botones "Participantes →"/
-   "Formatos →" saltan de verdad a esas sub-pestañas. Para v2.17.0: cargar los 3 niveles en
-   Generalidades, entrar como cliente a Inscripción y confirmar que el cartel de precios y
-   el total del carrito se recalculan bien al marcar/desmarcar 1, 2 y 3+ categorías,
-   completar una inscripción real y confirmar en Estadísticas que el ingreso sumado da el
-   total del carrito (no el total multiplicado por la cantidad de categorías). Para
-   Calendario: (a) el asistente de distribución de punta a punta; (b) "Editar manualmente"
-   (elegir un partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo
-   se vea bien en mobile (nada
+   Calendario (v2.11.0 y v2.12.0) y el precio de bundle por categorías (v2.17.0) -- todo lo
+   demás (multi-torneo v2.13.x, editar/borrar actividades v2.15.0, Borrador/Publicado
+   v2.16.0, "Mixto" en Individual v2.16.1, rediseño de Categorías v2.17.1) ya se verificó de
+   punta a punta en vivo con Claude in Chrome, ver arriba. Para v2.17.0: cargar los 3
+   niveles en Generalidades, entrar como cliente a Inscripción y confirmar que el cartel de
+   precios y el total del carrito se recalculan bien al marcar/desmarcar 1, 2 y 3+
+   categorías, completar una inscripción real y confirmar en Estadísticas que el ingreso
+   sumado da el total del carrito (no el total multiplicado por la cantidad de categorías).
+   Para Calendario: (a) el asistente de distribución de punta a punta; (b) "Editar
+   manualmente" (elegir un partido, moverlo, candado de fijado, liberarlo); (c) que todo el
+   layout nuevo se vea bien en mobile (nada
    de esto se midió con `getBoundingClientRect` como el resto de Actividades, ver el punto
    de UI mobile más abajo).
 2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen
