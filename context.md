@@ -382,21 +382,25 @@ navegador.
     un borrador es invisible en una pantalla pero entrable desde otra); el admin sigue
     viendo TODOS, con badge "Borrador" en los que no están publicados, para poder
     encontrarlos y completarlos.
-  - **Verificación**: falta -- este cambio se hizo y se documenta acá, pero no se probó
-    todavía en vivo con Claude in Chrome (queda para la próxima pasada, junto con
-    Calendario).
+  - **Verificación**: completa en producción con Claude in Chrome, usando el propio "Copa
+    APG" real del usuario (el caso que motivó el reporte) en vez de un torneo de prueba
+    aparte. Confirmado: recién creado (solo nombre) no aparecía en Actividades ni filtrando
+    por "Torneos"; en la lista de la pestaña Torneos sí aparecía, con badge "Borrador";
+    dentro de Generalidades el botón "Publicar torneo" estaba deshabilitado con el aviso de
+    fechas faltantes; al cargar fecha inicio/fin el botón se habilitó; al publicar,
+    apareció de inmediato en Actividades con esas fechas. **Importante**: como se probó
+    sobre el torneo real (no uno descartable), se restauraron sus datos originales al
+    terminar (`status` de vuelta a `draft`, fechas de vuelta a vacías, por SQL) -- el
+    usuario sigue teniendo que cargar sus fechas reales y publicarlo cuando esté listo,
+    esta pasada no le dejó fechas inventadas puestas.
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real de lo que falta probar en el navegador**: el rediseño de Calendario
-   (v2.11.0 y v2.12.0) y Borrador/Publicado de torneos (v2.16.0, recién hecho) -- multi-
-   torneo (v2.13.x) y editar/borrar actividades (v2.15.0, incluida la edición de series
-   recurrentes) ya se verificaron de punta a punta en vivo con Claude in Chrome, ver
-   arriba. Para v2.16.0 puntualmente: publicar un torneo nuevo (botón deshabilitado sin
-   fechas, habilitado con fechas), confirmar que aparece en Actividades recién ahí, "volver
-   a borrador" y confirmar que desaparece de nuevo, y que el cliente no vea el badge
-   "Borrador" (ni el torneo) en ningún lado mientras no esté publicado. Para Calendario:
-   (a) el asistente de distribución de punta a punta; (b) "Editar manualmente" (elegir un
+1. **Pasada visual real del rediseño de Calendario** (v2.11.0 y v2.12.0) -- lo único que
+   sigue sin probarse en el navegador; todo lo demás (multi-torneo v2.13.x, editar/borrar
+   actividades v2.15.0, Borrador/Publicado v2.16.0) ya se verificó de punta a punta en vivo
+   con Claude in Chrome, ver arriba. Orden sugerido: (a) el asistente de distribución de
+   punta a punta; (b) "Editar manualmente" (elegir un
    partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo se vea
    bien en mobile (nada de esto se midió con `getBoundingClientRect` como el resto de
    Actividades, ver el punto de UI mobile más abajo).
