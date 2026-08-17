@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.15.0";
+const APP_VERSION = "2.16.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1276,7 +1276,7 @@ export default function PickleballTournamentApp() {
   };
 
   const mapTournamentRow = (r) => ({
-    id: r.id, name: r.name, startDate: r.start_date || "", endDate: r.end_date || "",
+    id: r.id, name: r.name, status: r.status || "draft", startDate: r.start_date || "", endDate: r.end_date || "",
     dailyStart: r.daily_start, dailyEnd: r.daily_end, playDays: r.play_days || [],
     presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "", presalePrice: r.presale_price ?? "",
     regStart: r.reg_start || "", regEnd: r.reg_end || "", regularPrice: r.regular_price ?? "",
@@ -1303,7 +1303,7 @@ export default function PickleballTournamentApp() {
   // desde la app). Arranca con los mismos defaults sensatos que tenía la fila única sembrada.
   const createTournament = async (name) => {
     const { data, error } = await supabase.from("tournaments").insert({
-      name: name?.trim() || "Nuevo torneo", daily_start: "08:00", daily_end: "20:00",
+      name: name?.trim() || "Nuevo torneo", status: "draft", daily_start: "08:00", daily_end: "20:00",
     }).select().single();
     if (error) { console.error("createTournament:", error.message); return { error: error.message }; }
     const created = mapTournamentRow(data);
@@ -1338,6 +1338,7 @@ export default function PickleballTournamentApp() {
     setTournaments((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     const dbPatch = {};
     if ("name" in patch) dbPatch.name = patch.name;
+    if ("status" in patch) dbPatch.status = patch.status;
     if ("startDate" in patch) dbPatch.start_date = patch.startDate || null;
     if ("endDate" in patch) dbPatch.end_date = patch.endDate || null;
     if ("dailyStart" in patch) dbPatch.daily_start = patch.dailyStart;
@@ -2792,8 +2793,42 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 function TorneoTab({ tournament, setTournament: updateTournament, dates, courts }) {
   const set = (k, v) => updateTournament({ [k]: v });
   const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
+  const isPublished = tournament.status === "published";
+  // Mínimo para poder publicar: fechas cargadas -- sin eso el torneo se ve "Por definir" en
+  // Actividades, que es justo el problema real que hizo falta este borrador/publicado
+  // (v2.16.0): un torneo creado solo con el nombre no debe quedar visible para clientes.
+  const canPublish = !!(tournament.startDate && tournament.endDate);
   return (
-    <div className="grid md:grid-cols-2 gap-5 mt-2">
+    <div className="space-y-5 mt-2">
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs font-extrabold uppercase tracking-wide px-2.5 py-1 rounded-full"
+              style={{ background: isPublished ? "#DCEBD5" : "#EAEEF5", color: isPublished ? "#2F6B2F" : "#6B7688" }}>
+              {isPublished ? "Publicado" : "Borrador"}
+            </span>
+            <p className="text-xs" style={{ color: "#6B7688" }}>
+              {isPublished
+                ? "Visible para los clientes en Actividades y en la lista de Torneos."
+                : "Oculto para los clientes -- solo el club lo ve, hasta que se publique."}
+            </p>
+          </div>
+          <button disabled={!isPublished && !canPublish} onClick={() => set("status", isPublished ? "draft" : "published")}
+            style={{
+              background: isPublished ? "#EAEEF5" : (canPublish ? COLORS.court : "#E5E5E5"),
+              color: isPublished ? COLORS.ink : (canPublish ? "#fff" : "#999"),
+            }} className="px-4 py-2 rounded-xl font-bold text-sm disabled:cursor-not-allowed">
+            {isPublished ? "Volver a borrador" : "Publicar torneo"}
+          </button>
+        </div>
+        {!isPublished && !canPublish && (
+          <p className="text-[11px] mt-2 font-semibold" style={{ color: COLORS.clay }}>
+            Completa fecha de inicio y fin (más abajo) para poder publicarlo.
+          </p>
+        )}
+      </Card>
+
+      <div className="grid md:grid-cols-2 gap-5">
       <Card>
         <SectionTitle sub="Nombre y días de juego del evento.">Datos generales</SectionTitle>
         <div className="space-y-4">
@@ -2905,6 +2940,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
             </div>
           </div>
         </Card>
+      </div>
       </div>
     </div>
   );
@@ -3436,6 +3472,11 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate,
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
+  // Un torneo "draft" (recién creado, todavía sin completar) es invisible para clientes en
+  // todos lados -- acá y en Actividades -- hasta que el admin lo publique explícitamente
+  // desde Generalidades. El admin sigue viendo todos, con badge, para poder completarlos.
+  const visibleTournaments = isAdmin ? tournaments : tournaments.filter((t) => t.status === "published");
+
   const catCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).length;
   const teamCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).reduce((s, c) => s + c.teams.length, 0);
 
@@ -3471,7 +3512,7 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate,
         </Card>
       )}
 
-      {tournaments.length === 0 && (
+      {visibleTournaments.length === 0 && (
         <Card>
           <p className="text-sm text-gray-400">
             {isAdmin ? 'Todavía no hay torneos creados -- pulsa "Crear nuevo torneo" para empezar.' : "Todavía no hay torneos publicados."}
@@ -3479,12 +3520,17 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate,
         </Card>
       )}
 
-      {tournaments.length > 0 && (
+      {visibleTournaments.length > 0 && (
         <div className="grid sm:grid-cols-2 gap-4">
-          {tournaments.map((t) => (
+          {visibleTournaments.map((t) => (
             <Card key={t.id}>
               <div className="flex items-start justify-between gap-2 mb-1">
-                <h3 className="font-bold text-base">{t.name}</h3>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  {t.name}
+                  {isAdmin && t.status !== "published" && (
+                    <span className="text-[10px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-full shrink-0" style={{ background: "#EAEEF5", color: "#6B7688" }}>Borrador</span>
+                  )}
+                </h3>
                 {isAdmin && (
                   <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
                     className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={16} /></button>
@@ -5760,7 +5806,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
   const isAdmin = role === "admin";
   const todayIso = new Date().toISOString().slice(0, 10);
 
-  const noEvents = openPlays.length === 0 && classes.length === 0 && tournaments.length === 0;
+  const noEvents = openPlays.length === 0 && classes.length === 0 && tournaments.every((t) => t.status !== "published");
 
   // Recurring Open Plays are stored as one entry per occurrence (sharing a recurringGroupId)
   // so registrations/court blocks stay per-date. Group them back into one card per series —
@@ -5822,7 +5868,10 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
     });
     // El club organiza varios torneos a la vez -- una tarjeta por cada uno, igual que Open
     // Plays/Clases (antes esto era una sola tarjeta fija para el único torneo que existía).
-    tournaments.forEach((t) => {
+    // Un torneo "draft" (recién creado, solo con nombre) nunca aparece acá, ni para admin --
+    // Actividades es "lo que está en vivo", el borrador se gestiona desde la lista de
+    // Torneos hasta que se publique (v2.16.0).
+    tournaments.filter((t) => t.status === "published").forEach((t) => {
       const tCats = categories.filter((c) => c.tournamentId === t.id);
       const teamCount = tCats.reduce((s, c) => s + c.teams.length, 0);
       // Antes esto era un solo booleano (¿hay algún equipo inscrito?) que confundía "sin

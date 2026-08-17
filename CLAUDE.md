@@ -96,6 +96,19 @@ follows the same rule: it must clone/schedule only the active tournament's slice
 mix other tournaments' matches into this one's calendar, and overwriting `categories` with just
 the scheduled slice would silently delete every other tournament's categories from state.
 
+### Tournament `status`: draft is invisible to clients everywhere, not just Actividades
+
+`tournaments.status` is `'draft'` (default, on create) or `'published'` — publishing requires
+`startDate`+`endDate` both set (checked client-side in `TorneoTab`, the "Publicar torneo"
+button stays disabled otherwise). A draft is hidden from clients in **both** places a
+tournament can appear: `EventosTab` (Actividades) filters to `status === "published"`
+unconditionally (admin included — Actividades is "what's live", not a draft preview), and
+`TournamentsListTab` filters to published-only for `role !== "admin"` while showing admin
+every tournament with a "Borrador" badge on unpublished ones. Don't add a tournament-surfacing
+screen without applying the same filter — a screen that shows drafts to clients is a very easy
+way to reintroduce the original bug (an incomplete, unpublished tournament visible to
+everyone) that motivated `status` in the first place.
+
 ### Torneo admin controls vs. player self-service
 
 Inside `TorneosSection`, `TORNEO_SUB_ITEMS` gates which sub-tabs a role can even see, but **visibility of a sub-tab is not the same as write access within it** — `CalendarioTab` is visible to both roles (players need to see the schedule) but only renders the match-duration inputs and the "Generar/Actualizar calendario" button when `role === "admin"`; check `isAdmin` inside a shared tab before assuming a `roles` entry on `TORNEO_SUB_ITEMS` is sufficient gating. `InscripcionTab` branches early into two entirely different components based on role: `InscripcionAdminForm` (unchanged free-text roster entry, no payment) for admins, vs. the player self-service flow (this file) for everyone else — don't try to unify them further, they serve different jobs (organizer registering a walk-in vs. a player registering themselves with a real checkout).

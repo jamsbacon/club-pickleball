@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.15.0 — con backend real
+## Estado actual: v2.16.0 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -359,14 +359,44 @@ navegador.
     `tournaments`. Sin probar todavía, por acotar el alcance de esta pasada: editar una
     ocurrencia puntual dentro de una serie de Clase (`updateClass` en solitario) -- mismo
     código que `updateOpenPlay`, ya probado, así que la confianza es alta igual.
+- **v2.16.0 — Borrador/Publicado para torneos**. Bug real reportado por el usuario con
+  captura: creó un torneo solo con el nombre ("Copa APG", sin fechas) y apareció de
+  inmediato en Actividades, visible para clientes, con "Por definir" en la fecha y sin
+  categorías -- un torneo a medio armar no debe ser visible hasta que el club decida
+  mostrarlo. Nueva columna `tournaments.status` (`'draft' | 'published'`, default
+  `'draft'`) vía migración -- **con backfill**: los torneos que ya tenían fecha inicio y
+  fin cargadas (ej. "Inauguración PickleHub") se marcaron `published` de entrada (ya
+  estaban visibles, no tenía sentido esconder algo que el club ya venía mostrando); el que
+  no tenía fechas (el caso real, "Copa APG") quedó en `draft` y desapareció de Actividades
+  apenas se aplicó la migración, sin que el admin tuviera que tocar nada.
+  - `TorneoTab` (Generalidades): tarjeta nueva arriba de todo con badge Borrador/Publicado
+    + botón "Publicar torneo"/"Volver a borrador". Publicar exige fecha de inicio Y fin
+    cargadas (el botón queda deshabilitado con un aviso si falta alguna) -- es la única
+    validación de "información publicable" que se pidió esta vuelta; no se exigió tener
+    categorías cargadas para no bloquear un "guarda la fecha" temprano.
+  - `EventosTab` (Actividades): filtra a `status === "published"` para TODOS los roles,
+    admin incluido -- Actividades pasó a ser "lo que está en vivo"; gestionar/completar un
+    borrador es tarea de la pestaña Torneos, no de Actividades.
+  - `TournamentsListTab` (la lista dentro de la pestaña Torneos): el cliente solo ve
+    torneos publicados (mismo criterio que Actividades, para no dejar un hueco raro donde
+    un borrador es invisible en una pantalla pero entrable desde otra); el admin sigue
+    viendo TODOS, con badge "Borrador" en los que no están publicados, para poder
+    encontrarlos y completarlos.
+  - **Verificación**: falta -- este cambio se hizo y se documenta acá, pero no se probó
+    todavía en vivo con Claude in Chrome (queda para la próxima pasada, junto con
+    Calendario).
 
 ## Lo que falta / próximos pasos
 
-1. **Pasada visual real del rediseño de Calendario** (v2.11.0 y v2.12.0) -- lo único que
-   sigue sin probarse en el navegador; multi-torneo (v2.13.x) y editar/borrar actividades
-   (v2.15.0, incluida la edición de series recurrentes) ya se verificaron de punta a punta
-   en vivo con Claude in Chrome, ver arriba. Orden sugerido: (a) el asistente de
-   distribución del Calendario de punta a punta; (b) "Editar manualmente" (elegir un
+1. **Pasada visual real de lo que falta probar en el navegador**: el rediseño de Calendario
+   (v2.11.0 y v2.12.0) y Borrador/Publicado de torneos (v2.16.0, recién hecho) -- multi-
+   torneo (v2.13.x) y editar/borrar actividades (v2.15.0, incluida la edición de series
+   recurrentes) ya se verificaron de punta a punta en vivo con Claude in Chrome, ver
+   arriba. Para v2.16.0 puntualmente: publicar un torneo nuevo (botón deshabilitado sin
+   fechas, habilitado con fechas), confirmar que aparece en Actividades recién ahí, "volver
+   a borrador" y confirmar que desaparece de nuevo, y que el cliente no vea el badge
+   "Borrador" (ni el torneo) en ningún lado mientras no esté publicado. Para Calendario:
+   (a) el asistente de distribución de punta a punta; (b) "Editar manualmente" (elegir un
    partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo se vea
    bien en mobile (nada de esto se midió con `getBoundingClientRect` como el resto de
    Actividades, ver el punto de UI mobile más abajo).
