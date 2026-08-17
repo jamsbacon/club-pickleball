@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.17.0 — con backend real
+## Estado actual: v2.17.1 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -438,21 +438,43 @@ navegador.
     sobre regular dentro de la ventana, un nivel de preventa sin cargar cae al regular de
     ese mismo nivel, y el reparto por equipo suma exacto al total en 1/2/3/5 equipos. Sin
     probar todavía en el navegador (queda para la próxima pasada).
+- **v2.17.1 — Rediseño de Categorías: crear en el panel grande, no en el sidebar**. Pedido
+  del usuario con captura: el botón "+" para crear categoría era un ícono chiquito arriba a
+  la derecha del sidebar angosto, y el formulario completo (modalidad/género/nivel/cupo)
+  quedaba apretado ahí mismo -- mientras el panel grande de la derecha, desaprovechado desde
+  que Participantes se separó en su propia pestaña (v2.10.0), solo mostraba 3 líneas de
+  texto.
+  - `CategoryPicker` (compartido entre Categorías/Participantes/Formatos): el ícono "+"
+    chiquito se cambió por un botón de ancho completo abajo de la lista, "Crear categoría"
+    -- mismo criterio que "Crear nuevo torneo"/"+ Open Play" en otras pestañas.
+  - `CategoriasTab`: "Crear categoría" ahora abre `NewCategoryForm` en el panel GRANDE (no
+    en el sidebar de 260px) -- el formulario se reacomodó a un layout de 2 columnas
+    (Modalidad+Género, Nivel+Cupo) que aprovecha ese espacio.
+  - La vista de una categoría ya elegida (ese panel grande cuando no se está creando) se
+    enriqueció: badges de formato/equipos/lista de espera en vez de una línea de texto
+    plana, y dos botones grandes que saltan directo a Participantes/Formatos (antes era
+    solo texto "andá a la pestaña X", sin acción real -- necesitó pasar `setSubTab` como
+    prop nuevo hasta `CategoriasTab`).
+  - **Verificación**: pendiente en el navegador (queda para la próxima pasada, junto con
+    Calendario y el precio de bundle de v2.17.0).
 
 ## Lo que falta / próximos pasos
 
 1. **Pasada visual real de lo que sigue sin probarse en el navegador**: el rediseño de
-   Calendario (v2.11.0 y v2.12.0) y el precio de bundle por categorías (v2.17.0, recién
-   hecho, solo se probó con harness de Node) -- todo lo demás (multi-torneo v2.13.x,
-   editar/borrar actividades v2.15.0, Borrador/Publicado v2.16.0, "Mixto" en Individual
-   v2.16.1) ya se verificó de punta a punta en vivo con Claude in Chrome, ver arriba. Para
-   v2.17.0 puntualmente: cargar los 3 niveles en Generalidades, entrar como cliente a
-   Inscripción y confirmar que el cartel de precios y el total del carrito se recalculan
-   bien al marcar/desmarcar 1, 2 y 3+ categorías, completar una inscripción real y
-   confirmar en Estadísticas que el ingreso sumado da el total del carrito (no el total
-   multiplicado por la cantidad de categorías). Para Calendario: (a) el asistente de
-   distribución de punta a punta; (b) "Editar manualmente" (elegir un partido, moverlo,
-   candado de fijado, liberarlo); (c) que todo el layout nuevo se vea bien en mobile (nada
+   Calendario (v2.11.0 y v2.12.0), el precio de bundle por categorías (v2.17.0) y el
+   rediseño de Categorías (v2.17.1) -- todo lo demás (multi-torneo v2.13.x, editar/borrar
+   actividades v2.15.0, Borrador/Publicado v2.16.0, "Mixto" en Individual v2.16.1) ya se
+   verificó de punta a punta en vivo con Claude in Chrome, ver arriba. Para v2.17.1
+   puntualmente: crear una categoría desde el botón nuevo y confirmar que el formulario se
+   ve bien en el panel grande (2 columnas), y que los botones "Participantes →"/
+   "Formatos →" saltan de verdad a esas sub-pestañas. Para v2.17.0: cargar los 3 niveles en
+   Generalidades, entrar como cliente a Inscripción y confirmar que el cartel de precios y
+   el total del carrito se recalculan bien al marcar/desmarcar 1, 2 y 3+ categorías,
+   completar una inscripción real y confirmar en Estadísticas que el ingreso sumado da el
+   total del carrito (no el total multiplicado por la cantidad de categorías). Para
+   Calendario: (a) el asistente de distribución de punta a punta; (b) "Editar manualmente"
+   (elegir un partido, moverlo, candado de fijado, liberarlo); (c) que todo el layout nuevo
+   se vea bien en mobile (nada
    de esto se midió con `getBoundingClientRect` como el resto de Actividades, ver el punto
    de UI mobile más abajo).
 2. **Posible mejora futura**: el "Editar manualmente" de v2.12.0 (Calendario) es tap-origen

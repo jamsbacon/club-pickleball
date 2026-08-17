@@ -927,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.17.0";
+const APP_VERSION = "2.17.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3633,7 +3633,7 @@ function TorneosSection(props) {
 
       {subTab === "categorias" && role === "admin" && (
         <CategoriasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
-          addCategory={addCategory} removeCategory={removeCategory} />
+          addCategory={addCategory} removeCategory={removeCategory} setSubTab={setSubTab} />
       )}
 
       {subTab === "participantes" && role === "admin" && (
@@ -3676,10 +3676,7 @@ function TorneosSection(props) {
 function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, emptyHint }) {
   return (
     <Card>
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-bold text-sm">Categorías</h3>
-        {onCreateClick && <button onClick={onCreateClick} style={{ color: COLORS.court }}><Plus size={18} /></button>}
-      </div>
+      <h3 className="font-bold text-sm mb-3">Categorías</h3>
       <div className="space-y-1.5">
         {categories.map((c) => (
           <button key={c.id} onClick={() => setActiveCatId(c.id)}
@@ -3691,37 +3688,73 @@ function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, 
         ))}
         {categories.length === 0 && <p className="text-xs text-gray-400 italic px-1">{emptyHint || "Crea tu primera categoría."}</p>}
       </div>
+      {/* Antes era un ícono "+" chiquito arriba a la derecha -- fácil de pasar por alto y
+         incómodo de tocar en mobile. Un botón de ancho completo abajo es la misma acción,
+         mucho más visible (mismo criterio que "Crear nuevo torneo"/"+ Open Play" en otras
+         pestañas -- una acción de crear se ve como botón, no como ícono suelto). */}
+      {onCreateClick && (
+        <button onClick={onCreateClick} className="w-full mt-3 px-3 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-1.5"
+          style={{ background: COLORS.court, color: "#fff" }}>
+          <Plus size={16} /> Crear categoría
+        </button>
+      )}
     </Card>
   );
 }
 
 // Solo creación/listado/borrado de categorías -- agregar participantes vive en Participantes,
 // definir el formato vive en Formatos (antes las tres cosas estaban mezcladas aquí).
-function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory }) {
+// El panel grande (derecha) quedó desaprovechado desde que Participantes se separó en su
+// propia pestaña (v2.10.0) -- antes de ese cambio ahí vivía todo (armar equipos, etc.), acá
+// solo quedó un resumen de 3 líneas. En vez de crear en el sidebar angosto (donde el
+// formulario completo -- modalidad/género/nivel/cupo -- quedaba apretado), "Crear
+// categoría" ahora abre el formulario EN ese panel grande, con espacio de sobra.
+function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory, setSubTab }) {
   const [showNew, setShowNew] = useState(categories.length === 0);
+  const startCreate = () => setShowNew(true);
+  const pickCat = (id) => { setShowNew(false); setActiveCatId(id); };
+
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <div>
-        <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId} onCreateClick={() => setShowNew(true)} />
-        {showNew && <NewCategoryForm onCreate={(...args) => { addCategory(...args); setShowNew(false); }} onCancel={() => setShowNew(false)} />}
+        <CategoryPicker categories={categories} activeCat={showNew ? null : activeCat} setActiveCatId={pickCat} onCreateClick={startCreate} />
       </div>
 
       <div>
-        {activeCat ? (
+        {showNew ? (
+          <NewCategoryForm onCreate={(...args) => { addCategory(...args); setShowNew(false); }} onCancel={() => setShowNew(false)} />
+        ) : activeCat ? (
           <Card>
-            <div className="flex items-start justify-between">
-              <div>
-                <h3 className="disp text-lg" style={{ color: COLORS.courtDark }}>{activeCat.name}</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  {activeCat.format ? FORMAT_LABELS[activeCat.format] : "Formato por definir"} · {activeCat.teams.length}{activeCat.maxTeams ? `/${activeCat.maxTeams}` : ""} equipo(s) inscrito(s)
-                  {activeCat.waitlist.length > 0 && ` · ${activeCat.waitlist.length} en lista de espera`}
-                </p>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="disp text-2xl" style={{ color: COLORS.courtDark }}>{activeCat.name}</h3>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                    {activeCat.format ? FORMAT_LABELS[activeCat.format] : "Formato por definir"}
+                  </span>
+                  <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                    {activeCat.teams.length}{activeCat.maxTeams ? `/${activeCat.maxTeams}` : ""} equipo{activeCat.teams.length === 1 ? "" : "s"} inscrito{activeCat.teams.length === 1 ? "" : "s"}
+                  </span>
+                  {activeCat.waitlist.length > 0 && (
+                    <span className="text-xs px-2.5 py-1 rounded-full font-semibold flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+                      <Hourglass size={11} /> {activeCat.waitlist.length} en lista de espera
+                    </span>
+                  )}
+                </div>
               </div>
-              <button onClick={() => removeCategory(activeCat.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+              <button onClick={() => removeCategory(activeCat.id)} className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={18} /></button>
             </div>
-            <p className="text-xs mt-3" style={{ color: "#6B7688" }}>
-              Agrega o revisa sus inscritos en la pestaña <b>Participantes</b>, y define cómo se juega en <b>Formatos</b>.
-            </p>
+
+            <div className="grid sm:grid-cols-2 gap-3 mt-6">
+              <button onClick={() => setSubTab?.("participantes")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF3E6" }}>
+                <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Participantes →</p>
+                <p className="text-xs mt-0.5" style={{ color: "#6B7688" }}>Agrega o revisa los equipos inscritos.</p>
+              </button>
+              <button onClick={() => setSubTab?.("formatos")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF0F8" }}>
+                <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Formatos →</p>
+                <p className="text-xs mt-0.5" style={{ color: "#6B7688" }}>Define cómo se juega esta categoría.</p>
+              </button>
+            </div>
           </Card>
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona o crea una categoría para comenzar.</p></Card>
@@ -3818,39 +3851,44 @@ function NewCategoryForm({ onCreate, onCancel }) {
   };
 
   return (
-    <Card className="mt-3">
-      <h4 className="font-bold text-sm mb-4">Nueva categoría</h4>
-      <div className="space-y-4">
-        <div>
-          <Label>1. Modalidad</Label>
-          <Segmented value={modality} onChange={changeModality}
-            options={[{ value: "individual", label: "Individual" }, { value: "dobles", label: "Dobles" }]} />
+    <Card>
+      <SectionTitle sub="Elige modalidad, género y nivel -- el nombre se arma solo con esos tres datos.">Nueva categoría</SectionTitle>
+      <div className="space-y-5 max-w-xl">
+        <div className="grid sm:grid-cols-2 gap-5">
+          <div>
+            <Label>1. Modalidad</Label>
+            <Segmented value={modality} onChange={changeModality}
+              options={[{ value: "individual", label: "Individual" }, { value: "dobles", label: "Dobles" }]} />
+          </div>
+          <div>
+            <Label>2. Género</Label>
+            <Segmented value={gender} onChange={setGender}
+              options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }]} />
+          </div>
         </div>
-        <div>
-          <Label>2. Género</Label>
-          <Segmented value={gender} onChange={setGender}
-            options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }]} />
+        <div className="grid sm:grid-cols-2 gap-5">
+          <div>
+            <Label>3. Nivel de habilidad</Label>
+            <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
+              {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label>Cupo máximo de equipos (opcional)</Label>
+            <input type="number" min={2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
+          </div>
         </div>
-        <div>
-          <Label>3. Nivel de habilidad</Label>
-          <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
-            {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
-          </select>
-        </div>
-        <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+        <p className="text-xs -mt-3" style={{ color: "#6B7688" }}>Al llenarse el cupo, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.</p>
+
+        <div className="text-sm px-4 py-3 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           Nombre automático: <b>{previewName}</b>
-        </div>
-        <div>
-          <Label>Cupo máximo de equipos (opcional)</Label>
-          <input type="number" min={2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
-          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>Al llenarse, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.</p>
         </div>
         <p className="text-xs" style={{ color: "#6B7688" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
         <div className="flex gap-2 pt-1">
           <button onClick={() => onCreate(modality, gender, level, maxTeams)}
             style={{ background: COLORS.court, color: COLORS.chalk }}
-            className="flex-1 py-2 rounded-xl font-semibold text-sm">Crear categoría</button>
-          <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
+            className="px-6 py-2.5 rounded-xl font-bold text-sm">Crear categoría</button>
+          <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
         </div>
       </div>
     </Card>
