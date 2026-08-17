@@ -305,9 +305,12 @@ navegador.
     componente principal (antes vivía dentro de `TournamentsListTab`) para que este botón
     pueda navegar a la pestaña Torneos Y pedirle que abra el formulario de una, sin
     duplicar el formulario en dos lugares.
-  - **Verificación**: pendiente la pasada en vivo con Claude in Chrome (se hizo el cambio
-    de código + build limpio, pero no se probó todavía al momento de escribir esto -- ver
-    si "Lo que falta" de más abajo ya lo tacha, si no seguirá pendiente).
+  - **Verificación**: probado en producción con Claude in Chrome. "+ Torneo" en Actividades
+    navega a Torneos y abre el formulario de una (sin paso intermedio). Se creó un torneo de
+    prueba, se borró con el ícono de basurero (desaparece al toque de la lista) y se
+    confirmó por SQL que también se borró de la base de verdad (`select ... from
+    tournaments` solo devuelve el torneo real) -- no hizo falta limpieza manual esta vez,
+    a diferencia de v2.13.0.
 
 ## Lo que falta / próximos pasos
 
