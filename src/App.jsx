@@ -921,7 +921,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.13.1";
+const APP_VERSION = "2.14.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1311,6 +1311,23 @@ export default function PickleballTournamentApp() {
     setActiveTournamentId(created.id);
     setActiveCatId(null);
     return { data: created };
+  };
+
+  // Controla el formulario inline "Crear nuevo torneo" de TournamentsListTab desde afuera --
+  // vive acá (no dentro de ese componente) para que el botón "+ Torneo" de Actividades
+  // (EventosTab) pueda abrirlo de una al navegar, en vez de que el admin tenga que volver a
+  // pulsar "Crear nuevo torneo" una vez ya en la pestaña Torneos.
+  const [tournamentFormOpen, setTournamentFormOpen] = useState(false);
+
+  // Borra un torneo completo. `tournaments.id` tiene ON DELETE CASCADE hacia
+  // categories.tournament_id (ver supabase/schema.sql) -- la base se lleva sus categorías/
+  // equipos/partidos sola. Acá solo hace falta alinear el estado local a mano (categories no
+  // se vuelve a consultar solo). Si era el torneo que se estaba editando, vuelve a la lista.
+  const removeTournament = (id) => {
+    setTournaments((prev) => prev.filter((t) => t.id !== id));
+    setCategories((prev) => prev.filter((c) => c.tournamentId !== id));
+    if (activeTournamentId === id) { setActiveTournamentId(null); setActiveCatId(null); }
+    supabase.from("tournaments").delete().eq("id", id).then(({ error }) => { if (error) console.error("removeTournament:", error.message); });
   };
 
   // Actualiza local al toque y persiste en `tournaments` en segundo plano (mismo patrón que
@@ -1996,7 +2013,8 @@ export default function PickleballTournamentApp() {
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
-              openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }} />
+              openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
+              onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }} />
           )}
 
           {effectiveTab === "torneos" && (
@@ -2021,7 +2039,8 @@ export default function PickleballTournamentApp() {
             ) : (
               <TournamentsListTab tournaments={tournaments} categories={categories} role={role}
                 onSelect={(id) => { setActiveTournamentId(id); setActiveCatId(null); }}
-                onCreate={createTournament} />
+                onCreate={createTournament} onRemove={removeTournament}
+                showForm={tournamentFormOpen} setShowForm={setTournamentFormOpen} />
             )
           )}
 
@@ -3278,9 +3297,11 @@ const TORNEO_SUB_ITEMS = [
 // puede crear tantos como quiera -- cada uno con sus propias categorías/participantes/
 // calendario/resultados, ver nota de `categories` en el componente principal). El cliente ve
 // la misma lista, sin el botón de crear, y "Ver torneo" en vez de "Editar".
-function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate }) {
+// `showForm`/`setShowForm` viven en el componente principal (no acá) para que el botón
+// "+ Torneo" de Actividades (EventosTab) pueda abrir este formulario desde afuera al navegar
+// -- mismo motivo por el que activeCatId vive arriba de CategoriasTab.
+function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate, onRemove, showForm, setShowForm }) {
   const isAdmin = role === "admin";
-  const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -3331,7 +3352,13 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate 
         <div className="grid sm:grid-cols-2 gap-4">
           {tournaments.map((t) => (
             <Card key={t.id}>
-              <h3 className="font-bold text-base mb-1">{t.name}</h3>
+              <div className="flex items-start justify-between gap-2 mb-1">
+                <h3 className="font-bold text-base">{t.name}</h3>
+                {isAdmin && (
+                  <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
+                    className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={16} /></button>
+                )}
+              </div>
               <p className="text-xs text-gray-400 mb-3">
                 {t.startDate && t.endDate ? `${formatDateHuman(t.startDate)} → ${formatDateHuman(t.endDate)}` : "Fechas por definir"}
               </p>
@@ -5554,7 +5581,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -5665,6 +5692,10 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, r
           <div className="flex gap-2">
             <button onClick={() => { setShowOpenPlayForm((s) => !s); setShowClaseForm(false); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.court, color: "#fff" }}><Plus size={14} /> Open Play</button>
             <button onClick={() => { setShowClaseForm((s) => !s); setShowOpenPlayForm(false); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.courtDark, color: "#fff" }}><Plus size={14} /> Clase</button>
+            {/* A diferencia de Open Play/Clase, el formulario de creación no vive acá --
+               TournamentsListTab (pestaña Torneos) ya lo tiene. Este botón solo navega ahí
+               y le pide que lo abra de una, en vez de duplicar el formulario en dos lugares. */}
+            <button onClick={onCreateTournament} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.clay, color: "#fff" }}><Plus size={14} /> Torneo</button>
           </div>
         )}
       </div>
