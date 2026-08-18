@@ -927,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.17.2";
+const APP_VERSION = "2.18.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2131,7 +2131,11 @@ export default function PickleballTournamentApp() {
         <TopBar tab={effectiveTab} stats={stats} currentUser={currentUser} currentPlan={currentPlan} logoutUser={logoutUser} visibleNav={visibleNav} />
 
         <main className="max-w-7xl w-full mx-auto px-4 md:px-10 pt-6 pb-28 md:pb-16 flex-1">
-          {effectiveTab === "club" && role === "admin" && <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate} />}
+          {effectiveTab === "club" && role === "admin" && (
+            <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
+              membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
+              subscribeToPlan={subscribeToPlan} currentUser={currentUser} />
+          )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
             <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} />
@@ -2592,15 +2596,19 @@ function Onboarding({ currentUser, club, updateProfile, logoutUser }) {
 /* =========================================================================
    SIDEBAR (desktop) + TOPBAR (ticker) + MOBILE NAV
    ========================================================================= */
+// Orden para el admin (v2.18.0): Estadísticas, Usuarios, Actividades, Reservas, Torneos,
+// Mi Club, Perfil -- "Membresías" deja de ser una pestaña propia del admin porque su
+// configuración ahora vive dentro de "Mi Club" (ver ClubTab); para el cliente sigue
+// existiendo como su propia pestaña (comparar planes y suscribirse), ubicada antes de Perfil.
 const NAV_ITEMS = [
-  { id: "club", label: "Club", short: "Club", icon: Building2, sub: "Horario, canchas y precios", roles: ["admin"] },
-  { id: "usuarios", label: "Usuarios", short: "Usuarios", icon: Users, sub: "Directorio de jugadores y sus membresías", roles: ["admin"] },
   { id: "estadisticas", label: "Estadísticas", short: "Stats", icon: BarChart3, sub: "Ingresos, horarios pico, membresías y zonas", roles: ["admin"] },
-  // "eventos" (id interno sin cambios) va primero -- es la sección de aterrizaje del cliente.
+  { id: "usuarios", label: "Usuarios", short: "Usuarios", icon: Users, sub: "Directorio de jugadores y sus membresías", roles: ["admin"] },
+  // "eventos" (id interno sin cambios) va primero para el cliente -- es su sección de aterrizaje.
   { id: "eventos", label: "Actividades", short: "Actividades", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
   { id: "reservas", label: "Reservas", short: "Reservas", icon: CalendarClock, sub: "Reserva un bloque de cancha disponible", roles: ["admin", "cliente"] },
   { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin", "cliente"] },
-  { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["admin", "cliente"] },
+  { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["cliente"] },
+  { id: "club", label: "Mi Club", short: "Mi Club", icon: Building2, sub: "Horario, canchas, precios y membresías", roles: ["admin"] },
   { id: "perfil", label: "Perfil", short: "Perfil", icon: UserCircle, sub: "Tus datos y tu membresía", roles: ["admin", "cliente"] },
 ];
 
@@ -2977,7 +2985,8 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
 /* =========================================================================
    TAB: CANCHAS
    ========================================================================= */
-function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate }) {
+function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
+  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser }) {
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
@@ -3117,6 +3126,15 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
           {courts.length === 0 && <p className="text-sm text-gray-400 italic">Aún no hay canchas registradas.</p>}
         </div>
       </Card>
+
+      {/* Configuración de membresías (v2.18.0): antes vivía en su propia pestaña de nivel
+         superior para el admin; ahora se administra desde acá, dentro de Mi Club. MembresiasTab
+         ya sabe renderizar el modo admin (crear/editar/borrar planes) vs. cliente (comparar y
+         suscribirse) según `role` -- acá siempre es "admin", así que actúa como panel de
+         configuración con la misma tabla comparativa como vista previa en vivo. */}
+      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts}
+        addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
+        subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
     </div>
   );
 }
