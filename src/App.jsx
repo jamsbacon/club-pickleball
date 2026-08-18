@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
   Trophy, Users, MapPin, Calendar, ClipboardList, Plus, Trash2,
@@ -977,7 +977,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.24.0";
+const APP_VERSION = "2.25.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2866,13 +2866,41 @@ function Card({ children, className = "", style = {} }) {
 // -- este space-y-5 o cualquier otro futuro -- puede volver a empujarlo/recortarlo por
 // margin, overflow o z-index.
 function Modal({ onClose, children, maxWidth = 560 }) {
+  // `onClose` es una función nueva en cada render del padre (ej. el `closeAll` que arman
+  // EventosTab/ReservasTab inline) -- un ref evita que el efecto de abajo (que solo debe
+  // correr una vez, al montar) tenga que declarar `onClose` como dependencia y re-disparar
+  // en cada re-render mientras el modal sigue abierto.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => { if (e.key === "Escape") onCloseRef.current(); };
     document.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; };
-  }, [onClose]);
+  }, []);
+
+  // Botón/gesto de "atrás" del celular (v2.25.0): sin esto, cerrar un popup con el back del
+  // teléfono no cerraba el popup -- sacaba de la app entera, porque esta SPA no tiene rutas ni
+  // historial propio (todo es un solo estado `tab` en memoria) y el navegador/PWA trata
+  // "atrás" como "no hay a dónde volver, salir". Truco estándar: al montar, empujar una
+  // entrada de historial "de más"; mientras el modal esté abierto, el "atrás" del teléfono la
+  // consume (evento `popstate`) y solo cierra ESTE popup en vez de salir de la app. Si el
+  // popup se cierra por cualquier otra vía (X, click afuera, Escape, Cancelar), se hace
+  // `history.back()` una sola vez al desmontar para no dejar esa entrada de más colgando como
+  // un "atrás" fantasma la próxima vez que alguien navegue. `closedByPopRef` distingue ambos
+  // casos para no disparar `history.back()` dos veces.
+  const closedByPopRef = useRef(false);
+  useEffect(() => {
+    window.history.pushState({ pickleModal: true }, "");
+    const onPopState = () => { closedByPopRef.current = true; onCloseRef.current(); };
+    window.addEventListener("popstate", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      if (!closedByPopRef.current && window.history.state?.pickleModal) window.history.back();
+    };
+  }, []);
 
   return createPortal(
     <div className="fixed inset-0 z-50 overflow-y-auto sm:flex sm:items-center sm:justify-center sm:p-6"
@@ -6186,17 +6214,31 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
 
   return (
     <Card>
+      {/* Miniatura + nombre en mayúscula sostenida (v2.25.0) -- antes el título era texto
+         normal del mismo peso que el resto de la ficha, se perdía frente al monto/checkout de
+         abajo. La miniatura usa la imagen subida al crear el Open Play si hay una; si no, un
+         ícono de respaldo con el color de acento de la actividad, para que nunca quede un
+         hueco vacío donde iría la imagen. */}
       <div className="flex items-start justify-between gap-3 mb-3">
-        <div>
-          <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.name}</p>
-          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
-            Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
-            {showDateList ? (
-              <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
-            ) : (
-              <> · {formatDateHuman(e.date)}</>
-            )}
-          </p>
+        <div className="flex items-start gap-3 min-w-0">
+          {e.image ? (
+            <img src={e.image} alt="" className="w-14 h-14 rounded-xl object-cover shrink-0" />
+          ) : (
+            <div className="w-14 h-14 rounded-xl flex items-center justify-center shrink-0" style={{ background: COLORS.court }}>
+              <PartyPopper size={24} color="#fff" />
+            </div>
+          )}
+          <div className="min-w-0">
+            <p className="disp text-lg font-extrabold uppercase tracking-wide leading-tight" style={{ color: COLORS.courtDark }}>{e.name}</p>
+            <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
+              Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
+              {showDateList ? (
+                <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
+              ) : (
+                <> · {formatDateHuman(e.date)}</>
+              )}
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
@@ -6293,17 +6335,25 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
 
   return (
     <Card>
+      {/* Mismo tratamiento de miniatura + nombre en mayúscula sostenida que EventDetail
+         (v2.25.0) -- las clases no tienen imagen propia todavía, así que siempre usan el
+         ícono de respaldo (con el color de acento de clases, distinto al de Open Play). */}
       <div className="flex items-start justify-between gap-3 mb-3">
-        <div>
-          <p className="disp text-lg" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
-          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
-            Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
-            {showDateList ? (
-              <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
-            ) : (
-              <> · {formatDateHuman(e.date)}</>
-            )}
-          </p>
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="w-14 h-14 rounded-xl flex items-center justify-center shrink-0" style={{ background: COLORS.clay }}>
+            <GraduationCap size={24} color="#fff" />
+          </div>
+          <div className="min-w-0">
+            <p className="disp text-lg font-extrabold uppercase tracking-wide leading-tight" style={{ color: COLORS.courtDark }}>{e.academyName}</p>
+            <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
+              Nivel {e.level} · {formatTimeAmPm(e.startTime)}–{formatTimeAmPm(e.endTime)} · {courtNames}
+              {showDateList ? (
+                <> · <span style={{ color: COLORS.court, fontWeight: 700 }}>Recurrente, cada {weekdayLabel(e.date)}</span></>
+              ) : (
+                <> · {formatDateHuman(e.date)}</>
+              )}
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
