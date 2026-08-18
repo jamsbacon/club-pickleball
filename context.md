@@ -472,8 +472,10 @@ navegador.
   entero al bloque de texto únicamente; la imagen ya no lleva alto fijo (antes
   `h-20`/`h-24`) -- se estira sola (`align-items: stretch`, default de flex) hasta igualar
   el alto real de la card, y `overflow-hidden` se movió al botón (no al div de la imagen)
-  para que le recorte las esquinas a juego con el `rounded-2xl` de la card. Sin verificar
-  todavía en el navegador.
+  para que le recorte las esquinas a juego con el `rounded-2xl` de la card.
+  **Verificación**: confirmado en producción con Claude in Chrome -- la imagen ("DUPR DAY",
+  "Martes de Escalera") llega a las 3 esquinas izquierdas de la card sin margen, badge
+  "Recurrente" pegado al borde inferior.
 
 ## Lo que falta / próximos pasos
 
