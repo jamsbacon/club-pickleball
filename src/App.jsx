@@ -927,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.17.1";
+const APP_VERSION = "2.17.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5701,9 +5701,15 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
   }[kind];
 
   return (
-    <button onClick={onClick} className="w-full text-left rounded-2xl p-3 flex gap-3"
+    // Sin p-3 en el botón -- la imagen queda pegada a los 3 bordes izquierdos (arriba/
+    // izquierda/abajo) de la card en vez de flotar adentro con margen. overflow-hidden acá
+    // (no en el div de la imagen) es lo que le recorta las esquinas a juego con el
+    // rounded-2xl de la card; el padding se movió al bloque de texto, que es el único que
+    // lo necesita. La imagen no lleva alto fijo -- estira sola (stretch, default de flex)
+    // hasta igualar el alto real de la card.
+    <button onClick={onClick} className="w-full text-left rounded-2xl overflow-hidden flex gap-3"
       style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, boxShadow: "0 1px 2px rgba(20,30,25,.04), 0 10px 24px -18px rgba(20,30,25,.22)" }}>
-      <div className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden shrink-0"
+      <div className="relative w-20 sm:w-24 shrink-0"
         style={!image ? { background: `linear-gradient(135deg, ${kindMeta.color}, ${COLORS.courtDark})` } : undefined}>
         {image
           ? <img src={image} alt={title} className="w-full h-full object-cover" />
@@ -5716,7 +5722,7 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
         )}
       </div>
 
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 min-w-0 flex flex-col py-3 pr-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide" style={{ background: `${kindMeta.color}1A`, color: kindMeta.color }}>{kindMeta.label}</span>

@@ -11,7 +11,7 @@ con brackets (varios a la vez, el club organiza torneos con frecuencia — desde
 Open Plays y clases recurrentes, membresías, y estadísticas del club.
 React + Vite, un solo componente gigante en `src/App.jsx`.
 
-## Estado actual: v2.17.1 — con backend real
+## Estado actual: v2.17.2 — con backend real
 
 Toda la app está migrada a Supabase (Postgres + Auth) — nada vive solo en memoria del
 navegador.
@@ -465,6 +465,15 @@ navegador.
     SQL que Copa APG quedó con exactamente sus 2 categorías originales (hubo una
     coincidencia de nombre con categorías reales del usuario en "Inauguración PickleHub" --
     incidente cerrado al confirmar por `tournament_id` que eran de torneos distintos).
+- **v2.17.2 — Imagen de tarjeta pegada al borde en Actividades**. Pedido con captura: en
+  `EventListItem` (las cards de Open Play/Clase/Torneo en Actividades) la miniatura tenía
+  el mismo padding que el resto de la card (`p-3` en todo el botón), así que quedaba
+  flotando adentro con margen en vez de llegar a la esquina. El padding se movió del botón
+  entero al bloque de texto únicamente; la imagen ya no lleva alto fijo (antes
+  `h-20`/`h-24`) -- se estira sola (`align-items: stretch`, default de flex) hasta igualar
+  el alto real de la card, y `overflow-hidden` se movió al botón (no al div de la imagen)
+  para que le recorte las esquinas a juego con el `rounded-2xl` de la card. Sin verificar
+  todavía en el navegador.
 
 ## Lo que falta / próximos pasos
 
