@@ -977,7 +977,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.25.0";
+const APP_VERSION = "2.26.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2903,17 +2903,18 @@ function Modal({ onClose, children, maxWidth = 560 }) {
   }, []);
 
   return createPortal(
-    <div className="fixed inset-0 z-50 overflow-y-auto sm:flex sm:items-center sm:justify-center sm:p-6"
+    <div className="fixed inset-0 z-50 flex flex-col justify-end overflow-y-auto sm:items-center sm:justify-center sm:p-6"
       style={{ background: "rgba(15,23,32,0.55)", margin: 0 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      {/* sm:max-h + sm:overflow-y-auto (v2.20.0 fix): antes la card no tenía tope de alto, así
-         que con contenido largo (ej. la lista de fechas de una serie recurrente) terminaba más
-         alta que el viewport -- y como el backdrop la centraba con sm:items-center (flexbox),
-         el navegador no dejaba scrollear hasta el principio NI el final de esa card más alta
-         que la pantalla (bug clásico de "align-items: center" + overflow), cortándola arriba y
-         abajo. Con un tope de 90vh la card nunca es más alta que el viewport -- scrollea ella
-         sola por dentro y siempre queda completa on screen. */}
-      <div className="min-h-[100dvh] sm:min-h-0 sm:max-h-[90vh] w-full sm:mx-auto sm:overflow-y-auto" style={{ background: COLORS.card, maxWidth }}>
+      {/* Bottom sheet en mobile, card centrada en sm+ (v2.26.0). Antes mobile forzaba
+         min-h-[100dvh] ("pantalla completa siempre") sin importar cuánto contenido hubiera --
+         con algo corto (ej. elegir cancha, 4 botones) eso dejaba una hoja blanca gigante con
+         un vacío enorme debajo y el fondo oscuro sin asomar en ningún lado, como un error de
+         layout. Ahora el alto sigue al contenido (tope 85vh + scroll propio si no alcanza,
+         igual que el tope de 90vh de sm+ del fix anterior) y queda anclada abajo con las
+         esquinas superiores redondeadas -- mismo patrón de bottom sheet de iOS/Android, con
+         el fondo oscuro siempre visible arriba de la hoja. */}
+      <div className="max-h-[85vh] w-full overflow-y-auto rounded-t-3xl sm:rounded-2xl sm:max-h-[90vh] sm:mx-auto" style={{ background: COLORS.card, maxWidth }}>
         {children}
       </div>
     </div>,
