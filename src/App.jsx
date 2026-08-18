@@ -927,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.19.0";
+const APP_VERSION = "2.20.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2169,7 +2169,9 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "estadisticas" && role === "admin" && (
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
-              membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories} />
+              membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories}
+              removeOpenPlayRegistration={removeOpenPlayRegistration} removeClassRegistration={removeClassRegistration}
+              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance} />
           )}
 
           {effectiveTab === "reservas" && (
@@ -2815,7 +2817,14 @@ function Modal({ onClose, children, maxWidth = 560 }) {
     <div className="fixed inset-0 z-50 overflow-y-auto sm:flex sm:items-center sm:justify-center sm:p-6"
       style={{ background: "rgba(15,23,32,0.55)", margin: 0 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="min-h-[100dvh] sm:min-h-0 w-full sm:mx-auto" style={{ background: COLORS.card, maxWidth }}>
+      {/* sm:max-h + sm:overflow-y-auto (v2.20.0 fix): antes la card no tenía tope de alto, así
+         que con contenido largo (ej. la lista de fechas de una serie recurrente) terminaba más
+         alta que el viewport -- y como el backdrop la centraba con sm:items-center (flexbox),
+         el navegador no dejaba scrollear hasta el principio NI el final de esa card más alta
+         que la pantalla (bug clásico de "align-items: center" + overflow), cortándola arriba y
+         abajo. Con un tope de 90vh la card nunca es más alta que el viewport -- scrollea ella
+         sola por dentro y siempre queda completa on screen. */}
+      <div className="min-h-[100dvh] sm:min-h-0 sm:max-h-[90vh] w-full sm:mx-auto sm:overflow-y-auto" style={{ background: COLORS.card, maxWidth }}>
         {children}
       </div>
     </div>,
@@ -3376,6 +3385,76 @@ function LoyalClientsCard({ bookings, openPlays, classes, categories, users }) {
   );
 }
 
+// Historial de asistencia (v2.20.0): cada FECHA de un Open Play/Clase cuenta como su propia
+// actividad individual -- mismo criterio que ya usa el resto de la app (una fila en
+// openPlays/classes por ocurrencia, incluso dentro de una serie recurrente). EventDetail/
+// ClassDetail (el modal de Actividades) solo dejan ver fechas futuras/de hoy; esta card junta
+// TODAS las fechas ya pasadas (openPlays/classes ya traen el historial completo, sin filtrar,
+// desde el componente principal) para poder repasar quién asistió a cuál sesión sin que el
+// dato desaparezca al pasar la fecha. Reutiliza AttendeesPanel (definido junto a EventDetail
+// más abajo) para el detalle expandible de cada fila -- misma UI, mismos mutators.
+function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegistration, onRemoveClassRegistration, onSetOpenPlayAttendance, onSetClassAttendance }) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [expandedKey, setExpandedKey] = useState(null);
+  const [query, setQuery] = useState("");
+
+  const rows = useMemo(() => {
+    const opRows = openPlays.map((e) => ({ key: `op-${e.id}`, id: e.id, kind: "open_play", title: e.name, date: e.date, registrations: e.registrations }));
+    const clRows = classes.map((e) => ({ key: `cl-${e.id}`, id: e.id, kind: "clase", title: e.academyName, date: e.date, registrations: e.registrations }));
+    return [...opRows, ...clRows].filter((r) => r.date <= todayIso).sort((a, b) => b.date.localeCompare(a.date));
+  }, [openPlays, classes, todayIso]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = rows.filter((r) => !q || r.title.toLowerCase().includes(q));
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+        <SectionTitle sub='Cada fecha de una actividad -- incluida cada sesión de una serie recurrente -- queda como su propio registro de quién asistió.'>Historial de asistencia</SectionTitle>
+      </div>
+      <div className="relative mb-4">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" color="#78829A" />
+        <input style={{ ...inputStyle, paddingLeft: 32, maxWidth: 340 }} value={query} onChange={(ev) => setQuery(ev.target.value)} placeholder="Buscar actividad…" />
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="text-sm text-gray-400 italic">Todavía no hay actividades pasadas.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {filtered.map((r) => {
+            const attended = r.registrations.filter((x) => x.attended).length;
+            const open = expandedKey === r.key;
+            return (
+              <div key={r.key} className="rounded-xl overflow-hidden" style={{ background: "#EEF1F7" }}>
+                <button onClick={() => setExpandedKey(open ? null : r.key)} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left">
+                  <span className="flex items-center gap-2.5 min-w-0 text-sm">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-full shrink-0" style={{ background: r.kind === "open_play" ? "#DCEBD5" : "#E4E7FB", color: r.kind === "open_play" ? COLORS.court : "#4C4FBF" }}>
+                      {r.kind === "open_play" ? "Open Play" : "Clase"}
+                    </span>
+                    <span className="font-semibold truncate">{r.title}</span>
+                    <span className="text-gray-500 text-xs shrink-0">{formatDateHuman(r.date)}</span>
+                  </span>
+                  <span className="flex items-center gap-3 shrink-0">
+                    <span className="text-xs" style={{ color: "#6B7688" }}>{attended}/{r.registrations.length} asistió</span>
+                    <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none" }} />
+                  </span>
+                </button>
+                {open && (
+                  <div className="px-3 pb-3 pt-1" style={{ background: "#fff", borderTop: `1px solid ${COLORS.line}` }}>
+                    <AttendeesPanel occurrences={[r]} users={users}
+                      onRemove={r.kind === "open_play" ? onRemoveOpenPlayRegistration : onRemoveClassRegistration}
+                      onSetAttendance={r.kind === "open_play" ? onSetOpenPlayAttendance : onSetClassAttendance} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 /* =========================================================================
    TAB: USUARIOS (admin) — directorio de todos los que se han registrado en
    la app, con su membresía actual. `planId` en el perfil es la fuente de
@@ -3461,7 +3540,8 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
   );
 }
 
-function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories }) {
+function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories,
+  removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance }) {
   const transactions = useMemo(() => buildTransactions(bookings, openPlays, classes, subscriptions), [bookings, openPlays, classes, subscriptions]);
   const byDay = useMemo(() => groupByDay(transactions, 14), [transactions]);
   const byMonth = useMemo(() => groupByMonth(transactions, 6), [transactions]);
@@ -3513,6 +3593,10 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
       </div>
 
       <LoyalClientsCard bookings={bookings} openPlays={openPlays} classes={classes} categories={categories} users={users} />
+
+      <AsistenciaHistorial openPlays={openPlays} classes={classes} users={users}
+        onRemoveOpenPlayRegistration={removeOpenPlayRegistration} onRemoveClassRegistration={removeClassRegistration}
+        onSetOpenPlayAttendance={setOpenPlayAttendance} onSetClassAttendance={setClassAttendance} />
     </div>
   );
 }
@@ -5873,6 +5957,9 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
   const [adminTab, setAdminTab] = useState("resumen");
+  // Pestaña Inscritos: arranca en `e` -- la ocurrencia próxima que ya representa esta tarjeta
+  // ("la fecha publicada") -- y deja elegir otra fecha de la serie desde el selector.
+  const [attendeesDateId, setAttendeesDateId] = useState(e.id);
 
   return (
     <Card>
@@ -5940,7 +6027,17 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
 
       {isAdmin && adminTab === "inscritos" && (
         <div className="mb-4">
-          <AttendeesPanel occurrences={occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+          {isSeries && (
+            <div className="mb-3">
+              <Label>Fecha</Label>
+              <select style={inputStyle} value={attendeesDateId} onChange={(ev) => setAttendeesDateId(ev.target.value)}>
+                {occurrences.map((o) => (
+                  <option key={o.id} value={o.id}>{formatDateHuman(o.date)} · {o.registrations.length} inscrito{o.registrations.length === 1 ? "" : "s"}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
         </div>
       )}
 
@@ -5968,6 +6065,8 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
   const [adminTab, setAdminTab] = useState("resumen");
+  // Mismo criterio que EventDetail: arranca en la ocurrencia próxima ("la fecha publicada").
+  const [attendeesDateId, setAttendeesDateId] = useState(e.id);
 
   return (
     <Card>
@@ -6022,7 +6121,17 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
 
       {isAdmin && adminTab === "inscritos" && (
         <div className="mb-4">
-          <AttendeesPanel occurrences={occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+          {isSeries && (
+            <div className="mb-3">
+              <Label>Fecha</Label>
+              <select style={inputStyle} value={attendeesDateId} onChange={(ev) => setAttendeesDateId(ev.target.value)}>
+                {occurrences.map((o) => (
+                  <option key={o.id} value={o.id}>{formatDateHuman(o.date)} · {o.registrations.length} inscrito{o.registrations.length === 1 ? "" : "s"}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
         </div>
       )}
 
