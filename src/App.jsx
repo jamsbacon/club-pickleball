@@ -188,6 +188,16 @@ function findBlockConflicts(club, courtIds, dates, startTime, endTime, occupiedK
   return conflicts;
 }
 
+// Texto legible para la ventana de reserva de un plan (v2.27.0) -- horas exactas si no arman
+// días completos, "N día(s)" si sí. Un solo lugar para formatear evita que la tabla
+// comparativa/cards y cualquier mensaje de "fuera de tu ventana" digan cosas distintas.
+function formatBookingWindow(hours) {
+  const h = Number(hours) || 0;
+  if (h <= 0) return "Sin límite";
+  if (h % 24 === 0) { const d = h / 24; return `${d} día${d === 1 ? "" : "s"}`; }
+  return `${h} hora${h === 1 ? "" : "s"}`;
+}
+
 function formatMoney(n, symbol = "$") {
   const v = Number(n) || 0;
   return `${symbol}${v.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -977,7 +987,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.26.0";
+const APP_VERSION = "2.27.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1211,6 +1221,9 @@ export default function PickleballTournamentApp() {
   const mapPlanRow = (r) => ({
     id: r.id, name: r.name, monthlyPrice: Number(r.monthly_price), privateCourtAccess: r.private_court_access,
     maxMembers: r.max_members != null ? Number(r.max_members) : null,
+    // Cuántas horas de anticipación puede reservar cancha/actividades alguien con este plan
+    // (v2.27.0) -- 48h por defecto si el plan es viejo y no trae el campo todavía.
+    bookingWindowHours: r.booking_window_hours != null ? Number(r.booking_window_hours) : 48,
     description: r.description || "",
     // `value` es texto libre ya formateado ("4/mes", "100% (Gratis)", "5 días"...) -- un
     // precio numérico no alcanza a representar todos los beneficios del rate card (v2.22.0).
@@ -1461,7 +1474,18 @@ export default function PickleballTournamentApp() {
   }, []);
 
   const activeCat = categories.find((c) => c.id === activeCatId) || null;
-  const currentPlan = membershipPlans.find((p) => p.id === currentUser?.planId) || membershipPlans[0];
+  // `currentPlan` son los beneficios REALES vigentes (v2.27.0) -- precio de miembro y ventana
+  // de reserva -- no simplemente "el plan al que está suscrito". Un plan pago vencido vuelve a
+  // los beneficios del plan gratuito hasta que se renueve, aunque currentUser.planId siga
+  // apuntando al plan vencido (eso se conserva a propósito: ProfileTab/MembresiasTab resuelven
+  // su propio `plan` local, sin pasar por esta variable, para poder seguir mostrando "Plan PRO
+  // · Vencida" + botón Renovar en vez de que el vencimiento borre de dónde vino el usuario).
+  const subscribedPlan = membershipPlans.find((p) => p.id === currentUser?.planId) || membershipPlans[0];
+  const subscribedPlanExpired = !!subscribedPlan && subscribedPlan.monthlyPrice > 0 && !!currentUser?.planExpiresAt
+    && currentUser.planExpiresAt < new Date().toISOString().slice(0, 10);
+  const currentPlan = subscribedPlanExpired
+    ? (membershipPlans.find((p) => p.monthlyPrice === 0) || membershipPlans[0])
+    : subscribedPlan;
 
   // `tournament` es null mientras se está viendo la lista de torneos (nadie seleccionado
   // todavía) -- dates queda vacío en ese caso, nadie lo necesita hasta entrar a uno puntual.
@@ -2063,7 +2087,8 @@ export default function PickleballTournamentApp() {
   const addMembershipPlan = async (plan) => {
     const { data: row, error } = await supabase.from("membership_plans").insert({
       name: plan.name, monthly_price: plan.monthlyPrice, private_court_access: plan.privateCourtAccess,
-      max_members: plan.maxMembers === "" ? null : plan.maxMembers, description: plan.description, rate_card: plan.rateCard,
+      max_members: plan.maxMembers === "" ? null : plan.maxMembers, booking_window_hours: plan.bookingWindowHours,
+      description: plan.description, rate_card: plan.rateCard,
     }).select().single();
     if (error) { console.error("addMembershipPlan:", error.message); return; }
     setMembershipPlans((p) => [...p, mapPlanRow(row)]);
@@ -2075,6 +2100,7 @@ export default function PickleballTournamentApp() {
     if ("monthlyPrice" in patch) dbPatch.monthly_price = patch.monthlyPrice;
     if ("privateCourtAccess" in patch) dbPatch.private_court_access = patch.privateCourtAccess;
     if ("maxMembers" in patch) dbPatch.max_members = patch.maxMembers === "" ? null : patch.maxMembers;
+    if ("bookingWindowHours" in patch) dbPatch.booking_window_hours = patch.bookingWindowHours;
     if ("description" in patch) dbPatch.description = patch.description;
     if ("rateCard" in patch) dbPatch.rate_card = patch.rateCard;
     supabase.from("membership_plans").update(dbPatch).eq("id", id).then(({ error }) => {
@@ -5515,11 +5541,35 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes);
   const court = courts.find((c) => c.id === courtId) || null;
 
+  // Ventana de reserva del plan (v2.27.0): hasta cuántas horas por adelantado puede reservar
+  // cancha alguien con este plan (currentPlan ya viene resuelta según vigencia real -- ver
+  // comentario en el componente principal). El admin nunca queda bloqueado por esto -- es un
+  // beneficio de plan, no una regla operativa del club -- pero SÍ aplica "nunca en el pasado"
+  // para todos, admin incluido: eso no es un beneficio, es una regla de integridad de datos.
+  const now = Date.now();
+  const bookingWindowHours = currentPlan?.bookingWindowHours ?? 48;
+  const windowDeadlineMs = now + bookingWindowHours * 3600000;
+  const maxDateIso = new Date(windowDeadlineMs).toISOString().slice(0, 10);
+  const blockTimestamp = (timeMin) => new Date(date + "T00:00:00").getTime() + timeMin * 60000;
+  // Motivo (independiente de la cancha) por el que un bloque no se puede reservar todavía --
+  // null si cae dentro de lo permitido. Se evalúa ANTES que occupiedKeys porque no depende de
+  // qué cancha se mire: un bloque ya pasado o fuera de la ventana del plan no es "reservable"
+  // sin importar si alguien más lo tiene o no.
+  const globalBlockReason = (timeMin) => {
+    if (blockTimestamp(timeMin) < now) return { kind: "Ya pasó", label: "" };
+    if (role !== "admin" && blockTimestamp(timeMin) > windowDeadlineMs) {
+      return { kind: "Fuera de tu ventana", label: `Tu plan reserva hasta ${formatDateHuman(maxDateIso)}` };
+    }
+    return null;
+  };
+
   // Qué ocupa un bloque puntual -- ya se usaba para contar canchas disponibles, pero el
   // detalle (kind/label) nunca se mostraba en ningún lado. Ahora también resuelve reservas
   // sueltas (antes se perdían en el fallback genérico "Reservado" sin nombre) para que el
   // admin pueda ver quién/qué ocupa cualquier bloque, incluso los que están llenos (v2.24.0).
   const occupant = (cid, timeMin) => {
+    const blocked = globalBlockReason(timeMin);
+    if (blocked) return blocked;
     if (!occupiedKeys.has(blockKey(cid, date, timeMin))) return null;
     for (const cat of categories) {
       const m = cat.matches.find((mm) => mm.courtId === cid && mm.day === date && !isByeMatch(mm) && timeToMinutes(mm.time) === timeMin);
@@ -5539,10 +5589,17 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   const lockedPrivate = court && court.isPrivate && !currentPlan?.privateCourtAccess;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
 
+  // El calendario de Reservas es para crear reservas nuevas -- nunca tiene sentido navegarlo
+  // antes de hoy (admin incluido: el historial de reservas ya se ve más abajo en "Todas las
+  // reservas", sin tener que mover este calendario). El tope superior (maxDateIso) sí es un
+  // beneficio de plan, por eso no aplica al admin.
   const shiftDate = (delta) => {
     const d = new Date(date + "T00:00:00");
     d.setDate(d.getDate() + delta);
-    setDate(d.toISOString().slice(0, 10));
+    let next = d.toISOString().slice(0, 10);
+    if (next < todayIso) next = todayIso;
+    if (role !== "admin" && next > maxDateIso) next = maxDateIso;
+    setDate(next);
     setSelectedTime(null);
     setCourtId(null);
   };
@@ -5576,11 +5633,18 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
             <button onClick={() => shiftDate(-1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronLeft size={16} color={COLORS.courtDark} />
             </button>
-            <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={date} onChange={(e) => { setDate(e.target.value); setSelectedTime(null); setCourtId(null); }} />
+            <input type="date" min={todayIso} max={role === "admin" ? undefined : maxDateIso}
+              style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={date}
+              onChange={(e) => { setDate(e.target.value); setSelectedTime(null); setCourtId(null); }} />
             <button onClick={() => shiftDate(1)} className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "#EAEEF5" }}>
               <ChevronRight size={16} color={COLORS.courtDark} />
             </button>
           </div>
+          {role !== "admin" && (
+            <p className="text-[11px] mt-2" style={{ color: "#6B7688" }}>
+              Tu plan{currentPlan?.name ? ` (${currentPlan.name})` : ""} permite reservar con hasta <b>{formatBookingWindow(bookingWindowHours)}</b> de anticipación -- hasta el {formatDateHuman(maxDateIso)}.
+            </p>
+          )}
         </div>
 
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
@@ -5588,6 +5652,11 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
             const available = availableCourtsAt(t);
             const occ = available.length === 0;
             const isSel = selectedTime === t;
+            // Motivo específico cuando no hay nada que reservar -- "Ya pasó" y "Fuera de tu
+            // ventana" son iguales para las 4 canchas (no dependen de cuál), así que basta con
+            // mirar la primera para saber cuál de los dos es (o si de verdad está "Ocupado"
+            // por otra cosa). v2.27.0.
+            const reason = occ ? occupant(courts[0]?.id, t)?.kind || "Ocupado" : null;
             // El admin puede tocar CUALQUIER horario, incluso sin canchas libres -- necesita
             // poder ver qué actividad ocupa cada cancha (el modal de abajo se encarga de
             // mostrarlo). El cliente sigue sin poder tocar un horario donde no hay nada que
@@ -5597,7 +5666,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
               <button key={t} onClick={() => clickable && pickTime(t)} disabled={!clickable}
                 title={
                   !occ ? `${available.length} cancha${available.length === 1 ? "" : "s"} disponible${available.length === 1 ? "" : "s"}`
-                    : role === "admin" ? "Ocupado — toca para ver qué está reservado" : "Ocupado — ninguna cancha disponible"
+                    : role === "admin" && reason === "Ocupado" ? "Ocupado — toca para ver qué está reservado" : reason
                 }
                 className="rounded-xl py-2.5 px-1.5 text-center transition-all"
                 style={{
@@ -5607,7 +5676,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                 }}>
                 <p className="mono text-sm font-bold" style={{ color: occ ? "#9AA6BC" : isSel ? "#fff" : COLORS.courtDark }}>{minutesToAmPm(t)}</p>
                 <p className="text-[9px] mt-0.5 font-bold uppercase tracking-wide" style={{ color: occ ? "#9AA6BC" : isSel ? "#DCEBD5" : "#78829A" }}>
-                  {occ ? "Ocupado" : `${available.length} cancha${available.length === 1 ? "" : "s"}`}
+                  {occ ? (reason === "Fuera de tu ventana" ? "Fuera" : reason) : `${available.length} cancha${available.length === 1 ? "" : "s"}`}
                 </p>
               </button>
             );
@@ -6200,6 +6269,10 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
+  // Ventana de reserva del plan (v2.27.0) -- "cancha o cualquier actividad", así que también
+  // limita hasta cuándo se puede inscribir a un Open Play. El admin nunca queda bloqueado.
+  const bookingWindowDeadlineMs = Date.now() + (currentPlan?.bookingWindowHours ?? 48) * 3600000;
+  const outOfWindow = (occ) => !isAdmin && new Date(occ.date + "T00:00:00").getTime() + timeToMinutes(occ.startTime) * 60000 > bookingWindowDeadlineMs;
   // Un cliente se inscribe directo en la ocurrencia más próxima (occurrences[0] === e, ya
   // vienen filtradas/ordenadas desde EventosTab) -- mismo checkout de un paso que un evento
   // único, sin lista de fechas para elegir. El admin ve, además, sus propias pestañas
@@ -6312,6 +6385,10 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
           <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
             <AlertTriangle size={13} /> Este cupo está lleno — ya se alcanzó el quorum máximo.
           </div>
+        ) : outOfWindow(checkoutTarget) ? (
+          <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            <AlertTriangle size={13} /> Tu plan{currentPlan?.name ? ` (${currentPlan.name})` : ""} permite inscribirte con hasta {formatBookingWindow(currentPlan?.bookingWindowHours ?? 48)} de anticipación -- todavía no se abre para esta fecha.
+          </div>
         ) : (
           <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
             onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
@@ -6325,6 +6402,9 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
+  // Ventana de reserva del plan (v2.27.0) -- ver mismo comentario en EventDetail.
+  const bookingWindowDeadlineMs = Date.now() + (currentPlan?.bookingWindowHours ?? 48) * 3600000;
+  const outOfWindow = (occ) => !isAdmin && new Date(occ.date + "T00:00:00").getTime() + timeToMinutes(occ.startTime) * 60000 > bookingWindowDeadlineMs;
   // Mismo criterio que EventDetail: cliente se inscribe directo en la ocurrencia más
   // próxima, sin elegir fecha; admin ve además sus pestañas propias.
   const showDateList = isSeries && isAdmin;
@@ -6410,8 +6490,14 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
       )}
 
       {checkoutTarget && (
-        <CheckoutPanel title={`Cupo en clase con ${e.academyName}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
-          onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
+        outOfWindow(checkoutTarget) ? (
+          <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            <AlertTriangle size={13} /> Tu plan{currentPlan?.name ? ` (${currentPlan.name})` : ""} permite inscribirte con hasta {formatBookingWindow(currentPlan?.bookingWindowHours ?? 48)} de anticipación -- todavía no se abre para esta fecha.
+          </div>
+        ) : (
+          <CheckoutPanel title={`Cupo en clase con ${e.academyName}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
+            onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
+        )
       )}
     </Card>
   );
@@ -6691,6 +6777,7 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
   const [monthlyPrice, setMonthlyPrice] = useState(initial?.monthlyPrice ?? 30);
   const [privateCourtAccess, setPrivateCourtAccess] = useState(initial?.privateCourtAccess ?? true);
   const [maxMembers, setMaxMembers] = useState(initial?.maxMembers ?? "");
+  const [bookingWindowHours, setBookingWindowHours] = useState(initial?.bookingWindowHours ?? 48);
   const [description, setDescription] = useState(initial?.description || "");
   const [rateCard, setRateCard] = useState(initial?.rateCard || []);
   const [rateLabel, setRateLabel] = useState("");
@@ -6720,6 +6807,13 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
           <input type="number" min={0} style={inputStyle} value={maxMembers} onChange={(e) => setMaxMembers(e.target.value)} placeholder="Sin límite" />
         </div>
       </div>
+      <div className="mt-3">
+        <Label>Ventana de reserva (horas de anticipación)</Label>
+        <input type="number" min={1} style={inputStyle} value={bookingWindowHours} onChange={(e) => setBookingWindowHours(e.target.value)} />
+        <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>
+          Hasta cuánto tiempo por adelantado puede reservar cancha o inscribirse en Open Plays/Clases alguien con este plan -- ahora mismo: <b>{formatBookingWindow(bookingWindowHours)}</b>.
+        </p>
+      </div>
       <div className="mt-3"><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
 
       <div className="mt-4">
@@ -6745,7 +6839,7 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
       </div>
 
       <div className="flex gap-2 pt-4">
-        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, maxMembers: maxMembers === "" ? null : Number(maxMembers), description, rateCard })}
+        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, maxMembers: maxMembers === "" ? null : Number(maxMembers), bookingWindowHours: Number(bookingWindowHours) || 48, description, rateCard })}
           style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">{initial ? "Guardar cambios" : "Crear plan"}</button>
         <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
       </div>
@@ -6830,6 +6924,10 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
             </div>
           );
         })}
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span style={{ color: "#93A8C9" }}>Ventana de reserva</span>
+          <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{formatBookingWindow(plan.bookingWindowHours)}</span>
+        </div>
         <div className="flex items-center justify-between gap-3 text-xs pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
           <span style={{ color: "#93A8C9" }}>Canchas privadas</span>
           {plan.privateCourtAccess ? <Check size={14} color={COLORS.ball} strokeWidth={3} /> : <span style={{ color: "#3F5062" }}>—</span>}
@@ -6973,6 +7071,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
                 <ComparisonRow key={lbl} label={lbl} plans={orderedPlans}
                   render={(p) => (p.rateCard || []).find((r) => r.label === lbl)?.value ?? "—"} />
               ))}
+              <ComparisonRow label="Ventana de reserva" plans={orderedPlans} render={(p) => formatBookingWindow(p.bookingWindowHours)} />
               <ComparisonRow label="Canchas privadas" plans={orderedPlans} render={(p) => p.privateCourtAccess} isBool />
             </tbody>
           </table>
