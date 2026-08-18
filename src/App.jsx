@@ -17,6 +17,20 @@ import { supabase } from "./lib/supabaseClient";
 let __id = 1;
 const uid = (p = "id") => `${p}_${__id++}`;
 
+// Estado de pago (v2.21.0) -- mismo vocabulario para bookings, open_play_registrations,
+// class_registrations y equipos de torneo (categories.teams, JSONB): "por pagar" (efectivo,
+// se cobra en el club), "pago por verificar" (Pago Móvil, con referencia/comprobante pero sin
+// confirmar contra el banco) y "pago verificado" (el admin confirmó que el dinero llegó).
+// `initialPaymentStatus` calcula el estado de arranque a partir del método elegido en
+// CheckoutPanel -- efectivo nunca arranca "verificado" solo por completar el checkout, porque
+// nadie del club ha visto el dinero todavía.
+const initialPaymentStatus = (paymentMethod) => (paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo");
+const PAYMENT_STATUS_META = {
+  pendiente_efectivo: { label: "Por pagar", bg: "#EDEFF4", fg: "#6B7688" },
+  pendiente_verificacion: { label: "Pago por verificar", bg: "#FBF3E4", fg: "#8A5A16" },
+  confirmada: { label: "Pago verificado", bg: "#DCEBD5", fg: "#0A1830" },
+};
+
 function shuffle(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -927,7 +941,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.20.0";
+const APP_VERSION = "2.21.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1527,7 +1541,11 @@ export default function PickleballTournamentApp() {
     const name = players.map((p) => p.name).join(" / ");
     players.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
     updateCategory(catId, (c) => {
-      const team = { id: uid("team"), name, players, createdAt: Date.now(), ...(checkout || {}) };
+      // Sin checkout (organizador anotando un walk-in a mano, ver InscripcionAdminForm) arranca
+      // igual que un pago en efectivo -- "por pagar" -- nunca se asume cobrado solo por
+      // registrarse; el admin lo pasa a "pago verificado" cuando de verdad reciba el dinero.
+      const paymentStatus = checkout ? initialPaymentStatus(checkout.paymentMethod) : "pendiente_efectivo";
+      const team = { id: uid("team"), name, players, createdAt: Date.now(), ...(checkout || {}), paymentStatus };
       if (c.maxTeams && c.teams.length >= c.maxTeams) {
         c.waitlist = [...c.waitlist, team];
       } else {
@@ -1551,6 +1569,14 @@ export default function PickleballTournamentApp() {
   const removeFromWaitlist = (catId, teamId) => {
     updateCategory(catId, (c) => {
       c.waitlist = c.waitlist.filter((t) => t.id !== teamId);
+      return c;
+    });
+  };
+  // Estado de pago de un equipo (v2.21.0) -- vive en el propio JSONB de `teams` (igual que el
+  // resto de sus campos), así que basta con un patch normal via updateCategory, sin migración.
+  const setTeamPaymentStatus = (catId, teamId, paymentStatus) => {
+    updateCategory(catId, (c) => {
+      c.teams = c.teams.map((t) => (t.id === teamId ? { ...t, paymentStatus } : t));
       return c;
     });
   };
@@ -1658,7 +1684,7 @@ export default function PickleballTournamentApp() {
 
   // ---- Reservas ----
   const createBooking = async (data) => {
-    const status = data.paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo";
+    const status = initialPaymentStatus(data.paymentMethod);
     const { data: row, error } = await supabase.from("bookings").insert({
       court_id: data.courtId, date: data.date, time_min: data.timeMin, block_minutes: data.blockMinutes,
       user_id: data.userId, user_name: data.userName, status,
@@ -1695,6 +1721,7 @@ export default function PickleballTournamentApp() {
   const mapRegistrationRow = (r) => ({
     id: r.id, userId: r.user_id, userName: r.user_name, paymentMethod: r.payment_method,
     reference: r.reference, proofName: r.proof_name, attended: !!r.attended,
+    paymentStatus: r.payment_status || "confirmada",
     priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
     createdAt: new Date(r.created_at).getTime(),
   });
@@ -1947,6 +1974,7 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("open_play_registrations").insert({
       open_play_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
       reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
+      payment_status: initialPaymentStatus(reg.paymentMethod),
     }).select().single();
     if (error) { console.error("registerForOpenPlay:", error.message); return; }
     setOpenPlays((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
@@ -1955,6 +1983,7 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("class_registrations").insert({
       class_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
       reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
+      payment_status: initialPaymentStatus(reg.paymentMethod),
     }).select().single();
     if (error) { console.error("registerForClass:", error.message); return; }
     setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
@@ -1984,6 +2013,19 @@ export default function PickleballTournamentApp() {
     setClasses((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, attended } : r)) } : e)));
     const { error } = await supabase.from("class_registrations").update({ attended }).eq("id", registrationId);
     if (error) console.error("setClassAttendance:", error.message);
+  };
+  // Estado de pago (v2.21.0) -- el admin cambia manualmente entre los tres estados
+  // (PAYMENT_STATUS_META) desde la misma pestaña "Inscritos"; la verificación automática por
+  // correo queda para una fase aparte.
+  const setOpenPlayPaymentStatus = async (occurrenceId, registrationId, paymentStatus) => {
+    setOpenPlays((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, paymentStatus } : r)) } : e)));
+    const { error } = await supabase.from("open_play_registrations").update({ payment_status: paymentStatus }).eq("id", registrationId);
+    if (error) console.error("setOpenPlayPaymentStatus:", error.message);
+  };
+  const setClassPaymentStatus = async (occurrenceId, registrationId, paymentStatus) => {
+    setClasses((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, paymentStatus } : r)) } : e)));
+    const { error } = await supabase.from("class_registrations").update({ payment_status: paymentStatus }).eq("id", registrationId);
+    if (error) console.error("setClassPaymentStatus:", error.message);
   };
 
   // ---- Membresías ----
@@ -2171,7 +2213,8 @@ export default function PickleballTournamentApp() {
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
               membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories}
               removeOpenPlayRegistration={removeOpenPlayRegistration} removeClassRegistration={removeClassRegistration}
-              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance} />
+              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance}
+              setOpenPlayPaymentStatus={setOpenPlayPaymentStatus} setClassPaymentStatus={setClassPaymentStatus} />
           )}
 
           {effectiveTab === "reservas" && (
@@ -2187,7 +2230,8 @@ export default function PickleballTournamentApp() {
               removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
               removeOpenPlayRegistration={removeOpenPlayRegistration} removeClassRegistration={removeClassRegistration}
-              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance} users={users}
+              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance}
+              setOpenPlayPaymentStatus={setOpenPlayPaymentStatus} setClassPaymentStatus={setClassPaymentStatus} users={users}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
@@ -2202,7 +2246,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory}
-                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
+                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist} setTeamPaymentStatus={setTeamPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -3393,7 +3437,7 @@ function LoyalClientsCard({ bookings, openPlays, classes, categories, users }) {
 // desde el componente principal) para poder repasar quién asistió a cuál sesión sin que el
 // dato desaparezca al pasar la fecha. Reutiliza AttendeesPanel (definido junto a EventDetail
 // más abajo) para el detalle expandible de cada fila -- misma UI, mismos mutators.
-function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegistration, onRemoveClassRegistration, onSetOpenPlayAttendance, onSetClassAttendance }) {
+function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegistration, onRemoveClassRegistration, onSetOpenPlayAttendance, onSetClassAttendance, onSetOpenPlayPaymentStatus, onSetClassPaymentStatus }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const [expandedKey, setExpandedKey] = useState(null);
   const [query, setQuery] = useState("");
@@ -3443,7 +3487,8 @@ function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegist
                   <div className="px-3 pb-3 pt-1" style={{ background: "#fff", borderTop: `1px solid ${COLORS.line}` }}>
                     <AttendeesPanel occurrences={[r]} users={users}
                       onRemove={r.kind === "open_play" ? onRemoveOpenPlayRegistration : onRemoveClassRegistration}
-                      onSetAttendance={r.kind === "open_play" ? onSetOpenPlayAttendance : onSetClassAttendance} />
+                      onSetAttendance={r.kind === "open_play" ? onSetOpenPlayAttendance : onSetClassAttendance}
+                      onSetPaymentStatus={r.kind === "open_play" ? onSetOpenPlayPaymentStatus : onSetClassPaymentStatus} />
                   </div>
                 )}
               </div>
@@ -3541,7 +3586,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
 }
 
 function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories,
-  removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance }) {
+  removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus }) {
   const transactions = useMemo(() => buildTransactions(bookings, openPlays, classes, subscriptions), [bookings, openPlays, classes, subscriptions]);
   const byDay = useMemo(() => groupByDay(transactions, 14), [transactions]);
   const byMonth = useMemo(() => groupByMonth(transactions, 6), [transactions]);
@@ -3596,7 +3641,8 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
 
       <AsistenciaHistorial openPlays={openPlays} classes={classes} users={users}
         onRemoveOpenPlayRegistration={removeOpenPlayRegistration} onRemoveClassRegistration={removeClassRegistration}
-        onSetOpenPlayAttendance={setOpenPlayAttendance} onSetClassAttendance={setClassAttendance} />
+        onSetOpenPlayAttendance={setOpenPlayAttendance} onSetClassAttendance={setClassAttendance}
+        onSetOpenPlayPaymentStatus={setOpenPlayPaymentStatus} onSetClassPaymentStatus={setClassPaymentStatus} />
     </div>
   );
 }
@@ -3722,7 +3768,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist,
+    addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, setTeamPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -3769,7 +3815,7 @@ function TorneosSection(props) {
       {subTab === "participantes" && role === "admin" && (
         <ParticipantesTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} />
+          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -3898,7 +3944,7 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 // vivía dentro de Categorías (TeamRegistration) como al formulario admin de la vieja pestaña
 // Inscripción (InscripcionAdminForm, ahora retirado): TeamRegistration ya cubre todo lo que
 // hacía aquel formulario y además muestra los equipos/lista de espera ya inscritos.
-function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking }) {
+function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -3906,7 +3952,7 @@ function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, remo
       <div>
         {activeCat ? (
           <TeamRegistration cat={activeCat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} />
+            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus} />
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus participantes.</p></Card>
         )}
@@ -4051,7 +4097,7 @@ function PlayerField({ label, name, setName, ranking, setRanking, suggestedRanki
   );
 }
 
-function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking }) {
+function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState(""); const [r1, setR1] = useState("");
   const [p2, setP2] = useState(""); const [r2, setR2] = useState("");
@@ -4090,19 +4136,36 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
         </div>
       )}
 
-      <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-        {(cat.teams || []).map((t) => (
-          <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
-            <div>
-              <span className="font-semibold">{t.name}</span>
-              <span className="text-gray-500 ml-2 text-xs">{(t.players || []).map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
+      <div className="space-y-1.5 max-h-96 overflow-y-auto pr-1">
+        {(cat.teams || []).map((t) => {
+          // Equipos anotados a mano por el organizador (InscripcionAdminForm) no traen
+          // paymentMethod -- solo hay detalle de pago que mostrar si el equipo vino de un
+          // checkout real (InscripcionTab). El estado sí siempre existe (ver addTeam).
+          const hasCheckout = !!t.paymentMethod;
+          return (
+            <div key={t.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm flex-wrap" style={{ background: "#EEF1F7" }}>
+              <div className="min-w-0">
+                <span className="font-semibold">{t.name}</span>
+                <span className="text-gray-500 ml-2 text-xs">{(t.players || []).map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
+                <span className="text-xs text-gray-500 block mt-0.5">
+                  {hasCheckout ? (
+                    <>
+                      {t.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(t.createdAt).toISOString().slice(0, 10))}
+                      {t.priceUsd != null && ` · ${formatMoney(t.priceUsd)}`}
+                      {t.paymentMethod === "movil" && t.reference && ` · ref. ${t.reference}`}
+                      {t.paymentMethod === "movil" && (t.proofName ? " · comprobante" : " · sin comprobante")}
+                    </>
+                  ) : "Anotado por el organizador, sin checkout"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0 ml-auto">
+                <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
+                {setTeamPaymentStatus ? <PaymentStatusSelect status={t.paymentStatus} onChange={(v) => setTeamPaymentStatus(cat.id, t.id, v)} /> : <PaymentStatusBadge status={t.paymentStatus} />}
+                <button onClick={() => removeTeam(cat.id, t.id)} className="text-gray-300 hover:text-red-500"><X size={14} /></button>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
-              <button onClick={() => removeTeam(cat.id, t.id)} className="text-gray-300 hover:text-red-500"><X size={14} /></button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
         {(cat.teams || []).length === 0 && <p className="text-xs text-gray-400 italic">Sin equipos todavía.</p>}
       </div>
 
@@ -5894,10 +5957,31 @@ function EventAdminTabs({ tab, setTab, showFechas }) {
   );
 }
 
+// Badge de solo lectura con el estado de pago (PAYMENT_STATUS_META) -- usado donde no hace
+// falta poder cambiarlo (ej. resumen de un equipo sin control de admin a la vista).
+function PaymentStatusBadge({ status }) {
+  const meta = PAYMENT_STATUS_META[status] || PAYMENT_STATUS_META.pendiente_efectivo;
+  return <span className="text-[10px] px-2 py-0.5 rounded-full font-bold whitespace-nowrap" style={{ background: meta.bg, color: meta.fg }}>{meta.label}</span>;
+}
+// Mismo badge pero editable -- un <select> nativo estilizado como la píldora de estado, para
+// que el admin cambie entre "Por pagar" / "Pago por verificar" / "Pago verificado" con un
+// solo control en vez de tres botones. La verificación automática por correo queda pendiente
+// para una fase aparte -- por ahora el admin es quien confirma "Pago verificado" a mano.
+function PaymentStatusSelect({ status, onChange }) {
+  const meta = PAYMENT_STATUS_META[status] || PAYMENT_STATUS_META.pendiente_efectivo;
+  return (
+    <select value={status || "pendiente_efectivo"} onChange={(ev) => onChange(ev.target.value)}
+      className="text-[10px] font-bold rounded-full pl-2 pr-1 py-0.5 border-0 outline-none appearance-none cursor-pointer"
+      style={{ background: meta.bg, color: meta.fg }}>
+      {Object.entries(PAYMENT_STATUS_META).map(([val, m]) => <option key={val} value={val}>{m.label}</option>)}
+    </select>
+  );
+}
+
 // Pestaña "Inscritos": lista quién se anotó, agrupada por fecha cuando hay varias ocurrencias.
 // Resuelve teléfono/correo buscando al inscrito en `users` por userId -- un invitado sin
 // cuenta (userId null, InscripcionAdminForm-style) solo trae el nombre capturado al pagar.
-function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance }) {
+function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance, onSetPaymentStatus }) {
   const withPeople = occurrences.filter((o) => o.registrations.length > 0);
   if (withPeople.length === 0) {
     return <p className="text-sm text-gray-400 italic py-1">Todavía nadie se ha inscrito.</p>;
@@ -5916,19 +6000,21 @@ function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance }) {
               const user = users.find((u) => u.id === r.userId);
               const contact = user?.phone || user?.email || "Sin cuenta";
               return (
-                <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm flex-wrap" style={{ background: "#EEF1F7" }}>
                   <label className="flex items-center gap-2.5 min-w-0 cursor-pointer">
                     <input type="checkbox" checked={r.attended} onChange={(ev) => onSetAttendance?.(o.id, r.id, ev.target.checked)} style={{ accentColor: COLORS.court }} />
                     <span className="min-w-0">
                       <span className="font-semibold block truncate">{r.userName}</span>
                       <span className="text-xs text-gray-500 block truncate">
-                        {contact} · {r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"}
+                        {contact} · {r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(r.createdAt).toISOString().slice(0, 10))}
+                        {r.paymentMethod === "movil" && r.reference && ` · ref. ${r.reference}`}
                         {r.paymentMethod === "movil" && (r.proofName ? " · comprobante" : " · sin comprobante")}
                       </span>
                     </span>
                   </label>
-                  <div className="flex items-center gap-2.5 shrink-0">
+                  <div className="flex items-center gap-2.5 shrink-0 ml-auto">
                     {r.priceUsd != null && <span className="mono text-xs font-bold" style={{ color: COLORS.court }}>{formatMoney(r.priceUsd)}</span>}
+                    {onSetPaymentStatus ? <PaymentStatusSelect status={r.paymentStatus} onChange={(v) => onSetPaymentStatus(o.id, r.id, v)} /> : <PaymentStatusBadge status={r.paymentStatus} />}
                     {onRemove && <button onClick={() => onRemove(o.id, r.id)} title="Quitar inscripción" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>}
                   </div>
                 </div>
@@ -5944,7 +6030,7 @@ function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance }) {
 // `occurrences` is every future/today entry that shares e's recurringGroupId (or just [e]
 // for a one-off event). When there's more than one, the panel lists each date so the member
 // picks which session to check out for, instead of forcing a single date on a recurring series.
-function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onClose, isAdmin }) {
+function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onSetPaymentStatus, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
@@ -6037,7 +6123,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
               </select>
             </div>
           )}
-          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} onSetPaymentStatus={onSetPaymentStatus} />
         </div>
       )}
 
@@ -6055,7 +6141,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   );
 }
 
-function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onClose, isAdmin }) {
+function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onSetPaymentStatus, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
@@ -6131,7 +6217,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
               </select>
             </div>
           )}
-          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+          <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} onSetPaymentStatus={onSetPaymentStatus} />
         </div>
       )}
 
@@ -6150,7 +6236,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, users, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -6352,6 +6438,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
                 onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingOpenPlay({ data: e, isSeries: true }) : null}
                 onRemoveRegistration={isAdmin ? removeOpenPlayRegistration : null}
                 onSetAttendance={isAdmin ? setOpenPlayAttendance : null}
+                onSetPaymentStatus={isAdmin ? setOpenPlayPaymentStatus : null}
                 onClose={closeAll} />
             )}
           </Modal>
@@ -6386,6 +6473,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
                 onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingClass({ data: e, isSeries: true }) : null}
                 onRemoveRegistration={isAdmin ? removeClassRegistration : null}
                 onSetAttendance={isAdmin ? setClassAttendance : null}
+                onSetPaymentStatus={isAdmin ? setClassPaymentStatus : null}
                 onClose={closeAll} />
             )}
           </Modal>
