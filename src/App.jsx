@@ -153,6 +153,41 @@ function generateDayBlocks(openTime, closeTime, blockMinutes) {
 }
 function blockKey(courtId, date, timeMin) { return `${courtId}|${date}|${timeMin}`; }
 
+// Semanal, desde `startDate` hasta `until` inclusive (o solo `startDate` si no hay `until`) --
+// compartido entre addOpenPlay/addClass (arman la serie real al guardar) y OpenPlayForm/
+// ClaseForm (necesitan las mismas fechas para poder avisar de conflictos ANTES de guardar,
+// v2.24.0) para que nunca puedan desincronizarse en qué fechas caen.
+function expandWeeklyDates(startDate, until) {
+  if (!startDate) return [];
+  if (!until || until < startDate) return [startDate];
+  const out = [];
+  let d = new Date(startDate + "T00:00:00");
+  const end = new Date(until + "T00:00:00");
+  while (d <= end) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
+  return out;
+}
+
+// Bloques que un Open Play/Clase con estas canchas/fechas/horario reclamaría, cruzados contra
+// `occupiedKeys` -- usado por OpenPlayForm/ClaseForm para avisar y bloquear el guardado ANTES
+// de que dos actividades distintas terminen reclamando la misma cancha/fecha/hora (v2.24.0).
+// `ignoreKeys` excluye los bloques que ya pertenecen a la propia actividad que se está
+// editando, para no marcarla como "en conflicto consigo misma".
+function findBlockConflicts(club, courtIds, dates, startTime, endTime, occupiedKeys, ignoreKeys) {
+  if (!club || !courtIds?.length || !dates?.length || !startTime || !endTime || startTime >= endTime) return [];
+  const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes)
+    .filter((t) => t >= timeToMinutes(startTime) && t < timeToMinutes(endTime));
+  const conflicts = [];
+  dates.forEach((date) => {
+    courtIds.forEach((courtId) => {
+      blocks.forEach((timeMin) => {
+        const key = blockKey(courtId, date, timeMin);
+        if (occupiedKeys.has(key) && !ignoreKeys?.has(key)) conflicts.push({ courtId, date, timeMin });
+      });
+    });
+  });
+  return conflicts;
+}
+
 function formatMoney(n, symbol = "$") {
   const v = Number(n) || 0;
   return `${symbol}${v.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -942,7 +977,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.23.1";
+const APP_VERSION = "2.24.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1786,13 +1821,7 @@ export default function PickleballTournamentApp() {
         imageUrl = supabase.storage.from("open-play-images").getPublicUrl(path).data.publicUrl;
       }
 
-      const occurrenceDates = [data.date];
-      if (recurrence?.until && recurrence.until >= data.date) {
-        occurrenceDates.length = 0;
-        let d = new Date(data.date + "T00:00:00");
-        const until = new Date(recurrence.until + "T00:00:00");
-        while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
-      }
+      const occurrenceDates = expandWeeklyDates(data.date, recurrence?.until);
       const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
       const rows = occurrenceDates.map((dt) => ({
         name: data.name, image: imageUrl, level: data.level, price: data.price, member_price: data.memberPrice,
@@ -1812,13 +1841,7 @@ export default function PickleballTournamentApp() {
   // Mismo patrón de expansión que addOpenPlay, para clases recurrentes.
   const addClass = async ({ recurrence, ...data }) => {
     try {
-      const occurrenceDates = [data.date];
-      if (recurrence?.until && recurrence.until >= data.date) {
-        occurrenceDates.length = 0;
-        let d = new Date(data.date + "T00:00:00");
-        const until = new Date(recurrence.until + "T00:00:00");
-        while (d <= until) { occurrenceDates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 7); }
-      }
+      const occurrenceDates = expandWeeklyDates(data.date, recurrence?.until);
       const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
       const rows = occurrenceDates.map((dt) => ({
         academy_name: data.academyName, level: data.level, price: data.price, member_price: data.memberPrice,
@@ -2907,10 +2930,30 @@ function TieredPriceFields({ tournament, set, field }) {
   );
 }
 
-function TorneoTab({ tournament, setTournament: updateTournament, dates, courts }) {
+function TorneoTab({ tournament, setTournament: updateTournament, dates, courts, club, categories, occupiedKeys }) {
   const set = (k, v) => updateTournament({ [k]: v });
   const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
   const isPublished = tournament.status === "published";
+
+  // Aviso informativo (v2.24.0), NO bloqueante -- a diferencia de Open Play/Clase, un torneo
+  // no "reserva" bloques al guardar estos campos: el calendario real lo arma runScheduler
+  // más adelante (pestaña Calendario), que ya evita por construcción cualquier bloque ocupado
+  // (buildSchedule salta preOccupied) -- nunca se duplica una reserva. Esto solo avisa cuando
+  // el rango/canchas elegidos ya tienen algo agendado, para que el admin sepa que el
+  // calendario real tendrá menos hueco del que parece. `ignoreKeys` excluye los partidos que
+  // este MISMO torneo ya tenga agendados (categories ya viene filtrado a este torneo).
+  const ignoreMatchKeys = useMemo(() => {
+    const set = new Set();
+    (categories || []).forEach((c) => (c.matches || []).forEach((m) => {
+      if (m.courtId && m.day && !isByeMatch(m)) set.add(blockKey(m.courtId, m.day, timeToMinutes(m.time)));
+    }));
+    return set;
+  }, [categories]);
+  const busyConflicts = useMemo(() => {
+    if (!club || !occupiedKeys || !dates.length || !tournament.dailyStart || !tournament.dailyEnd) return [];
+    return findBlockConflicts(club, selectedCourts.map((c) => c.id), dates, tournament.dailyStart, tournament.dailyEnd, occupiedKeys, ignoreMatchKeys);
+  }, [club, occupiedKeys, selectedCourts, dates, tournament.dailyStart, tournament.dailyEnd, ignoreMatchKeys]);
+  const busyDatesCount = new Set(busyConflicts.map((c) => c.date)).size;
   // Mínimo para poder publicar: fechas cargadas -- sin eso el torneo se ve "Por definir" en
   // Actividades, que es justo el problema real que hizo falta este borrador/publicado
   // (v2.16.0): un torneo creado solo con el nombre no debe quedar visible para clientes.
@@ -3005,6 +3048,15 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
           {dates.length > 0 && (
             <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
               {dates.length} día(s) de juego · {formatDateHuman(dates[0])} a {formatDateHuman(dates[dates.length - 1])}
+            </div>
+          )}
+          {busyConflicts.length > 0 && (
+            <div className="text-xs px-3 py-2.5 rounded-lg flex items-start gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              <span>
+                Ya hay reservas u otras actividades en {busyDatesCount} de los {dates.length} día(s) de este rango, en alguna de las canchas elegidas.
+                El generador de calendario (pestaña Calendario) evita esos bloques automáticamente -- no se duplicarán --, pero tendrás menos disponibilidad real para los partidos del torneo.
+              </span>
             </div>
           )}
           <p className="text-xs" style={{ color: "#6B7688" }}>La duración de partidos y el intervalo entre ellos ahora se configuran en la pestaña <b>Calendario</b>, donde puedes ajustarlos antes o después de generar el horario.</p>
@@ -3799,7 +3851,10 @@ function TorneosSection(props) {
         ))}
       </div>
 
-      {subTab === "config" && role === "admin" && <TorneoTab tournament={tournament} setTournament={setTournament} dates={dates} courts={courts} />}
+      {subTab === "config" && role === "admin" && (
+        <TorneoTab tournament={tournament} setTournament={setTournament} dates={dates} courts={courts}
+          club={club} categories={categories} occupiedKeys={occupiedKeys} />
+      )}
 
       {subTab === "categorias" && role === "admin" && (
         <CategoriasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -5431,6 +5486,10 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes);
   const court = courts.find((c) => c.id === courtId) || null;
 
+  // Qué ocupa un bloque puntual -- ya se usaba para contar canchas disponibles, pero el
+  // detalle (kind/label) nunca se mostraba en ningún lado. Ahora también resuelve reservas
+  // sueltas (antes se perdían en el fallback genérico "Reservado" sin nombre) para que el
+  // admin pueda ver quién/qué ocupa cualquier bloque, incluso los que están llenos (v2.24.0).
   const occupant = (cid, timeMin) => {
     if (!occupiedKeys.has(blockKey(cid, date, timeMin))) return null;
     for (const cat of categories) {
@@ -5441,7 +5500,9 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
     if (op) return { kind: "Open Play", label: op.name };
     const cls = classes.find((e) => e.occupiedBlocks.some((b) => b.courtId === cid && b.date === date && b.timeMin === timeMin));
     if (cls) return { kind: "Clase", label: cls.academyName };
-    return { kind: "Reservado", label: "" };
+    const booking = bookings.find((b) => b.status !== "cancelada" && b.courtId === cid && b.date === date && b.timeMin === timeMin);
+    if (booking) return { kind: "Reserva", label: booking.userName };
+    return { kind: "Ocupado", label: "" };
   };
 
   const availableCourtsAt = (timeMin) => courts.filter((c) => !occupant(c.id, timeMin));
@@ -5498,14 +5559,22 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
             const available = availableCourtsAt(t);
             const occ = available.length === 0;
             const isSel = selectedTime === t;
+            // El admin puede tocar CUALQUIER horario, incluso sin canchas libres -- necesita
+            // poder ver qué actividad ocupa cada cancha (el modal de abajo se encarga de
+            // mostrarlo). El cliente sigue sin poder tocar un horario donde no hay nada que
+            // reservar (v2.24.0).
+            const clickable = role === "admin" || !occ;
             return (
-              <button key={t} onClick={() => !occ && pickTime(t)} disabled={occ}
-                title={occ ? "Ocupado — ninguna cancha disponible" : `${available.length} cancha${available.length === 1 ? "" : "s"} disponible${available.length === 1 ? "" : "s"}`}
+              <button key={t} onClick={() => clickable && pickTime(t)} disabled={!clickable}
+                title={
+                  !occ ? `${available.length} cancha${available.length === 1 ? "" : "s"} disponible${available.length === 1 ? "" : "s"}`
+                    : role === "admin" ? "Ocupado — toca para ver qué está reservado" : "Ocupado — ninguna cancha disponible"
+                }
                 className="rounded-xl py-2.5 px-1.5 text-center transition-all"
                 style={{
                   background: occ ? "#EDEEF2" : isSel ? COLORS.court : "#fff",
                   border: `1.5px solid ${occ ? "transparent" : isSel ? COLORS.court : COLORS.line}`,
-                  cursor: occ ? "not-allowed" : "pointer",
+                  cursor: clickable ? "pointer" : "not-allowed",
                 }}>
                 <p className="mono text-sm font-bold" style={{ color: occ ? "#9AA6BC" : isSel ? "#fff" : COLORS.courtDark }}>{minutesToAmPm(t)}</p>
                 <p className="text-[9px] mt-0.5 font-bold uppercase tracking-wide" style={{ color: occ ? "#9AA6BC" : isSel ? "#DCEBD5" : "#78829A" }}>
@@ -5531,16 +5600,30 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
         <Modal onClose={() => { setSelectedTime(null); setCourtId(null); }}>
           <Card>
             <div className="flex items-start justify-between gap-3 mb-1">
-              <SectionTitle sub={court ? undefined : "Toca una cancha para continuar."}>
-                {court ? `Confirmar ${court.name}` : "Canchas disponibles"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
+              <SectionTitle sub={court ? undefined : role === "admin" ? "Toca una cancha disponible para reservar, o revisa qué ocupa las demás." : "Toca una cancha para continuar."}>
+                {court ? `Confirmar ${court.name}` : "Canchas"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
               </SectionTitle>
               <button onClick={() => { setSelectedTime(null); setCourtId(null); }} className="text-gray-300 hover:text-gray-600 shrink-0"><X size={18} /></button>
             </div>
 
             {!court ? (
               <>
+                {/* El cliente solo ve canchas libres (nada que mirar en una ocupada). El admin
+                   ve TODAS -- las ocupadas quedan como una etiqueta informativa (kind + quién/
+                   qué la tiene) en vez de un botón, para poder revisar cualquier horario lleno
+                   sin exponerle esa info a un cliente (v2.24.0). */}
                 <div className="flex flex-wrap gap-2">
-                  {availableCourtsAt(selectedTime).map((c) => {
+                  {(role === "admin" ? courts : availableCourtsAt(selectedTime)).map((c) => {
+                    const occ = role === "admin" ? occupant(c.id, selectedTime) : null;
+                    if (occ) {
+                      return (
+                        <div key={c.id} title={`${occ.kind}${occ.label ? ": " + occ.label : ""}`}
+                          className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+                          {c.isPrivate && <Lock size={12} />} {c.name}
+                          <span className="text-[10px] font-semibold opacity-80 truncate max-w-[140px]">{occ.kind}{occ.label ? ` · ${occ.label}` : ""}</span>
+                        </div>
+                      );
+                    }
                     const { base, member } = courtPriceInfo(c, selectedTime);
                     const shownPrice = isMember ? member : base;
                     return (
@@ -5553,7 +5636,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                     );
                   })}
                 </div>
-                {availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
+                {role !== "admin" && availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
               </>
             ) : lockedPrivate ? (
               <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
@@ -5615,12 +5698,44 @@ function MultiCourtSelect({ courts, value, onChange }) {
   );
 }
 
+// Aviso de choque de horario (v2.24.0) -- compartido por OpenPlayForm/ClaseForm. `conflicts`
+// es la lista granular de {courtId, date, timeMin} de findBlockConflicts; acá se agrupa por
+// cancha (fechas únicas, máximo 3 a la vista + contador) para que el mensaje no se vuelva una
+// lista gigante cuando el choque cae en varias fechas de una serie recurrente.
+function ScheduleConflictWarning({ conflicts, courts }) {
+  if (!conflicts.length) return null;
+  const byCourtDates = new Map();
+  conflicts.forEach((c) => {
+    if (!byCourtDates.has(c.courtId)) byCourtDates.set(c.courtId, new Set());
+    byCourtDates.get(c.courtId).add(c.date);
+  });
+  return (
+    <div className="text-xs px-3 py-2.5 rounded-lg flex items-start gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+      <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+      <div>
+        <p className="font-bold">Ese horario ya está ocupado -- ajusta cancha, fecha u hora para poder guardar.</p>
+        <ul className="mt-1 space-y-0.5">
+          {[...byCourtDates.entries()].map(([courtId, datesSet]) => {
+            const dates = [...datesSet].sort();
+            const court = courts.find((c) => c.id === courtId);
+            return (
+              <li key={courtId}>
+                {court?.name || "Cancha"}: {dates.slice(0, 3).map((d) => formatDateHuman(d)).join(", ")}{dates.length > 3 ? ` +${dates.length - 3} más` : ""}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 // `initial` presente = editar (una ocurrencia puntual, o los campos compartidos de una serie
 // entera si `hideDate` viene true -- ahí la fecha no se muestra porque cada ocurrencia
 // conserva la suya, ver updateOpenPlaySeries). Sin `initial` = crear, comportamiento
 // original. `onSubmit` reemplaza al viejo `onCreate` -- mismo contrato (async, devuelve
 // {error} o {}), el nombre ahora es genérico porque también se usa para guardar una edición.
-function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = false }) {
+function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = false, club, occupiedKeys, ignoreBlocks = [], seriesDates = [] }) {
   const isEdit = !!initial;
   const [name, setName] = useState(initial?.name ?? "");
   const [imageBlob, setImageBlob] = useState(null);
@@ -5671,8 +5786,23 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
     img.src = objectUrl;
   };
 
+  // Choque de horario (v2.24.0): las fechas a validar son las de la serie existente cuando se
+  // edita toda una serie (hideDate -- cada ocurrencia conserva su propia fecha, no se
+  // recalculan acá), o las que resultarían de expandir date/recurUntil en cualquier otro caso
+  // (crear, recurrente o no; editar una sola ocurrencia). `ignoreBlocks` excluye los bloques
+  // que ya son de esta misma actividad, para no marcarla en conflicto consigo misma.
+  const ignoreKeySet = useMemo(() => new Set(ignoreBlocks.map((b) => blockKey(b.courtId, b.date, b.timeMin))), [ignoreBlocks]);
+  const occurrenceDates = useMemo(
+    () => (hideDate ? seriesDates : expandWeeklyDates(date, isRecurring ? recurUntil : null)),
+    [hideDate, seriesDates, date, isRecurring, recurUntil]
+  );
+  const conflicts = useMemo(
+    () => (occupiedKeys ? findBlockConflicts(club, courtIds, occurrenceDates, startTime, endTime, occupiedKeys, ignoreKeySet) : []),
+    [club, occupiedKeys, courtIds, occurrenceDates, startTime, endTime, ignoreKeySet]
+  );
+
   const canSave = name.trim() && courtIds.length > 0 && (hideDate || date) && startTime < endTime && Number(capacity) > 0
-    && (!isRecurring || (recurUntil && recurUntil >= date));
+    && (!isRecurring || (recurUntil && recurUntil >= date)) && conflicts.length === 0;
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -5751,6 +5881,7 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
         </div>
         )}
 
+        <ScheduleConflictWarning conflicts={conflicts} courts={courts} />
         {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
         <div className="flex gap-2 pt-1">
@@ -5765,7 +5896,7 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
   );
 }
 
-function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = false }) {
+function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = false, club, occupiedKeys, ignoreBlocks = [], seriesDates = [] }) {
   const isEdit = !!initial;
   const [academyName, setAcademyName] = useState(initial?.academyName ?? "");
   const [level, setLevel] = useState(initial?.level ?? "Todos");
@@ -5778,8 +5909,19 @@ function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = fals
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurUntil, setRecurUntil] = useState("");
 
+  // Mismo criterio de choque de horario que OpenPlayForm (v2.24.0) -- ver ese comentario.
+  const ignoreKeySet = useMemo(() => new Set(ignoreBlocks.map((b) => blockKey(b.courtId, b.date, b.timeMin))), [ignoreBlocks]);
+  const occurrenceDates = useMemo(
+    () => (hideDate ? seriesDates : expandWeeklyDates(date, isRecurring ? recurUntil : null)),
+    [hideDate, seriesDates, date, isRecurring, recurUntil]
+  );
+  const conflicts = useMemo(
+    () => (occupiedKeys ? findBlockConflicts(club, courtIds, occurrenceDates, startTime, endTime, occupiedKeys, ignoreKeySet) : []),
+    [club, occupiedKeys, courtIds, occurrenceDates, startTime, endTime, ignoreKeySet]
+  );
+
   const canSave = academyName.trim() && courtIds.length > 0 && (hideDate || date) && startTime < endTime
-    && (!isRecurring || (recurUntil && recurUntil >= date));
+    && (!isRecurring || (recurUntil && recurUntil >= date)) && conflicts.length === 0;
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -5846,6 +5988,7 @@ function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = fals
         </div>
         )}
 
+        <ScheduleConflictWarning conflicts={conflicts} courts={courts} />
         {error && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{error}</p>}
 
         <div className="flex gap-2 pt-1">
@@ -6230,7 +6373,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, onCreateTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -6363,12 +6506,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
          abierto y OpenPlayForm/ClaseForm muestran el error en vez de perder los datos. */}
       {isAdmin && showOpenPlayForm && (
         <div className="mb-5">
-          <OpenPlayForm courts={courts} onSubmit={async (d) => { const r = await addOpenPlay(d); if (!r?.error) setShowOpenPlayForm(false); return r; }} onCancel={() => setShowOpenPlayForm(false)} />
+          <OpenPlayForm courts={courts} club={club} occupiedKeys={occupiedKeys} onSubmit={async (d) => { const r = await addOpenPlay(d); if (!r?.error) setShowOpenPlayForm(false); return r; }} onCancel={() => setShowOpenPlayForm(false)} />
         </div>
       )}
       {isAdmin && showClaseForm && (
         <div className="mb-5">
-          <ClaseForm courts={courts} onSubmit={async (d) => { const r = await addClass(d); if (!r?.error) setShowClaseForm(false); return r; }} onCancel={() => setShowClaseForm(false)} />
+          <ClaseForm courts={courts} club={club} occupiedKeys={occupiedKeys} onSubmit={async (d) => { const r = await addClass(d); if (!r?.error) setShowClaseForm(false); return r; }} onCancel={() => setShowClaseForm(false)} />
         </div>
       )}
 
@@ -6415,6 +6558,9 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           <Modal onClose={closeAll}>
             {editingOpenPlay ? (
               <OpenPlayForm courts={courts} initial={editingOpenPlay.data} hideDate={editingOpenPlay.isSeries}
+                club={club} occupiedKeys={occupiedKeys}
+                ignoreBlocks={editingOpenPlay.isSeries ? list.flatMap((o) => o.occupiedBlocks) : editingOpenPlay.data.occupiedBlocks}
+                seriesDates={editingOpenPlay.isSeries ? list.map((o) => o.date) : []}
                 onSubmit={async (d) => {
                   const r = editingOpenPlay.isSeries
                     ? await updateOpenPlaySeries(editingOpenPlay.data.recurringGroupId, d)
@@ -6450,6 +6596,9 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           <Modal onClose={closeAll}>
             {editingClass ? (
               <ClaseForm courts={courts} initial={editingClass.data} hideDate={editingClass.isSeries}
+                club={club} occupiedKeys={occupiedKeys}
+                ignoreBlocks={editingClass.isSeries ? list.flatMap((o) => o.occupiedBlocks) : editingClass.data.occupiedBlocks}
+                seriesDates={editingClass.isSeries ? list.map((o) => o.date) : []}
                 onSubmit={async (d) => {
                   const r = editingClass.isSeries
                     ? await updateClassSeries(editingClass.data.recurringGroupId, d)
