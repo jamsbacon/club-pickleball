@@ -941,7 +941,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.21.0";
+const APP_VERSION = "2.22.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1174,8 +1174,15 @@ export default function PickleballTournamentApp() {
   // advertised rate sheet, editable independently of what's actually been created yet.
   const mapPlanRow = (r) => ({
     id: r.id, name: r.name, monthlyPrice: Number(r.monthly_price), privateCourtAccess: r.private_court_access,
+    maxMembers: r.max_members != null ? Number(r.max_members) : null,
     description: r.description || "",
-    rateCard: (r.rate_card || []).map((it, i) => ({ id: it.id || `${r.id}-rate-${i}`, label: it.label, price: it.price })),
+    // `value` es texto libre ya formateado ("4/mes", "100% (Gratis)", "5 días"...) -- un
+    // precio numérico no alcanza a representar todos los beneficios del rate card (v2.22.0).
+    // Fallback a `price` por si queda algún rate card viejo sin migrar.
+    rateCard: (r.rate_card || []).map((it, i) => ({
+      id: it.id || `${r.id}-rate-${i}`, label: it.label,
+      value: it.value != null ? it.value : (it.price > 0 ? formatMoney(it.price) : "Gratis"),
+    })),
   });
   const [membershipPlans, setMembershipPlans] = useState([]);
   const fetchMembershipPlans = async () => {
@@ -2032,7 +2039,7 @@ export default function PickleballTournamentApp() {
   const addMembershipPlan = async (plan) => {
     const { data: row, error } = await supabase.from("membership_plans").insert({
       name: plan.name, monthly_price: plan.monthlyPrice, private_court_access: plan.privateCourtAccess,
-      description: plan.description, rate_card: plan.rateCard,
+      max_members: plan.maxMembers === "" ? null : plan.maxMembers, description: plan.description, rate_card: plan.rateCard,
     }).select().single();
     if (error) { console.error("addMembershipPlan:", error.message); return; }
     setMembershipPlans((p) => [...p, mapPlanRow(row)]);
@@ -2043,6 +2050,7 @@ export default function PickleballTournamentApp() {
     if ("name" in patch) dbPatch.name = patch.name;
     if ("monthlyPrice" in patch) dbPatch.monthly_price = patch.monthlyPrice;
     if ("privateCourtAccess" in patch) dbPatch.private_court_access = patch.privateCourtAccess;
+    if ("maxMembers" in patch) dbPatch.max_members = patch.maxMembers === "" ? null : patch.maxMembers;
     if ("description" in patch) dbPatch.description = patch.description;
     if ("rateCard" in patch) dbPatch.rate_card = patch.rateCard;
     supabase.from("membership_plans").update(dbPatch).eq("id", id).then(({ error }) => {
@@ -2202,7 +2210,7 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "club" && role === "admin" && (
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-              subscribeToPlan={subscribeToPlan} currentUser={currentUser} />
+              subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} />
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
@@ -2267,7 +2275,7 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "membresias" && (
-            <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts}
+            <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users}
               addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role} />
           )}
@@ -3067,7 +3075,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts 
    TAB: CANCHAS
    ========================================================================= */
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
-  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser }) {
+  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users }) {
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
@@ -3213,7 +3221,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
          ya sabe renderizar el modo admin (crear/editar/borrar planes) vs. cliente (comparar y
          suscribirse) según `role` -- acá siempre es "admin", así que actúa como panel de
          configuración con la misma tabla comparativa como vista previa en vivo. */}
-      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts}
+      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users}
         addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
         subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
     </div>
@@ -6487,22 +6495,25 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
    TAB: MEMBRESÍAS
    ========================================================================= */
 // Used both to create a new plan and to edit an existing one (pass `initial`).
-// The rate card is a free-form list of priced line items (court booking, Open Plays,
-// league days, monthly classes, drills…) shown in the comparison table below — it's
-// the plan's advertised rate sheet, independent of what's actually bookable yet.
+// The rate card is a free-form list of benefit line items (court booking, Open Plays,
+// league days, drills, free reservation blocks, booking window…) shown in the comparison
+// table below — it's the plan's advertised rate sheet, independent of what's actually
+// bookable yet. `value` is free text (v2.22.0) so it can hold "$5.00", "4/mes", "5 días" or
+// "100% (Gratis)" alike -- not every benefit is a USD price.
 function MembershipPlanForm({ initial, onSave, onCancel }) {
   const [name, setName] = useState(initial?.name || "");
   const [monthlyPrice, setMonthlyPrice] = useState(initial?.monthlyPrice ?? 30);
   const [privateCourtAccess, setPrivateCourtAccess] = useState(initial?.privateCourtAccess ?? true);
+  const [maxMembers, setMaxMembers] = useState(initial?.maxMembers ?? "");
   const [description, setDescription] = useState(initial?.description || "");
   const [rateCard, setRateCard] = useState(initial?.rateCard || []);
   const [rateLabel, setRateLabel] = useState("");
-  const [ratePrice, setRatePrice] = useState(0);
+  const [rateValue, setRateValue] = useState("");
 
   const addRate = () => {
-    if (!rateLabel.trim()) return;
-    setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel.trim(), price: Number(ratePrice) || 0 }]);
-    setRateLabel(""); setRatePrice(0);
+    if (!rateLabel.trim() || !rateValue.trim()) return;
+    setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel.trim(), value: rateValue.trim() }]);
+    setRateLabel(""); setRateValue("");
   };
   const removeRate = (id) => setRateCard((rc) => rc.filter((r) => r.id !== id));
 
@@ -6513,36 +6524,42 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
         <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></div>
         <div><Label>Precio mensual (USD)</Label><input type="number" min={0} style={inputStyle} value={monthlyPrice} onChange={(e) => setMonthlyPrice(e.target.value)} /></div>
       </div>
-      <div className="mt-3">
-        <Label>Acceso a canchas privadas</Label>
-        <Segmented value={privateCourtAccess ? "si" : "no"} onChange={(v) => setPrivateCourtAccess(v === "si")} options={[{ value: "si", label: "Sí" }, { value: "no", label: "No" }]} />
+      <div className="grid sm:grid-cols-2 gap-3 mt-3">
+        <div>
+          <Label>Acceso a canchas privadas</Label>
+          <Segmented value={privateCourtAccess ? "si" : "no"} onChange={(v) => setPrivateCourtAccess(v === "si")} options={[{ value: "si", label: "Sí" }, { value: "no", label: "No" }]} />
+        </div>
+        <div>
+          <Label>Cupos máximos (opcional)</Label>
+          <input type="number" min={0} style={inputStyle} value={maxMembers} onChange={(e) => setMaxMembers(e.target.value)} placeholder="Sin límite" />
+        </div>
       </div>
       <div className="mt-3"><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
 
       <div className="mt-4">
-        <Label>Tarifario (se muestra en la tabla comparativa)</Label>
+        <Label>Tarifario (se muestra en la comparativa de planes)</Label>
         <div className="space-y-1.5 mb-2">
           {rateCard.map((r) => (
             <div key={r.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg text-xs" style={{ background: "#EEF1F7" }}>
               <span>{r.label}</span>
               <div className="flex items-center gap-2">
-                <span className="mono font-bold">{r.price > 0 ? formatMoney(r.price) : "Gratis"}</span>
+                <span className="mono font-bold">{r.value}</span>
                 <button onClick={() => removeRate(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
               </div>
             </div>
           ))}
         </div>
         <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
-          <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Reserva de cancha (1h30min)" /></div>
-          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={ratePrice} onChange={(e) => setRatePrice(e.target.value)} /></div>
-          <button onClick={addRate} disabled={!rateLabel.trim()} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() ? COLORS.court : "#E5E5E5", color: rateLabel.trim() ? "#fff" : "#999" }}>
+          <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Bloque de reserva gratis*" /></div>
+          <div><Label>Valor</Label><input style={inputStyle} value={rateValue} onChange={(e) => setRateValue(e.target.value)} placeholder="4/mes, $5.00, 100% (Gratis)…" /></div>
+          <button onClick={addRate} disabled={!rateLabel.trim() || !rateValue.trim()} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() && rateValue.trim() ? COLORS.court : "#E5E5E5", color: rateLabel.trim() && rateValue.trim() ? "#fff" : "#999" }}>
             <Plus size={14} />
           </button>
         </div>
       </div>
 
       <div className="flex gap-2 pt-4">
-        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, description, rateCard })}
+        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, maxMembers: maxMembers === "" ? null : Number(maxMembers), description, rateCard })}
           style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">{initial ? "Guardar cambios" : "Crear plan"}</button>
         <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
       </div>
@@ -6570,11 +6587,78 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
   );
 }
 
-function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
+// Tarjeta de un plan para mobile (v2.22.0) -- MembresiasTab usaba una sola tabla comparativa
+// para todo, que en mobile se volvía scroll lateral (3 columnas no caben en una pantalla de
+// teléfono). Debajo de `md` se cambia a esto: una card completa por plan, apiladas, sin
+// scroll horizontal -- mismos datos que la tabla (mismo `rateLabels`, mismo `planState`),
+// simplemente reformateados como lista vertical de beneficio→valor en vez de columnas.
+function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, onDelete }) {
+  const { badge, isCurrent, isExpired, locked, isFull, slotsLeft } = state;
+  const accent = idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE";
+  const blockedForNew = isFull && !isCurrent;
+  return (
+    <div className="rounded-2xl overflow-hidden" style={{ border: `1.5px solid ${badge ? accent : "rgba(255,255,255,0.10)"}` }}>
+      <div className="px-5 pt-5 pb-5" style={{ background: idx === 0 ? "rgba(255,106,26,0.14)" : idx === 1 ? "rgba(242,184,75,0.10)" : "rgba(255,255,255,0.03)" }}>
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <p className="text-sm font-extrabold uppercase tracking-wide" style={{ color: accent }}>{plan.name}</p>
+          {badge && <span className="shrink-0 text-[9px] font-extrabold px-2.5 py-1 rounded-full" style={{ background: badge.color, color: badge.text }}>{badge.label}</span>}
+        </div>
+        <p className="disp text-3xl leading-none" style={{ color: COLORS.chalk }}>
+          {plan.monthlyPrice > 0 ? formatMoney(plan.monthlyPrice) : "Gratis"}
+          {plan.monthlyPrice > 0 && <span className="text-xs font-normal ml-1.5" style={{ color: "#A9C0DC" }}>/mes</span>}
+        </p>
+        {plan.maxMembers != null && (
+          <p className="text-xs mt-2 font-semibold" style={{ color: isFull ? "#F2A65A" : "#A9C0DC" }}>
+            {isFull ? "Cupo lleno" : `${slotsLeft} de ${plan.maxMembers} cupos disponibles`}
+          </p>
+        )}
+        {!isAdmin ? (
+          <button onClick={onCheckout} disabled={locked || blockedForNew}
+            className="w-full mt-4 py-3 rounded-xl text-sm font-extrabold"
+            style={{
+              background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.14)",
+              color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
+            }}>
+            {locked ? "Tu plan actual" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
+          </button>
+        ) : (
+          <div className="flex gap-2 mt-4">
+            <button onClick={onEdit} className="flex-1 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "rgba(255,255,255,0.10)", color: COLORS.chalk }}>
+              <Pencil size={12} /> Editar
+            </button>
+            {plan.monthlyPrice > 0 && (
+              <button onClick={onDelete} className="py-2.5 px-3.5 rounded-xl text-xs font-bold" style={{ background: "rgba(255,255,255,0.10)", color: "#93A8C9" }}>
+                <Trash2 size={12} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="px-5 py-4 space-y-2.5" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+        {rateLabels.map((lbl) => {
+          const item = (plan.rateCard || []).find((r) => r.label === lbl);
+          return (
+            <div key={lbl} className="flex items-center justify-between gap-3 text-xs">
+              <span style={{ color: "#93A8C9" }}>{lbl}</span>
+              <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{item ? item.value : "—"}</span>
+            </div>
+          );
+        })}
+        <div className="flex items-center justify-between gap-3 text-xs pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+          <span style={{ color: "#93A8C9" }}>Canchas privadas</span>
+          {plan.privateCourtAccess ? <Check size={14} color={COLORS.ball} strokeWidth={3} /> : <span style={{ color: "#3F5062" }}>—</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
   const [showForm, setShowForm] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [checkoutPlanId, setCheckoutPlanId] = useState(null);
   const isAdmin = role === "admin";
+  const todayIso = new Date().toISOString().slice(0, 10);
 
   const paidPlans = [...membershipPlans].filter((p) => p.monthlyPrice > 0).sort((a, b) => b.monthlyPrice - a.monthlyPrice);
   const freePlans = membershipPlans.filter((p) => p.monthlyPrice === 0);
@@ -6587,11 +6671,32 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
     orderedPlans.forEach((p) => (p.rateCard || []).forEach((r) => { if (!seen.includes(r.label)) seen.push(r.label); }));
     return seen;
   }, [orderedPlans]);
+  // Beneficios cuya etiqueta lleva "*" en el rate card traen la misma nota al pie (ventana de
+  // reserva y bloques gratis, por ahora) -- se muestra una sola vez debajo de toda la
+  // comparativa en vez de repetirla, igual que en el cuadro que armó el club.
+  const hasFootnote = rateLabels.some((lbl) => lbl.includes("*"));
 
   const badgeFor = (idx) => {
     if (idx === 0 && paidPlans.length > 0) return { label: "MEJOR VALOR", color: COLORS.ball, text: COLORS.courtDark };
     if (idx === 1 && paidPlans.length > 1) return { label: "MÁS POPULAR", color: "#F2B84B", text: COLORS.courtDark };
     return null;
+  };
+
+  // Cupo máximo de miembros ACTIVOS (no vencidos) por plan -- una membresía vencida libera su
+  // cupo, igual que una reserva cancelada libera un bloque. Un plan sin maxMembers (null) es
+  // ilimitado y nunca se marca lleno. Fuente única para la tabla de escritorio y las cards de
+  // mobile, para que ambas vistas nunca muestren cupos distintos.
+  const planState = (plan, idx) => {
+    const badge = badgeFor(idx);
+    const isCurrent = currentUser.planId === plan.id;
+    // Una membresía vencida sigue siendo "el plan actual" pero debe poder renovarse -- si no,
+    // el botón queda deshabilitado para siempre.
+    const isExpired = isCurrent && !!currentUser.planExpiresAt && currentUser.planExpiresAt < todayIso;
+    const locked = isCurrent && !isExpired;
+    const activeMembers = plan.maxMembers != null ? users.filter((u) => u.planId === plan.id && (!u.planExpiresAt || u.planExpiresAt >= todayIso)).length : 0;
+    const slotsLeft = plan.maxMembers != null ? Math.max(0, plan.maxMembers - activeMembers) : null;
+    const isFull = plan.maxMembers != null && slotsLeft === 0;
+    return { badge, isCurrent, isExpired, locked, isFull, slotsLeft };
   };
 
   const selectedPlan = orderedPlans.find((p) => p.id === checkoutPlanId);
@@ -6621,7 +6726,9 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
           </p>
         </div>
 
-        <div className="overflow-x-auto px-2 pb-3">
+        {/* Desktop/tablet (md+): tabla comparativa, columna por plan -- hay espacio de sobra
+           para las 3 columnas sin scroll lateral. */}
+        <div className="hidden md:block overflow-x-auto px-2 pb-3">
           <table className="w-full border-collapse" style={{ minWidth: 560 }}>
             <thead>
               <tr>
@@ -6629,12 +6736,8 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                   <span className="text-[10px] font-extrabold uppercase tracking-widest" style={{ color: "#4E6180" }}>Beneficio</span>
                 </th>
                 {orderedPlans.map((plan, idx) => {
-                  const badge = badgeFor(idx);
-                  const isCurrent = currentUser.planId === plan.id;
-                  // Una membresía vencida sigue siendo "el plan actual" pero debe poder
-                  // renovarse -- si no, el botón queda deshabilitado para siempre.
-                  const isExpired = isCurrent && !!currentUser.planExpiresAt && currentUser.planExpiresAt < new Date().toISOString().slice(0, 10);
-                  const locked = isCurrent && !isExpired;
+                  const { badge, locked, isExpired, isFull, slotsLeft, isCurrent } = planState(plan, idx);
+                  const blockedForNew = isFull && !isCurrent;
                   return (
                     <th key={plan.id} className="align-bottom px-2 pb-0 text-center" style={{ minWidth: 128 }}>
                       <div className="rounded-t-2xl pt-3.5 pb-4 px-2"
@@ -6643,11 +6746,19 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                           {badge && <span className="inline-block text-[9px] font-extrabold px-2.5 py-1 rounded-full" style={{ background: badge.color, color: badge.text }}>{badge.label}</span>}
                         </div>
                         <p className="text-[13px] font-extrabold uppercase tracking-wide leading-tight" style={{ color: idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : COLORS.chalk }}>{plan.name}</p>
+                        {plan.maxMembers != null && (
+                          <p className="text-[10px] mt-1" style={{ color: isFull ? "#F2A65A" : "#7C8CA6" }}>
+                            {isFull ? "Cupo lleno" : `${slotsLeft}/${plan.maxMembers} cupos`}
+                          </p>
+                        )}
                         {!isAdmin && (
-                          <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={locked}
+                          <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={locked || blockedForNew}
                             className="w-full mt-3 py-2 rounded-lg text-[11px] font-extrabold"
-                            style={{ background: locked ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)", color: locked ? "#6B7688" : badge ? badge.text : "#fff" }}>
-                            {locked ? "Tu plan" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
+                            style={{
+                              background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)",
+                              color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
+                            }}>
+                            {locked ? "Tu plan" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
                           </button>
                         )}
                         {isAdmin && (
@@ -6674,15 +6785,32 @@ function MembresiasTab({ membershipPlans, club, courts, addMembershipPlan, updat
                 render={(p) => (p.monthlyPrice > 0 ? formatMoney(p.monthlyPrice) : "Pago por uso")} highlight />
               {rateLabels.map((lbl) => (
                 <ComparisonRow key={lbl} label={lbl} plans={orderedPlans}
-                  render={(p) => {
-                    const item = (p.rateCard || []).find((r) => r.label === lbl);
-                    if (!item) return "—";
-                    return item.price > 0 ? formatMoney(item.price) : "Gratis";
-                  }} />
+                  render={(p) => (p.rateCard || []).find((r) => r.label === lbl)?.value ?? "—"} />
               ))}
               <ComparisonRow label="Canchas privadas" plans={orderedPlans} render={(p) => p.privateCourtAccess} isBool />
             </tbody>
           </table>
+          {hasFootnote && (
+            <p className="px-4 pt-1 pb-3 text-[11px] leading-relaxed" style={{ color: "#7C8CA6" }}>
+              * Disfrutable en bloques de horarios fríos (de 8am a 5pm) y en días sin torneos, sujeto a disponibilidad.
+            </p>
+          )}
+        </div>
+
+        {/* Mobile (&lt;md): cards apiladas, una por plan, sin scroll lateral -- misma
+           información que la tabla de arriba (mismo rateLabels/planState). */}
+        <div className="md:hidden px-4 pb-6 space-y-4">
+          {orderedPlans.map((plan, idx) => (
+            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} state={planState(plan, idx)} isAdmin={isAdmin}
+              onCheckout={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))}
+              onEdit={() => { setEditingPlanId((id) => (id === plan.id ? null : plan.id)); setShowForm(false); }}
+              onDelete={() => removeMembershipPlan(plan.id)} />
+          ))}
+          {hasFootnote && (
+            <p className="text-[11px] leading-relaxed px-1" style={{ color: "#7C8CA6" }}>
+              * Disfrutable en bloques de horarios fríos (de 8am a 5pm) y en días sin torneos, sujeto a disponibilidad.
+            </p>
+          )}
         </div>
       </div>
 
@@ -6835,7 +6963,7 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
           <ul className="mt-3 space-y-1">
             {plan.rateCard.slice(0, 4).map((r) => (
               <li key={r.label} className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
-                <Check size={12} color={COLORS.court} /> {r.label} — {r.price > 0 ? formatMoney(r.price) : "Gratis"}
+                <Check size={12} color={COLORS.court} /> {r.label} — {r.value}
               </li>
             ))}
           </ul>
