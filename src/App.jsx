@@ -927,7 +927,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.18.0";
+const APP_VERSION = "2.19.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1694,7 +1694,7 @@ export default function PickleballTournamentApp() {
 
   const mapRegistrationRow = (r) => ({
     id: r.id, userId: r.user_id, userName: r.user_name, paymentMethod: r.payment_method,
-    reference: r.reference, proofName: r.proof_name,
+    reference: r.reference, proofName: r.proof_name, attended: !!r.attended,
     priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
     createdAt: new Date(r.created_at).getTime(),
   });
@@ -1960,6 +1960,32 @@ export default function PickleballTournamentApp() {
     setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
   };
 
+  // Gestión de inscritos por el admin (v2.19.0) -- quitar una inscripción (canceló, error de
+  // captura) o marcar asistencia, ambas desde la pestaña "Inscritos" del modal de la actividad.
+  // occurrenceId identifica la fecha puntual (una fila de openPlays/classes), registrationId
+  // la inscripción dentro de esa fecha -- una serie recurrente tiene inscripciones separadas
+  // por fecha, así que el patch solo toca el array `registrations` de esa única ocurrencia.
+  const removeOpenPlayRegistration = async (occurrenceId, registrationId) => {
+    const { error } = await supabase.from("open_play_registrations").delete().eq("id", registrationId);
+    if (error) { console.error("removeOpenPlayRegistration:", error.message); return; }
+    setOpenPlays((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.filter((r) => r.id !== registrationId) } : e)));
+  };
+  const removeClassRegistration = async (occurrenceId, registrationId) => {
+    const { error } = await supabase.from("class_registrations").delete().eq("id", registrationId);
+    if (error) { console.error("removeClassRegistration:", error.message); return; }
+    setClasses((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.filter((r) => r.id !== registrationId) } : e)));
+  };
+  const setOpenPlayAttendance = async (occurrenceId, registrationId, attended) => {
+    setOpenPlays((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, attended } : r)) } : e)));
+    const { error } = await supabase.from("open_play_registrations").update({ attended }).eq("id", registrationId);
+    if (error) console.error("setOpenPlayAttendance:", error.message);
+  };
+  const setClassAttendance = async (occurrenceId, registrationId, attended) => {
+    setClasses((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, attended } : r)) } : e)));
+    const { error } = await supabase.from("class_registrations").update({ attended }).eq("id", registrationId);
+    if (error) console.error("setClassAttendance:", error.message);
+  };
+
   // ---- Membresías ----
   const addMembershipPlan = async (plan) => {
     const { data: row, error } = await supabase.from("membership_plans").insert({
@@ -2158,6 +2184,8 @@ export default function PickleballTournamentApp() {
               updateOpenPlay={updateOpenPlay} updateOpenPlaySeries={updateOpenPlaySeries} updateClass={updateClass} updateClassSeries={updateClassSeries}
               removeOpenPlay={removeOpenPlay} removeOpenPlaySeries={removeOpenPlaySeries} removeClass={removeClass} removeClassSeries={removeClassSeries}
               registerForOpenPlay={registerForOpenPlay} registerForClass={registerForClass}
+              removeOpenPlayRegistration={removeOpenPlayRegistration} removeClassRegistration={removeClassRegistration}
+              setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance} users={users}
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
@@ -5762,20 +5790,89 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
   );
 }
 
+// Sub-nav del admin dentro de EventDetail/ClassDetail (v2.19.0) -- reemplaza el bloque
+// único que antes mezclaba la lista completa de fechas con los controles de edición. "Fechas"
+// solo aparece si hay más de una ocurrencia (serie recurrente); "Inscritos" siempre, para ver
+// y gestionar quién se anotó. Mismo patrón visual (píldoras) que TORNEO_SUB_ITEMS, pero sin
+// nada de brackets/formato de juego -- estas actividades son más livianas que un torneo.
+function EventAdminTabs({ tab, setTab, showFechas }) {
+  const items = [{ id: "resumen", label: "Resumen" }, ...(showFechas ? [{ id: "fechas", label: "Fechas" }] : []), { id: "inscritos", label: "Inscritos" }];
+  return (
+    <div className="flex gap-2 mb-4 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+      {items.map((it) => (
+        <button key={it.id} onClick={() => setTab(it.id)}
+          className="px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
+          style={{ background: tab === it.id ? COLORS.court : "#EAEEF5", color: tab === it.id ? "#fff" : COLORS.ink }}>
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Pestaña "Inscritos": lista quién se anotó, agrupada por fecha cuando hay varias ocurrencias.
+// Resuelve teléfono/correo buscando al inscrito en `users` por userId -- un invitado sin
+// cuenta (userId null, InscripcionAdminForm-style) solo trae el nombre capturado al pagar.
+function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance }) {
+  const withPeople = occurrences.filter((o) => o.registrations.length > 0);
+  if (withPeople.length === 0) {
+    return <p className="text-sm text-gray-400 italic py-1">Todavía nadie se ha inscrito.</p>;
+  }
+  return (
+    <div className="space-y-4">
+      {withPeople.map((o) => (
+        <div key={o.id}>
+          {occurrences.length > 1 && (
+            <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1.5" style={{ color: "#6B7688" }}>
+              {formatDateHuman(o.date)} · {o.registrations.length} inscrito{o.registrations.length === 1 ? "" : "s"}
+            </p>
+          )}
+          <div className="space-y-1.5">
+            {o.registrations.map((r) => {
+              const user = users.find((u) => u.id === r.userId);
+              const contact = user?.phone || user?.email || "Sin cuenta";
+              return (
+                <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                  <label className="flex items-center gap-2.5 min-w-0 cursor-pointer">
+                    <input type="checkbox" checked={r.attended} onChange={(ev) => onSetAttendance?.(o.id, r.id, ev.target.checked)} style={{ accentColor: COLORS.court }} />
+                    <span className="min-w-0">
+                      <span className="font-semibold block truncate">{r.userName}</span>
+                      <span className="text-xs text-gray-500 block truncate">
+                        {contact} · {r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"}
+                        {r.paymentMethod === "movil" && (r.proofName ? " · comprobante" : " · sin comprobante")}
+                      </span>
+                    </span>
+                  </label>
+                  <div className="flex items-center gap-2.5 shrink-0">
+                    {r.priceUsd != null && <span className="mono text-xs font-bold" style={{ color: COLORS.court }}>{formatMoney(r.priceUsd)}</span>}
+                    {onRemove && <button onClick={() => onRemove(o.id, r.id)} title="Quitar inscripción" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // `occurrences` is every future/today entry that shares e's recurringGroupId (or just [e]
 // for a one-off event). When there's more than one, the panel lists each date so the member
 // picks which session to check out for, instead of forcing a single date on a recurring series.
-function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onClose, isAdmin }) {
+function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
   // Un cliente se inscribe directo en la ocurrencia más próxima (occurrences[0] === e, ya
   // vienen filtradas/ordenadas desde EventosTab) -- mismo checkout de un paso que un evento
-  // único, sin lista de fechas para elegir. El admin sigue viendo la lista completa: la
-  // necesita para poder borrar una fecha puntual de la serie sin borrar toda la serie.
+  // único, sin lista de fechas para elegir. El admin ve, además, sus propias pestañas
+  // (Resumen/Fechas/Inscritos) -- la lista completa de fechas la sigue necesitando para poder
+  // borrar una fecha puntual de la serie sin borrar toda la serie.
   const showDateList = isSeries && isAdmin;
   const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
+  const [adminTab, setAdminTab] = useState("resumen");
 
   return (
     <Card>
@@ -5801,9 +5898,20 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
       </div>
       {e.description && <p className="text-sm mb-3" style={{ color: "#3D4A5C" }}>{e.description}</p>}
 
-      {showDateList ? (
+      {isAdmin && <EventAdminTabs tab={adminTab} setTab={setAdminTab} showFechas={showDateList} />}
+
+      {(!isAdmin || adminTab === "resumen") && (
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>
+          {showDateList
+            ? `${occurrences.length} fecha${occurrences.length === 1 ? "" : "s"} próxima${occurrences.length === 1 ? "" : "s"} · ${occurrences.reduce((s, o) => s + o.registrations.length, 0)} inscrito(s) en total. Usa "Fechas" para ver o editar cada sesión.`
+            : e.capacity
+              ? (e.registrations.length >= e.capacity ? "Cupo lleno" : `${Math.max(0, e.capacity - e.registrations.length)} cupo${(e.capacity - e.registrations.length) === 1 ? "" : "s"} disponible${(e.capacity - e.registrations.length) === 1 ? "" : "s"} de ${e.capacity}`)
+              : `${e.registrations.length} inscrito(s)`}
+        </p>
+      )}
+
+      {isAdmin && adminTab === "fechas" && showDateList && (
         <div className="space-y-1.5 mb-4">
-          <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => {
             const slotsLeft = e.capacity ? Math.max(0, e.capacity - o.registrations.length) : null;
             const isFull = slotsLeft === 0;
@@ -5828,12 +5936,12 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
             );
           })}
         </div>
-      ) : (
-        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>
-          {e.capacity
-            ? (e.registrations.length >= e.capacity ? "Cupo lleno" : `${Math.max(0, e.capacity - e.registrations.length)} cupo${(e.capacity - e.registrations.length) === 1 ? "" : "s"} disponible${(e.capacity - e.registrations.length) === 1 ? "" : "s"} de ${e.capacity}`)
-            : `${e.registrations.length} inscrito(s)`}
-        </p>
+      )}
+
+      {isAdmin && adminTab === "inscritos" && (
+        <div className="mb-4">
+          <AttendeesPanel occurrences={occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+        </div>
       )}
 
       {checkoutTarget && (
@@ -5850,16 +5958,16 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
   );
 }
 
-function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onClose, isAdmin }) {
+function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, users, onRegister, onRemove, onRemoveSeries, onEdit, onEditSeries, onRemoveRegistration, onSetAttendance, onClose, isAdmin }) {
   const courtNames = e.courtIds.map((id) => courts.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
   const isSeries = occurrences.length > 1;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
   // Mismo criterio que EventDetail: cliente se inscribe directo en la ocurrencia más
-  // próxima, sin elegir fecha; admin sigue viendo la lista para poder borrar una fecha
-  // puntual de la serie.
+  // próxima, sin elegir fecha; admin ve además sus pestañas propias.
   const showDateList = isSeries && isAdmin;
   const [checkoutId, setCheckoutId] = useState(showDateList ? null : e.id);
   const checkoutTarget = occurrences.find((o) => o.id === checkoutId);
+  const [adminTab, setAdminTab] = useState("resumen");
 
   return (
     <Card>
@@ -5884,9 +5992,18 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
         </div>
       </div>
 
-      {showDateList ? (
+      {isAdmin && <EventAdminTabs tab={adminTab} setTab={setAdminTab} showFechas={showDateList} />}
+
+      {(!isAdmin || adminTab === "resumen") && (
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>
+          {showDateList
+            ? `${occurrences.length} fecha${occurrences.length === 1 ? "" : "s"} próxima${occurrences.length === 1 ? "" : "s"} · ${occurrences.reduce((s, o) => s + o.registrations.length, 0)} inscrito(s) en total. Usa "Fechas" para ver o editar cada sesión.`
+            : `${e.registrations.length} inscrito(s)`}
+        </p>
+      )}
+
+      {isAdmin && adminTab === "fechas" && showDateList && (
         <div className="space-y-1.5 mb-4">
-          <p className="text-[10px] font-extrabold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>Próximas fechas — elige una para inscribirte</p>
           {occurrences.map((o) => (
             <div key={o.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: checkoutId === o.id ? "#DCEBD5" : "#EEF1F7" }}>
               <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">· {o.registrations.length} inscrito(s)</span></span>
@@ -5901,8 +6018,12 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, o
             </div>
           ))}
         </div>
-      ) : (
-        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>{e.registrations.length} inscrito(s)</p>
+      )}
+
+      {isAdmin && adminTab === "inscritos" && (
+        <div className="mb-4">
+          <AttendeesPanel occurrences={occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} />
+        </div>
       )}
 
       {checkoutTarget && (
@@ -5920,7 +6041,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, users, currentUser, currentPlan, tournaments, categories, setTab, openTournament, onCreateTournament, role }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -6114,12 +6235,14 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
                 }}
                 onCancel={() => setEditingOpenPlay(null)} />
             ) : (
-              <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
+              <EventDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin} users={users}
                 onRegister={(occurrenceId, checkout) => { registerForOpenPlay(occurrenceId, checkout); setSelected(null); }}
                 onRemove={isAdmin ? (occurrenceId) => { removeOpenPlay(occurrenceId); setSelected(null); } : null}
                 onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeOpenPlaySeries(e.recurringGroupId); setSelected(null); } : null}
                 onEdit={isAdmin ? (occurrence) => setEditingOpenPlay({ data: occurrence, isSeries: false }) : null}
                 onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingOpenPlay({ data: e, isSeries: true }) : null}
+                onRemoveRegistration={isAdmin ? removeOpenPlayRegistration : null}
+                onSetAttendance={isAdmin ? setOpenPlayAttendance : null}
                 onClose={closeAll} />
             )}
           </Modal>
@@ -6146,12 +6269,14 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
                 }}
                 onCancel={() => setEditingClass(null)} />
             ) : (
-              <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin}
+              <ClassDetail e={e} occurrences={occurrences.length ? occurrences : [e]} courts={courts} club={club} currentPlan={currentPlan} currentUser={currentUser} isAdmin={isAdmin} users={users}
                 onRegister={(occurrenceId, checkout) => { registerForClass(occurrenceId, checkout); setSelected(null); }}
                 onRemove={isAdmin ? (occurrenceId) => { removeClass(occurrenceId); setSelected(null); } : null}
                 onRemoveSeries={isAdmin && e.recurringGroupId ? () => { removeClassSeries(e.recurringGroupId); setSelected(null); } : null}
                 onEdit={isAdmin ? (occurrence) => setEditingClass({ data: occurrence, isSeries: false }) : null}
                 onEditSeries={isAdmin && isSeries && e.recurringGroupId ? () => setEditingClass({ data: e, isSeries: true }) : null}
+                onRemoveRegistration={isAdmin ? removeClassRegistration : null}
+                onSetAttendance={isAdmin ? setClassAttendance : null}
                 onClose={closeAll} />
             )}
           </Modal>
