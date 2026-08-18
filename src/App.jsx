@@ -942,7 +942,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.23.0";
+const APP_VERSION = "2.23.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2372,9 +2372,7 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: COLORS.courtDark }}>
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-7">
-          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-16 w-auto mb-3" />
-          <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
-          <h1 className="disp text-2xl text-center" style={{ color: COLORS.chalk }}>{club.name || "Mi Club"}</h1>
+          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-16 w-auto" />
         </div>
 
         <p className="text-center text-[10px] mono mb-4" style={{ color: "#5B6B85" }}>v{APP_VERSION}</p>
@@ -2575,8 +2573,7 @@ function Onboarding({ currentUser, club, updateProfile, logoutUser }) {
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-6">
           <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-16 w-auto mb-3" />
-          <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
-          <h1 className="disp text-xl text-center" style={{ color: COLORS.chalk }}>¡Bienvenido a {club.name || "tu club"}!</h1>
+          <h1 className="disp text-xl text-center" style={{ color: COLORS.chalk }}>¡Bienvenido!</h1>
         </div>
 
         <div className="flex items-center justify-center gap-1.5 mb-5">
@@ -2695,14 +2692,8 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
   return (
     <aside className="hidden md:flex flex-col w-64 shrink-0 sticky top-0 h-screen" style={{ background: COLORS.courtDark }}>
       <div className="px-6 pt-7 pb-6">
-        <div className="flex items-center gap-2.5">
-          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-8 w-auto shrink-0" />
-          <span className="text-[10px] tracking-[0.25em] uppercase" style={{ color: "#93A8C9" }}>Club OS</span>
-        </div>
-        <h1 className="disp text-lg leading-snug mt-3 line-clamp-2" style={{ color: COLORS.chalk }}>
-          {club.name || "Mi Club"}
-        </h1>
-        <p className="mono text-[10px] mt-1" style={{ color: "#4E6180" }}>v{APP_VERSION}</p>
+        <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-8 w-auto mb-3" />
+        <p className="mono text-[10px]" style={{ color: "#4E6180" }}>v{APP_VERSION}</p>
       </div>
 
       <nav className="flex-1 px-3 space-y-1">
