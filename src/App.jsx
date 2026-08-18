@@ -10,6 +10,7 @@ import {
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
+import clubLogo from "./assets/pickle-hub-logo.png";
 
 /* =========================================================================
    ID / UTILITY HELPERS
@@ -941,7 +942,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.22.0";
+const APP_VERSION = "2.23.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2371,9 +2372,7 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: COLORS.courtDark }}>
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-7">
-          <div style={{ background: COLORS.ball }} className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-lg">
-            <Trophy size={22} color={COLORS.courtDark} strokeWidth={2.5} />
-          </div>
+          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-16 w-auto mb-3" />
           <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
           <h1 className="disp text-2xl text-center" style={{ color: COLORS.chalk }}>{club.name || "Mi Club"}</h1>
         </div>
@@ -2575,9 +2574,7 @@ function Onboarding({ currentUser, club, updateProfile, logoutUser }) {
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: COLORS.courtDark }}>
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-6">
-          <div style={{ background: COLORS.ball }} className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-lg">
-            <Trophy size={22} color={COLORS.courtDark} strokeWidth={2.5} />
-          </div>
+          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-16 w-auto mb-3" />
           <p className="text-[10px] tracking-[0.25em] uppercase mb-1" style={{ color: "#93A8C9" }}>Club OS</p>
           <h1 className="disp text-xl text-center" style={{ color: COLORS.chalk }}>¡Bienvenido a {club.name || "tu club"}!</h1>
         </div>
@@ -2699,9 +2696,7 @@ function Sidebar({ tab, setTab, club, stats, currentUser, currentPlan, logoutUse
     <aside className="hidden md:flex flex-col w-64 shrink-0 sticky top-0 h-screen" style={{ background: COLORS.courtDark }}>
       <div className="px-6 pt-7 pb-6">
         <div className="flex items-center gap-2.5">
-          <div style={{ background: COLORS.ball }} className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0">
-            <Trophy size={16} color={COLORS.courtDark} strokeWidth={2.5} />
-          </div>
+          <img src={clubLogo} alt={club.name || "Pickle Hub"} className="h-8 w-auto shrink-0" />
           <span className="text-[10px] tracking-[0.25em] uppercase" style={{ color: "#93A8C9" }}>Club OS</span>
         </div>
         <h1 className="disp text-lg leading-snug mt-3 line-clamp-2" style={{ color: COLORS.chalk }}>
