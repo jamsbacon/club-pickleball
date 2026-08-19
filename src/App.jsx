@@ -987,7 +987,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.27.0";
+const APP_VERSION = "2.28.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6893,14 +6893,21 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
           </p>
         )}
         {!isAdmin ? (
-          <button onClick={onCheckout} disabled={locked || blockedForNew}
-            className="w-full mt-4 py-3 rounded-xl text-sm font-extrabold"
-            style={{
-              background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.14)",
-              color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
-            }}>
-            {locked ? "Tu plan actual" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
-          </button>
+          // "Sin plan" no es un plan de verdad al que alguien se suscriba -- es la referencia
+          // de "así reservas si no tienes membresía" para poder comparar contra PRO/VIP. Sin
+          // botón de acción para clientes (v2.28.0); el admin lo sigue pudiendo editar abajo.
+          plan.monthlyPrice > 0 ? (
+            <button onClick={onCheckout} disabled={locked || blockedForNew}
+              className="w-full mt-4 py-3 rounded-xl text-sm font-extrabold"
+              style={{
+                background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.14)",
+                color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
+              }}>
+              {locked ? "Tu plan actual" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
+            </button>
+          ) : (
+            <p className="text-xs text-center mt-4 py-3" style={{ color: "#7C8CA6" }}>Así reservas sin membresía</p>
+          )
         ) : (
           <div className="flex gap-2 mt-4">
             <button onClick={onEdit} className="flex-1 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "rgba(255,255,255,0.10)", color: COLORS.chalk }}>
@@ -7035,15 +7042,20 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
                             {isFull ? "Cupo lleno" : `${slotsLeft}/${plan.maxMembers} cupos`}
                           </p>
                         )}
-                        {!isAdmin && (
+                        {/* "Sin plan" es solo la referencia de comparación -- sin botón de
+                           suscripción para clientes (v2.28.0). */}
+                        {!isAdmin && plan.monthlyPrice > 0 && (
                           <button onClick={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))} disabled={locked || blockedForNew}
                             className="w-full mt-3 py-2 rounded-lg text-[11px] font-extrabold"
                             style={{
                               background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)",
                               color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
                             }}>
-                            {locked ? "Tu plan" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : plan.monthlyPrice > 0 ? "Suscribirme" : "Elegir"}
+                            {locked ? "Tu plan" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
                           </button>
+                        )}
+                        {!isAdmin && plan.monthlyPrice === 0 && (
+                          <p className="text-[10px] mt-3" style={{ color: "#7C8CA6" }}>Así reservas sin membresía</p>
                         )}
                         {isAdmin && (
                           <div className="flex gap-1.5 mt-3">
@@ -7099,11 +7111,19 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
         </div>
       </div>
 
+      {/* Mismo <Modal> que usan Reservas/Actividades para su checkout (v2.28.0) -- antes esto
+         era una Card suelta que aparecía pegada más abajo en la página, sin backdrop ni
+         bottom-sheet en mobile, así que se sentía distinto (y en mobile había que scrollear
+         para encontrarla). Con Modal gana lo mismo que ganó todo lo demás: fondo oscuro,
+         hoja anclada abajo en mobile, y el botón de atrás del teléfono la cierra en vez de
+         sacar de la app. */}
       {selectedPlan && (
-        <Card>
-          <CheckoutPanel title={`Suscripción a ${selectedPlan.name}`} baseUsd={selectedPlan.monthlyPrice} discountPct={0} club={club} defaultName={currentUser.name}
-            onConfirm={(checkout) => { subscribeToPlan(selectedPlan.id, checkout); setCheckoutPlanId(null); }} onCancel={() => setCheckoutPlanId(null)} confirmLabel="Confirmar suscripción" />
-        </Card>
+        <Modal onClose={() => setCheckoutPlanId(null)}>
+          <Card>
+            <CheckoutPanel title={`Suscripción a ${selectedPlan.name}`} baseUsd={selectedPlan.monthlyPrice} discountPct={0} club={club} defaultName={currentUser.name}
+              onConfirm={(checkout) => { subscribeToPlan(selectedPlan.id, checkout); setCheckoutPlanId(null); }} onCancel={() => setCheckoutPlanId(null)} confirmLabel="Confirmar suscripción" />
+          </Card>
+        </Modal>
       )}
     </div>
   );
