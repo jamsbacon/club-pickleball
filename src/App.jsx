@@ -991,7 +991,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.30.1";
+const APP_VERSION = "2.31.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6194,7 +6194,23 @@ function RacketIcon({ size = 24, color = "currentColor", strokeWidth = 2, classN
 // Compact list-row card for the Eventos browser (search + kind filter chips above). Unlike the
 // old poster-grid layout, this keeps the essentials scannable in one row: thumbnail, kind badge,
 // name, price, a short description, when it happens, and how many spots are left/taken.
-function EventListItem({ kind, title, description, date, startTime, endTime, price, image, recurring, meta, onClick }) {
+// STATUS_META: las 3 pestañas de estado (v2.31.0) -- cada actividad cae en exactamente una,
+// calculado contra la hora actual (ver classifyItemStatus). "en_curso" existe como pestaña
+// propia justo para que no se pierda entre las próximas -- es la que el admin necesita
+// encontrar rápido mientras la actividad está pasando.
+const STATUS_META = {
+  proxima: { label: "Próximas" },
+  en_curso: { label: "En curso" },
+  pasada: { label: "Pasadas" },
+};
+// Lunes primero (v2.31.0) -- mismo `value` que usa WEEKDAY_OPTIONS (Date#getDay(): 0=domingo
+// … 6=sábado), solo que acá con la letra sola para el selector compacto estilo HabitNow.
+const WEEKDAY_LETTERS = [
+  { value: 1, label: "L" }, { value: 2, label: "M" }, { value: 3, label: "X" }, { value: 4, label: "J" },
+  { value: 5, label: "V" }, { value: 6, label: "S" }, { value: 0, label: "D" },
+];
+
+function EventListItem({ kind, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit }) {
   const kindMeta = {
     open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
     torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
@@ -6202,13 +6218,11 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
   }[kind];
 
   return (
-    // Sin p-3 en el botón -- la imagen queda pegada a los 3 bordes izquierdos (arriba/
-    // izquierda/abajo) de la card en vez de flotar adentro con margen. overflow-hidden acá
-    // (no en el div de la imagen) es lo que le recorta las esquinas a juego con el
-    // rounded-2xl de la card; el padding se movió al bloque de texto, que es el único que
-    // lo necesita. La imagen no lleva alto fijo -- estira sola (stretch, default de flex)
-    // hasta igualar el alto real de la card.
-    <button onClick={onClick} className="w-full text-left rounded-2xl overflow-hidden flex gap-3"
+    // v2.31.0: pasó de <button> a <div role="button"> -- el botón de editar del admin necesita
+    // ser un <button> real anidado adentro (stopPropagation para no disparar también el click
+    // de la card), y un <button> dentro de otro <button> es HTML inválido.
+    <div role="button" tabIndex={0} onClick={onClick} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(); }}
+      className="w-full text-left rounded-2xl overflow-hidden flex gap-3 cursor-pointer"
       style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, boxShadow: "0 1px 2px rgba(20,30,25,.04), 0 10px 24px -18px rgba(20,30,25,.22)" }}>
       <div className="relative w-20 sm:w-24 shrink-0"
         style={!image ? { background: `linear-gradient(135deg, ${kindMeta.color}, ${COLORS.courtDark})` } : undefined}>
@@ -6227,9 +6241,25 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide" style={{ background: `${kindMeta.color}1A`, color: kindMeta.color }}>{kindMeta.label}</span>
+            {status === "en_curso" && (
+              <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide ml-1 inline-flex items-center gap-1" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.clay }} /> En curso
+              </span>
+            )}
             <p className="disp text-[15px] leading-tight mt-1 truncate" style={{ color: COLORS.courtDark }}>{title}</p>
           </div>
-          <span className="mono text-sm font-extrabold shrink-0" style={{ color: COLORS.court }}>{price}</span>
+          {/* Editar directo desde la card (v2.31.0) -- en el flujo normal del flex, al lado
+             del precio, en vez de flotar encima con position:absolute (chocaba visualmente
+             con el precio, que también vive en esta misma esquina). */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onEdit && (
+              <button onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Editar"
+                className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
+                <Pencil size={11} />
+              </button>
+            )}
+            <span className="mono text-sm font-extrabold" style={{ color: COLORS.court }}>{price}</span>
+          </div>
         </div>
         {description && <p className="text-xs mt-1 line-clamp-2" style={{ color: "#6B7688" }}>{description}</p>}
         <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[11px]" style={{ color: "#6B7688" }}>
@@ -6241,7 +6271,7 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
           <span className="text-[11px] font-bold px-3 py-1 rounded-full shrink-0 ml-auto" style={{ background: COLORS.ball, color: "#fff" }}>{kindMeta.cta}</span>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -6577,7 +6607,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
 }
 
 const EVENT_FILTER_CHIPS = [
-  { value: "all", label: "Disponibles ahora" },
+  { value: "all", label: "Todas" },
   { value: "open_play", label: "Open Plays" },
   { value: "clase", label: "Clases" },
   { value: "torneo", label: "Torneos" },
@@ -6595,8 +6625,44 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
   const [editingClass, setEditingClass] = useState(null);
   const [search, setSearch] = useState("");
   const [filterKind, setFilterKind] = useState("all");
+  // Pestaña de estado (v2.31.0) -- por defecto "Próximas", que es lo que casi siempre se
+  // quiere ver; "En curso" y "Pasadas" están a un toque, no enterradas dentro de "Próximas".
+  const [statusFilter, setStatusFilter] = useState("proxima");
+  // Selector de día de la semana estilo HabitNow (v2.31.0) -- null = sin filtrar. Un solo día
+  // a la vez, togglea si se toca el mismo de nuevo.
+  const [weekdayFilter, setWeekdayFilter] = useState(null);
   const isAdmin = role === "admin";
   const todayIso = new Date().toISOString().slice(0, 10);
+  const now = Date.now();
+
+  // Próxima / en curso / pasada (v2.31.0), calculado contra `now` -- un torneo usa su rango
+  // completo (date..endDate), Open Play/Clase su única fecha. Sin fecha cargada (torneo recién
+  // creado) cuenta como "próxima" -- no hay forma de saber que ya pasó.
+  const classifyItemStatus = (it) => {
+    if (!it.date) return "proxima";
+    const startTs = new Date(it.date + "T00:00:00").getTime() + timeToMinutes(it.startTime || "00:00") * 60000;
+    const endDateStr = it.endDate || it.date;
+    const endTs = new Date(endDateStr + "T00:00:00").getTime() + timeToMinutes(it.endTime || it.startTime || "23:59") * 60000;
+    if (now < startTs) return "proxima";
+    if (now <= endTs) return "en_curso";
+    return "pasada";
+  };
+  // Un torneo puede caer en un día de la semana que ni siquiera es su fecha de inicio -- se
+  // revisa todo su rango (date..endDate) en vez de solo el primer día.
+  const matchesWeekday = (it) => {
+    if (weekdayFilter == null) return true;
+    if (!it.date) return false;
+    if (it.endDate && it.endDate !== it.date) {
+      let d = new Date(it.date + "T00:00:00");
+      const end = new Date(it.endDate + "T00:00:00");
+      while (d <= end) {
+        if (d.getDay() === weekdayFilter) return true;
+        d.setDate(d.getDate() + 1);
+      }
+      return false;
+    }
+    return new Date(it.date + "T00:00:00").getDay() === weekdayFilter;
+  };
 
   const noEvents = openPlays.length === 0 && classes.length === 0 && tournaments.every((t) => t.status !== "published");
 
@@ -6658,6 +6724,11 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           ? { text: slotsLeft > 0 ? `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}` : "Cupo lleno", full: slotsLeft === 0 }
           : { text: `${rep.registrations.length} inscrito(s)` },
         onClick: () => setSelected({ kind: "open_play", key }),
+        // Botón de editar directo en la card (v2.31.0) -- va a la serie completa si es
+        // recurrente (mismo criterio que "editar toda la serie" dentro del detalle), o a esta
+        // única ocurrencia si no. Abre el modal ya en modo edición, sin pasar primero por el
+        // detalle.
+        onEdit: isAdmin ? () => { setSelected({ kind: "open_play", key }); setEditingOpenPlay({ data: rep, isSeries }); } : null,
       });
     });
     classSeries.forEach((list) => {
@@ -6670,6 +6741,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         price: displayPrice(rep, "clase"), image: null, recurring: isSeries,
         meta: { text: `${rep.registrations.length} inscrito(s)` },
         onClick: () => setSelected({ kind: "clase", key }),
+        onEdit: isAdmin ? () => { setSelected({ kind: "clase", key }); setEditingClass({ data: rep, isSeries }); } : null,
       });
     });
     // El club organiza varios torneos a la vez -- una tarjeta por cada uno, igual que Open
@@ -6687,21 +6759,43 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       items.push({
         key: `t-${t.id}`, kind: "torneo", title: t.name || "Torneo del club",
         description: noCatsYet ? "Sin categorías aún." : `${tCats.length} categoría(s) abiertas.`,
-        date: t.startDate, startTime: t.dailyStart, endTime: t.dailyEnd,
+        // endDate (v2.31.0): un torneo dura varios días -- clasificarlo "próxima/en curso/
+        // pasada" o filtrarlo por día de la semana necesita el rango completo, no solo el
+        // primer día.
+        date: t.startDate, endDate: t.endDate, startTime: t.dailyStart, endTime: t.dailyEnd,
         price: "Ver detalles", image: null, recurring: false,
         meta: { text: noCatsYet ? "Sin categorías aún" : `${teamCount} equipo(s) inscrito(s)` },
         onClick: () => openTournament(t.id),
+        // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
+        // admin, no hace falta un modo edición aparte como Open Play/Clase.
+        onEdit: isAdmin ? () => openTournament(t.id) : null,
       });
     });
     return items;
-  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament, isMember, currentPlan]);
+  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament, isMember, currentPlan, isAdmin]);
 
-  const filteredItems = listItems.filter((it) => {
-    if (filterKind !== "all" && it.kind !== filterKind) return false;
-    const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return it.title.toLowerCase().includes(q) || (it.description || "").toLowerCase().includes(q);
-  });
+  // Punto en la pestaña "En curso" cuando hay algo pasando ahora mismo (v2.31.0), sin importar
+  // qué pestaña esté activa -- para que un admin parado en "Próximas" no deje de notar que
+  // algo ya arrancó, sin tener que cambiarle la pestaña por defecto a todo el mundo.
+  const hasEnCurso = listItems.some((it) => classifyItemStatus(it) === "en_curso");
+
+  const filteredItems = listItems
+    .filter((it) => {
+      if (filterKind !== "all" && it.kind !== filterKind) return false;
+      if (classifyItemStatus(it) !== statusFilter) return false;
+      if (!matchesWeekday(it)) return false;
+      const q = search.trim().toLowerCase();
+      if (!q) return true;
+      return it.title.toLowerCase().includes(q) || (it.description || "").toLowerCase().includes(q);
+    })
+    // Cronológico (v2.31.0): más próxima primero en Próximas/En curso; más reciente primero
+    // (orden inverso) en Pasadas, como un historial -- ver más lo último que pasó antes que
+    // algo de hace meses.
+    .sort((a, b) => {
+      const ats = a.date ? new Date(a.date + "T00:00:00").getTime() + timeToMinutes(a.startTime || "00:00") * 60000 : Infinity;
+      const bts = b.date ? new Date(b.date + "T00:00:00").getTime() + timeToMinutes(b.startTime || "00:00") * 60000 : Infinity;
+      return statusFilter === "pasada" ? bts - ats : ats - bts;
+    });
 
   return (
     <div>
@@ -6739,6 +6833,39 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         </div>
       )}
 
+      {/* Selector de día de la semana estilo HabitNow (v2.31.0) -- un toque filtra a ese día
+         (recurrente que cae ahí, evento puntual de esa fecha, o torneo que pasa por ese día
+         en su rango); tocar el mismo día lo destoggle. */}
+      <div className="flex gap-1.5 mb-3">
+        {WEEKDAY_LETTERS.map((d) => (
+          <button key={d.value} onClick={() => setWeekdayFilter((w) => (w === d.value ? null : d.value))}
+            className="w-9 h-9 rounded-full text-xs font-bold flex items-center justify-center shrink-0"
+            style={{ background: weekdayFilter === d.value ? COLORS.courtDark : "#EAEEF5", color: weekdayFilter === d.value ? "#fff" : COLORS.ink }}>
+            {d.label}
+          </button>
+        ))}
+        {weekdayFilter != null && (
+          <button onClick={() => setWeekdayFilter(null)} title="Quitar filtro de día" className="text-gray-300 hover:text-red-500 shrink-0 self-center ml-1">
+            <X size={16} />
+          </button>
+        )}
+      </div>
+
+      {/* Pestañas de estado (v2.31.0) -- Próxima/En curso/Pasada, partición estricta (cada
+         actividad cae en una sola) calculada contra la hora actual en cada render. */}
+      <div className="flex gap-2 mb-3">
+        {Object.entries(STATUS_META).map(([value, meta]) => (
+          <button key={value} onClick={() => setStatusFilter(value)}
+            className="px-3.5 py-1.5 rounded-full text-xs font-bold whitespace-nowrap flex items-center gap-1.5"
+            style={{ background: statusFilter === value ? COLORS.court : "#EAEEF5", color: statusFilter === value ? "#fff" : COLORS.ink }}>
+            {meta.label}
+            {value === "en_curso" && hasEnCurso && statusFilter !== "en_curso" && (
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.clay }} />
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Chips antes que el buscador, con el mismo mb-5 (y cero margen arriba) que usa
          TorneosSection para sus propios chips de sub-navegación. */}
       <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
@@ -6763,12 +6890,14 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           {filteredItems.map((it) => (
             <EventListItem key={it.key} kind={it.kind} title={it.title} description={it.description}
               date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
-              recurring={it.recurring} meta={it.meta} onClick={it.onClick} />
+              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} />
           ))}
         </div>
 
         {noEvents && <p className="text-xs text-gray-400 italic">Aún no hay Open Plays ni clases programadas.</p>}
-        {!noEvents && filteredItems.length === 0 && <p className="text-xs text-gray-400 italic">Ninguna actividad coincide con la búsqueda o el filtro.</p>}
+        {!noEvents && filteredItems.length === 0 && (
+          <p className="text-xs text-gray-400 italic">Ninguna actividad coincide con la búsqueda o los filtros.</p>
+        )}
       </div>
 
       {selected?.kind === "open_play" && (() => {
