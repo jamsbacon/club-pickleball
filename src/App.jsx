@@ -991,7 +991,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.30.0";
+const APP_VERSION = "2.30.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5509,40 +5509,53 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
       <p className="text-sm font-bold mb-3" style={{ color: COLORS.courtDark }}>{title}</p>
 
       <div className="rounded-lg p-3 mb-3" style={{ background: COLORS.courtDark }}>
-        <span className="text-xs" style={{ color: "#A9C0DC" }}>{discountPct > 0 ? `Precio con ${discountPct}% de descuento por membresía` : "Total a pagar"}</span>
+        <span className="text-xs" style={{ color: "#A9C0DC" }}>{isFree ? "Este cupo es gratis para ti" : discountPct > 0 ? `Precio con ${discountPct}% de descuento por membresía` : "Total a pagar"}</span>
         <div className="flex items-baseline gap-3 mt-1 flex-wrap">
-          <span className="disp text-2xl" style={{ color: COLORS.ball }}>{formatMoney(discounted)}</span>
-          <span className="mono text-sm" style={{ color: "#D6E1F0" }}>≈ {formatMoney(bs, "Bs. ")}</span>
+          <span className="disp text-2xl" style={{ color: COLORS.ball }}>{isFree ? "Gratis" : formatMoney(discounted)}</span>
+          {!isFree && <span className="mono text-sm" style={{ color: "#D6E1F0" }}>≈ {formatMoney(bs, "Bs. ")}</span>}
         </div>
-        {discountPct > 0 && baseUsd > 0 && <p className="text-[10px] mt-1 line-through" style={{ color: "#55677E" }}>{formatMoney(baseUsd)} sin membresía</p>}
-        <p className="text-[10px] mt-1.5" style={{ color: "#4E6180" }}>Bs calculado a {formatMoney(club.bsPerUsd, "Bs. ")}/USD (referencia EUR BCV)</p>
+        {!isFree && discountPct > 0 && baseUsd > 0 && <p className="text-[10px] mt-1 line-through" style={{ color: "#55677E" }}>{formatMoney(baseUsd)} sin membresía</p>}
+        {!isFree && <p className="text-[10px] mt-1.5" style={{ color: "#4E6180" }}>Bs calculado a {formatMoney(club.bsPerUsd, "Bs. ")}/USD (referencia EUR BCV)</p>}
       </div>
 
       {requireName && (
         <div className="mb-3"><Label>Tu nombre</Label><input style={inputStyle} value={userName} onChange={(e) => setUserName(e.target.value)} placeholder="Nombre y apellido" /></div>
       )}
 
-      <Label>Método de pago</Label>
-      <Segmented value={method} onChange={setMethod} options={[{ value: "movil", label: "Pago Móvil" }, { value: "efectivo", label: "Efectivo" }]} />
-
-      {method === "movil" ? (
-        <div className="mt-3 space-y-2.5">
-          <div className="mono text-[11px] px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
-            <Smartphone size={13} color={COLORS.court} /> {club.pagoMovil.banco} · {club.pagoMovil.telefono} · {club.pagoMovil.cedula}
-          </div>
-          <div><Label>N° de referencia</Label><input style={inputStyle} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Últimos dígitos de la operación" /></div>
-          <div>
-            <Label>Comprobante de pago (obligatorio)</Label>
-            <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: proofName ? COLORS.court : "#6B7688" }}>
-              <Upload size={14} /> {proofName || "Subir captura del pago"}
-              <input type="file" accept="image/*,.pdf" className="hidden" onChange={handleFile} />
-            </label>
-          </div>
+      {/* Gratis de verdad (v2.30.1) -- nada que pagar, así que no tiene sentido pedir método de
+         pago, referencia ni comprobante. Antes esto se calculaba bien (canConfirm/submit ya no
+         exigían nada) pero la sección seguía DIBUJÁNDOSE completa igual, pidiendo un
+         comprobante "obligatorio" para pagar $0 -- solo se había arreglado la validación, no
+         la UI. */}
+      {isFree ? (
+        <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+          <Check size={14} strokeWidth={3} /> No hay nada que pagar -- solo confirma para reservar.
         </div>
       ) : (
-        <div className="mt-3 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-          <Banknote size={13} /> Pagas en efectivo directamente en el club, antes de tu turno.
-        </div>
+        <>
+          <Label>Método de pago</Label>
+          <Segmented value={method} onChange={setMethod} options={[{ value: "movil", label: "Pago Móvil" }, { value: "efectivo", label: "Efectivo" }]} />
+
+          {method === "movil" ? (
+            <div className="mt-3 space-y-2.5">
+              <div className="mono text-[11px] px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                <Smartphone size={13} color={COLORS.court} /> {club.pagoMovil.banco} · {club.pagoMovil.telefono} · {club.pagoMovil.cedula}
+              </div>
+              <div><Label>N° de referencia</Label><input style={inputStyle} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Últimos dígitos de la operación" /></div>
+              <div>
+                <Label>Comprobante de pago (obligatorio)</Label>
+                <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: proofName ? COLORS.court : "#6B7688" }}>
+                  <Upload size={14} /> {proofName || "Subir captura del pago"}
+                  <input type="file" accept="image/*,.pdf" className="hidden" onChange={handleFile} />
+                </label>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-3 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+              <Banknote size={13} /> Pagas en efectivo directamente en el club, antes de tu turno.
+            </div>
+          )}
+        </>
       )}
 
       <div className="flex gap-2 mt-4">
