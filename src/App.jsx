@@ -7,7 +7,8 @@ import {
   UserPlus, Pencil, Medal, Hourglass, DollarSign,
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
-  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle
+  GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
+  RefreshCw, TrendingUp, Wallet, ShieldAlert
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -358,6 +359,15 @@ function groupByHour(bookings, club) {
   return blocks.map((t) => ({ label: minutesToAmPm(t), value: counts[t] || 0 }));
 }
 
+// De dónde sale la plata: reservas vs. Open Plays vs. clases vs. membresías. Antes "Ingresos
+// totales" era un solo número sin desglose -- el admin no podía saber si venía de reservas
+// puntuales o de membresías recurrentes sin ir a revisar cada sección por separado.
+function groupByType(transactions) {
+  const map = {};
+  transactions.forEach((t) => { map[t.type] = (map[t.type] || 0) + t.usd; });
+  return Object.entries(map).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+}
+
 function groupByZone(users) {
   const map = {};
   users.filter((u) => u.role === "cliente").forEach((u) => {
@@ -367,10 +377,55 @@ function groupByZone(users) {
   return Object.entries(map).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
 }
 
-function groupByPlan(users, membershipPlans) {
+// Un socio de plan pago cuenta como vigente solo si su plan no venció -- antes cualquier perfil
+// con planId apuntando a un plan pago contaba como "activo" para siempre, incluso con
+// planExpiresAt ya pasado hace meses (esto es justo lo que hacía "desconfiables" las
+// estadísticas: un socio que dejó de pagar seguía sumando a Membresías activas/MRR
+// indefinidamente). Mismo criterio que ya usaban ProfileTab/MembresiasTab para mostrar
+// "Vencida", ahora centralizado acá para que Estadísticas, Usuarios y el MRR usen la misma
+// regla. Un plan sin planExpiresAt (viejo, de antes de v2.27.0, o el plan gratuito) se
+// considera vigente -- no vence.
+function isActiveMember(user, plan, todayIso) {
+  if (!plan || !(plan.monthlyPrice > 0)) return false;
+  if (!user.planExpiresAt) return true;
+  return user.planExpiresAt >= todayIso;
+}
+
+function groupByPlan(users, membershipPlans, todayIso) {
+  const byId = {}; membershipPlans.forEach((p) => { byId[p.id] = p; });
   const map = {};
-  users.filter((u) => u.role === "cliente" && u.planId).forEach((u) => { map[u.planId] = (map[u.planId] || 0) + 1; });
+  users.filter((u) => u.role === "cliente" && isActiveMember(u, byId[u.planId], todayIso)).forEach((u) => { map[u.planId] = (map[u.planId] || 0) + 1; });
   return membershipPlans.filter((p) => p.monthlyPrice > 0).map((p) => ({ label: p.name, value: map[p.id] || 0 }));
+}
+
+// MRR (ingreso mensual recurrente): suma el monthlyPrice de cada socio con plan pago vigente
+// -- a diferencia de "Ingresos totales" (histórico, un evento por cada alta/renovación real en
+// la tabla subscriptions), este número se calcula del ESTADO ACTUAL de cada perfil, así que
+// sigue siendo correcto incluso si a alguien se le activó el plan a mano (o por cualquier vía
+// que no haya dejado un registro en subscriptions) -- no depende de que exista ese historial.
+function computeMRR(users, membershipPlans, todayIso) {
+  const byId = {}; membershipPlans.forEach((p) => { byId[p.id] = p; });
+  return users.filter((u) => u.role === "cliente").reduce((sum, u) => {
+    const plan = byId[u.planId];
+    return isActiveMember(u, plan, todayIso) ? sum + plan.monthlyPrice : sum;
+  }, 0);
+}
+
+// Riesgo de cancelación: socios con plan pago ya vencido (perdieron el beneficio pero el admin
+// puede no haberse dado cuenta -- ya no suman al MRR de arriba) o por vencer dentro de
+// `withinDays`. Ordenado por urgencia: primero los ya vencidos (más tiempo vencido primero),
+// luego los que están por vencer, del más próximo al más lejano.
+function membershipRisk(users, membershipPlans, todayIso, withinDays = 7) {
+  const byId = {}; membershipPlans.forEach((p) => { byId[p.id] = p; });
+  const cutoff = new Date(todayIso + "T00:00:00"); cutoff.setDate(cutoff.getDate() + withinDays);
+  const cutoffIso = cutoff.toISOString().slice(0, 10);
+  return users
+    .filter((u) => u.role === "cliente" && u.planId)
+    .map((u) => ({ user: u, plan: byId[u.planId] }))
+    .filter(({ plan }) => plan && plan.monthlyPrice > 0)
+    .filter(({ user }) => user.planExpiresAt && user.planExpiresAt <= cutoffIso)
+    .map(({ user, plan }) => ({ user, plan, expired: user.planExpiresAt < todayIso }))
+    .sort((a, b) => (a.user.planExpiresAt || "").localeCompare(b.user.planExpiresAt || ""));
 }
 
 /* =========================================================================
@@ -991,7 +1046,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.31.1";
+const APP_VERSION = "2.32.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1205,12 +1260,12 @@ export default function PickleballTournamentApp() {
     createdAt: new Date(r.created_at).getTime(),
   });
   const [bookings, setBookings] = useState([]);
-  useEffect(() => {
-    supabase.from("bookings").select("*").order("created_at").then(({ data, error }) => {
-      if (error) { console.error("fetch bookings:", error.message); return; }
-      setBookings(data.map(mapBookingRow));
-    });
-  }, []);
+  const fetchBookings = async () => {
+    const { data, error } = await supabase.from("bookings").select("*").order("created_at");
+    if (error) { console.error("fetch bookings:", error.message); return; }
+    setBookings(data.map(mapBookingRow));
+  };
+  useEffect(() => { fetchBookings(); }, []);
 
   // ---- Eventos: Open Plays y Clases (Torneos ya tiene su propio estado más abajo) ----
   const [openPlays, setOpenPlays] = useState([]);
@@ -1263,12 +1318,12 @@ export default function PickleballTournamentApp() {
     createdAt: new Date(r.created_at).getTime(),
   });
   const [subscriptions, setSubscriptions] = useState([]);
-  useEffect(() => {
-    supabase.from("subscriptions").select("*").order("created_at").then(({ data, error }) => {
-      if (error) { console.error("fetch subscriptions:", error.message); return; }
-      setSubscriptions(data.map(mapSubscriptionRow));
-    });
-  }, []);
+  const fetchSubscriptions = async () => {
+    const { data, error } = await supabase.from("subscriptions").select("*").order("created_at");
+    if (error) { console.error("fetch subscriptions:", error.message); return; }
+    setSubscriptions(data.map(mapSubscriptionRow));
+  };
+  useEffect(() => { fetchSubscriptions(); }, []);
 
   // ---- Cuentas (login / registro) ----
   // Backend real: Supabase Auth guarda las credenciales; la tabla `profiles` (1:1 con
@@ -1840,6 +1895,17 @@ export default function PickleballTournamentApp() {
   };
   useEffect(() => { fetchOpenPlays(); fetchClasses(); }, []);
 
+  // Todo lo que ve el dashboard de Estadísticas se trae una sola vez al montar la app -- si un
+  // socio se activa desde otra sesión (o el admin lo activa y sigue navegando sin recargar la
+  // página), Ingresos/MRR/Membresías activas se quedan mostrando lo que había al loguearse, no
+  // el estado real (esto es lo que hacía que "Ingresos totales" pudiera verse en $0 después de
+  // activar a alguien: el número era correcto, pero viejo). EstadisticasTab llama esto solo al
+  // entrar al tab, más un botón manual -- no vale la pena un canal realtime todavía para un
+  // club de este tamaño.
+  const refreshStats = async () => {
+    await Promise.all([fetchAllProfiles(), fetchBookings(), fetchSubscriptions(), fetchOpenPlays(), fetchClasses()]);
+  };
+
   // A recurring Open Play (e.g. "Jueves de DUPR, todos los jueves a las 6pm") se guarda como
   // una fila independiente por cada ocurrencia semanal -- todas comparten recurring_group_id
   // (un UUID generado acá, porque Postgres necesita el mismo valor en cada fila del lote)
@@ -2292,7 +2358,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "estadisticas" && role === "admin" && (
             <EstadisticasTab bookings={bookings} openPlays={openPlays} classes={classes} subscriptions={subscriptions}
-              membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories}
+              membershipPlans={membershipPlans} users={users} club={club} courts={courts} categories={categories} refreshStats={refreshStats}
               removeOpenPlayRegistration={removeOpenPlayRegistration} removeClassRegistration={removeClassRegistration}
               setOpenPlayAttendance={setOpenPlayAttendance} setClassAttendance={setClassAttendance}
               setOpenPlayPaymentStatus={setOpenPlayPaymentStatus} setClassPaymentStatus={setClassPaymentStatus} />
@@ -3429,7 +3495,7 @@ function CourtCard({ court, onUpdate, onRemove }) {
 /* =========================================================================
    TAB: ESTADÍSTICAS (panel del administrador)
    ========================================================================= */
-function StatCard({ label, value, icon: Icon }) {
+function StatCard({ label, value, icon: Icon, sub }) {
   return (
     <Card>
       <div className="flex items-center gap-3">
@@ -3439,6 +3505,7 @@ function StatCard({ label, value, icon: Icon }) {
         <div className="min-w-0">
           <p className="disp text-xl truncate" style={{ color: COLORS.courtDark }}>{value}</p>
           <p className="text-xs" style={{ color: "#6B7688" }}>{label}</p>
+          {sub && <p className="text-[10px] mt-0.5 truncate" style={{ color: "#9AA6BC" }}>{sub}</p>}
         </div>
       </div>
     </Card>
@@ -3495,13 +3562,13 @@ function HourLineChart({ data }) {
   );
 }
 
-function HBarList({ data, color = COLORS.court }) {
+function HBarList({ data, color = COLORS.court, money = false }) {
   const max = Math.max(1, ...data.map((d) => d.value));
   return (
     <div className="space-y-2.5">
       {data.map((d, i) => (
         <div key={i}>
-          <div className="flex justify-between text-xs mb-1"><span className="font-medium truncate pr-2">{d.label}</span><span className="mono shrink-0" style={{ color: "#6B7688" }}>{d.value}</span></div>
+          <div className="flex justify-between text-xs mb-1"><span className="font-medium truncate pr-2">{d.label}</span><span className="mono shrink-0" style={{ color: "#6B7688" }}>{money ? formatMoney(d.value) : d.value}</span></div>
           <div className="h-2 rounded-full" style={{ background: "#EDEFF4" }}>
             <div className="h-2 rounded-full" style={{ width: `${(d.value / max) * 100}%`, background: color }} />
           </div>
@@ -3509,6 +3576,39 @@ function HBarList({ data, color = COLORS.court }) {
       ))}
       {data.length === 0 && <p className="text-xs text-gray-400 italic">Sin datos todavía.</p>}
     </div>
+  );
+}
+
+// Riesgo de cancelación (v2.32.0): socios pagos ya vencidos o por vencer pronto -- ver
+// membershipRisk() en los helpers de analytics. Antes esta información no existía en ningún
+// lado; "Vencida" solo se le mostraba al propio socio en su Perfil, el admin no tenía forma de
+// saber quién estaba a punto de dejar de pagar sin revisar usuario por usuario.
+function MembershipRiskCard({ risk }) {
+  const todayMs = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00").getTime();
+  return (
+    <Card>
+      <SectionTitle sub="Socios con plan pago vencido o que vence en los próximos 7 días -- para darles seguimiento antes de perderlos.">Riesgo de cancelación</SectionTitle>
+      {risk.length === 0 ? (
+        <p className="text-sm text-gray-400 italic mt-2">Ningún socio vencido ni por vencer en los próximos 7 días. 🎉</p>
+      ) : (
+        <div className="space-y-1.5 mt-3">
+          {risk.map(({ user, plan, expired }) => {
+            const days = Math.round((new Date(user.planExpiresAt + "T00:00:00").getTime() - todayMs) / 86400000);
+            return (
+              <div key={user.id} className="flex items-center justify-between px-3 py-2.5 rounded-xl gap-3" style={{ background: expired ? "#FBEAE3" : "#FBF3E4" }}>
+                <span className="min-w-0">
+                  <span className="text-sm font-semibold block truncate" style={{ color: COLORS.courtDark }}>{user.name}</span>
+                  <span className="text-xs" style={{ color: "#6B7688" }}>{plan.name} · {formatMoney(plan.monthlyPrice)}/mes</span>
+                </span>
+                <span className="text-xs font-bold text-right shrink-0" style={{ color: expired ? COLORS.clay : "#8A5A16" }}>
+                  {expired ? `Vencida hace ${Math.abs(days)} día${Math.abs(days) === 1 ? "" : "s"}` : days === 0 ? "Vence hoy" : `Vence en ${days} día${days === 1 ? "" : "s"}`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -3627,11 +3727,14 @@ function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegist
    ========================================================================= */
 function UsuariosTab({ users, subscriptions, membershipPlans }) {
   const [query, setQuery] = useState("");
+  const todayIso = new Date().toISOString().slice(0, 10);
 
   const planFor = (u) => (membershipPlans.find((p) => p.id === u.planId) || membershipPlans[0] || null);
 
   const clients = users.filter((u) => u.role === "cliente");
-  const totalMembers = clients.filter((u) => (planFor(u)?.monthlyPrice || 0) > 0).length;
+  // Mismo criterio que Estadísticas (isActiveMember): un plan pago vencido ya no cuenta como
+  // "membresía activa" acá tampoco, para que ambos tabs cuenten lo mismo.
+  const totalMembers = clients.filter((u) => isActiveMember(u, planFor(u), todayIso)).length;
 
   const q = query.trim().toLowerCase();
   const filtered = [...users]
@@ -3672,6 +3775,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
               {filtered.map((u) => {
                 const plan = planFor(u);
                 const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
+                const isExpired = isPaidPlan && !isActiveMember(u, plan, todayIso);
                 return (
                   <tr key={u.id} className="border-t" style={{ borderColor: COLORS.line }}>
                     <td className="py-2 pr-3 font-semibold">{u.name}</td>
@@ -3687,8 +3791,8 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
                       </span>
                     </td>
                     <td className="py-2 pr-3">
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isPaidPlan ? COLORS.court : "#6B7688" }}>
-                        {plan?.name || "Sin membresía"}
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
+                        {plan?.name || "Sin membresía"}{isExpired ? " (vencida)" : ""}
                       </span>
                     </td>
                     <td className="py-2 pr-3 text-gray-500">{formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10))}</td>
@@ -3704,32 +3808,65 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
   );
 }
 
-function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories,
+function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories, refreshStats,
   removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus }) {
+  const todayIso = new Date().toISOString().slice(0, 10);
   const transactions = useMemo(() => buildTransactions(bookings, openPlays, classes, subscriptions), [bookings, openPlays, classes, subscriptions]);
   const byDay = useMemo(() => groupByDay(transactions, 14), [transactions]);
   const byMonth = useMemo(() => groupByMonth(transactions, 6), [transactions]);
+  const byType = useMemo(() => groupByType(transactions), [transactions]);
   const byHour = useMemo(() => groupByHour(bookings, club), [bookings, club]);
   const byZone = useMemo(() => groupByZone(users), [users]);
-  const byPlan = useMemo(() => groupByPlan(users, membershipPlans), [users, membershipPlans]);
+  const byPlan = useMemo(() => groupByPlan(users, membershipPlans, todayIso), [users, membershipPlans, todayIso]);
+  const risk = useMemo(() => membershipRisk(users, membershipPlans, todayIso, 7), [users, membershipPlans, todayIso]);
 
   const totalRevenue = transactions.reduce((s, t) => s + t.usd, 0);
-  const totalMembers = users.filter((u) => u.role === "cliente" && u.planId && membershipPlans.find((p) => p.id === u.planId)?.monthlyPrice > 0).length;
+  // "Activa" ahora exige que planExpiresAt no haya pasado (ver isActiveMember) -- antes un
+  // socio que dejó de pagar hace meses seguía contando para siempre, lo que inflaba este
+  // número y el MRR de abajo sin que hubiera forma de notarlo desde Estadísticas.
+  const totalMembers = users.filter((u) => u.role === "cliente" && isActiveMember(u, membershipPlans.find((p) => p.id === u.planId), todayIso)).length;
   const totalBookings = bookings.filter((b) => b.status !== "cancelada").length;
   const totalClients = users.filter((u) => u.role === "cliente").length;
+  const mrr = useMemo(() => computeMRR(users, membershipPlans, todayIso), [users, membershipPlans, todayIso]);
+  const arpu = totalMembers > 0 ? mrr / totalMembers : 0;
+
+  // Los datos de este tab se traen una sola vez al abrir la app (ver componente principal) --
+  // sin esto, si un socio se activa desde otra sesión (o el admin lo activa y luego navega
+  // directo acá sin recargar la página) "Ingresos totales" y compañía se quedan mostrando lo
+  // que había al momento de loguearse, no el estado real. Se refresca solo al entrar a este
+  // tab, y también hay un botón manual por si el admin quiere confirmar que ve lo último.
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
+  const doRefresh = async () => {
+    setRefreshing(true);
+    await refreshStats();
+    setLastRefreshedAt(Date.now());
+    setRefreshing(false);
+  };
+  useEffect(() => { doRefresh(); }, []);
+  const secsAgo = lastRefreshedAt ? Math.round((Date.now() - lastRefreshedAt) / 1000) : null;
 
   return (
     <div className="mt-2 space-y-6">
-      <SectionTitle sub="Ingresos, horarios pico, membresías y de dónde vienen tus jugadores.">Estadísticas del club</SectionTitle>
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <SectionTitle sub="Ingresos, MRR, riesgo de cancelación, horarios pico y de dónde vienen tus jugadores.">Estadísticas del club</SectionTitle>
+        <button onClick={doRefresh} disabled={refreshing} className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-xl shrink-0"
+          style={{ background: "#EAF0F8", color: COLORS.court, opacity: refreshing ? 0.6 : 1 }}>
+          <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+          {refreshing ? "Actualizando…" : secsAgo != null ? `Actualizado hace ${secsAgo < 5 ? "un instante" : `${secsAgo}s`}` : "Actualizar"}
+        </button>
+      </div>
 
-      <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Ingresos totales" value={formatMoney(totalRevenue)} icon={DollarSign} />
-        <StatCard label="Membresías activas" value={totalMembers} icon={Award} />
+      <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+        <StatCard label="Ingresos totales" value={formatMoney(totalRevenue)} icon={DollarSign} sub="Histórico, todas las fuentes" />
+        <StatCard label="MRR (ingreso mensual recurrente)" value={formatMoney(mrr)} icon={TrendingUp} sub={`${totalMembers} socio${totalMembers === 1 ? "" : "s"} con plan vigente`} />
+        <StatCard label="Ingreso promedio por socio" value={formatMoney(arpu)} icon={Wallet} sub="MRR ÷ membresías activas" />
+        <StatCard label="Membresías activas" value={totalMembers} icon={Award} sub={risk.length > 0 ? `${risk.length} en riesgo` : undefined} />
         <StatCard label="Reservas totales" value={totalBookings} icon={CalendarClock} />
         <StatCard label="Jugadores registrados" value={totalClients} icon={Users} />
       </div>
 
-      <div className="grid md:grid-cols-2 gap-5">
+      <div className="grid md:grid-cols-3 gap-5">
         <Card>
           <SectionTitle sub="Suma de reservas, Open Plays, clases y membresías, últimos 14 días.">Ingresos por día</SectionTitle>
           <MiniBarChart data={byDay} money />
@@ -3737,6 +3874,10 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
         <Card>
           <SectionTitle sub="Mismo total, agrupado por mes (últimos 6 meses).">Ingresos por mes</SectionTitle>
           <MiniBarChart data={byMonth} color={COLORS.clay} money />
+        </Card>
+        <Card>
+          <SectionTitle sub="De dónde sale el dinero, histórico.">Ingresos por categoría</SectionTitle>
+          <HBarList data={byType} color={COLORS.ball} money />
         </Card>
       </div>
 
@@ -3747,7 +3888,7 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
 
       <div className="grid md:grid-cols-2 gap-5">
         <Card>
-          <SectionTitle sub="Cuántos jugadores tienen cada plan activo.">Membresías contratadas</SectionTitle>
+          <SectionTitle sub="Cuántos jugadores tienen cada plan vigente (sin vencer).">Membresías contratadas</SectionTitle>
           <HBarList data={byPlan} color={COLORS.court} />
         </Card>
         <Card>
@@ -3755,6 +3896,8 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
           <HBarList data={byZone} color={COLORS.clay} />
         </Card>
       </div>
+
+      <MembershipRiskCard risk={risk} />
 
       <LoyalClientsCard bookings={bookings} openPlays={openPlays} classes={classes} categories={categories} users={users} />
 
