@@ -219,20 +219,34 @@ function memberDiscountPct(base, memberPrice) {
   return Math.max(0, Math.round((1 - m / b) * 100));
 }
 
-// Precio TOTAL (no por-categoría) por inscribirse en `catCount` categorías de una, en el
-// mismo carrito -- 1/2/3+ categorías tienen su propio precio de bundle (el nivel "3" cubre
-// 3 o más, no hay un cuarto nivel). Presale gana mientras hoy caiga dentro de
-// [presaleStart, presaleEnd] (y esté cargado); si no, cae al precio regular de ese mismo
-// nivel. No lleva cuenta acumulada entre inscripciones separadas en momentos distintos --
-// si el jugador vuelve más tarde a anotarse en una categoría más, ese carrito nuevo arranca
-// su propio nivel 1, no se suma a lo que ya pagó antes.
-function tournamentRegPrice(tournament, catCount) {
-  const tier = Math.min(3, Math.max(1, Number(catCount) || 1));
+// Precio MARGINAL de agregar la categoría #`tier` al carrito (tier 3 cubre la 3ra Y cualquier
+// categoría después de esa, ver tournamentRegPrice -- no hay un cuarto nivel). Presale gana
+// mientras hoy caiga dentro de [presaleStart, presaleEnd] (y esté cargado); si no, cae al
+// precio regular de ese mismo nivel -- un solo carrito no puede pagar parte en presale y parte
+// a precio regular.
+function tournamentTierPrice(tournament, tier) {
   const today = new Date().toISOString().slice(0, 10);
   const inPresale = tournament.presaleStart && tournament.presaleEnd && today >= tournament.presaleStart && today <= tournament.presaleEnd;
   const presale = Number(tournament[`presalePrice${tier}`]) || 0;
   if (inPresale && presale > 0) return presale;
   return Number(tournament[`regularPrice${tier}`]) || 0;
+}
+
+// Precio TOTAL por inscribirse en `catCount` categorías de una, en el mismo carrito. Cada
+// nivel es el precio MARGINAL de agregar esa categoría (ya no un precio de "bundle" fijo por
+// nivel, que fue como funcionó hasta v2.32.0): price1 = precio de la 1ra categoría, price2 =
+// precio de agregar la 2da, price3 = precio de agregar la 3ra -- y cualquier categoría
+// adicional después de la 3ra se cobra también a ese mismo precio marginal. El total se suma:
+// 1 categoría = price1, 2 = price1+price2, 3 o más = price1+price2+price3*(catCount-2).
+// Ejemplo pedido por el club: price1=$20, price2=$10, price3=$5 -> 3 categorías = 20+10+5 =
+// $35. No lleva cuenta acumulada entre inscripciones separadas en momentos distintos -- si el
+// jugador vuelve más tarde a anotarse en una categoría más, ese carrito nuevo arranca su propio
+// nivel 1, no se suma a lo que ya pagó antes.
+function tournamentRegPrice(tournament, catCount) {
+  const n = Math.max(1, Number(catCount) || 1);
+  if (n === 1) return tournamentTierPrice(tournament, 1);
+  if (n === 2) return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2);
+  return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2) + tournamentTierPrice(tournament, 3) * (n - 2);
 }
 
 // Resolves a court's BASE price for a given time-of-day, honoring an optional list of
@@ -243,6 +257,35 @@ function tournamentRegPrice(tournament, catCount) {
 function courtPriceInfo(court, timeMin) {
   const rule = (court.priceRules || []).find((r) => timeMin >= timeToMinutes(r.startTime) && timeMin < timeToMinutes(r.endTime));
   return Number(rule ? rule.price : court.pricePerBlock) || 0;
+}
+
+// Redimensiona una imagen a un máximo de MAX_IMAGE_DIM px y la recomprime a JPEG ~75% vía
+// canvas.toBlob() -- a propósito no usa toDataURL()/FileReader.readAsDataURL: pasar por un
+// string base64 (y luego fetch(dataURL) para reconvertirlo a Blob al subir) es frágil y lento
+// en varios navegadores para archivos de cientos de KB, y es justo lo que hacía que cargar una
+// imagen "tardara" (ver nota en addOpenPlay). Devuelve una promesa con el Blob liviano listo
+// para subir a Supabase Storage -- usado por OpenPlayForm y por el flyer de Torneo.
+const MAX_IMAGE_DIM = 1280;
+function resizeImageToBlob(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale) || 1;
+      const h = Math.round(img.height * scale) || 1;
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      canvas.toBlob((blob) => {
+        if (!blob) reject(new Error("No se pudo procesar esa imagen -- prueba con otro archivo."));
+        else resolve(blob);
+      }, "image/jpeg", 0.75);
+    };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("No se pudo leer esa imagen -- prueba con otro archivo.")); };
+    img.src = objectUrl;
+  });
 }
 
 /* =========================================================================
@@ -1046,7 +1089,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.32.0";
+const APP_VERSION = "2.33.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1428,7 +1471,7 @@ export default function PickleballTournamentApp() {
     presalePrice1: r.presale_price_1 ?? "", presalePrice2: r.presale_price_2 ?? "", presalePrice3: r.presale_price_3 ?? "",
     regStart: r.reg_start || "", regEnd: r.reg_end || "",
     regularPrice1: r.regular_price_1 ?? "", regularPrice2: r.regular_price_2 ?? "", regularPrice3: r.regular_price_3 ?? "",
-    courtIds: r.court_ids || [],
+    courtIds: r.court_ids || [], image: r.image || "",
   });
   // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
   // (antes esto era una fila única fija, `.limit(1)`, y no había forma de crear uno nuevo
@@ -1503,9 +1546,29 @@ export default function PickleballTournamentApp() {
     if ("regularPrice2" in patch) dbPatch.regular_price_2 = patch.regularPrice2 === "" ? null : patch.regularPrice2;
     if ("regularPrice3" in patch) dbPatch.regular_price_3 = patch.regularPrice3 === "" ? null : patch.regularPrice3;
     if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
+    if ("image" in patch) dbPatch.image = patch.image || null;
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
+  };
+
+  // Flyer promocional del torneo (v2.33.0), mismo patrón que addOpenPlay: el archivo ya viene
+  // redimensionado/recomprimido (ver resizeImageToBlob, llamado desde TorneoTab) y se sube UNA
+  // vez a su propio bucket público -- acá solo hace falta subirlo y guardar la URL resultante
+  // en la fila del torneo activo (updateTournament ya sabe persistir "image").
+  const uploadTournamentImage = async (blob) => {
+    if (!tournament) return { error: "No hay torneo seleccionado." };
+    try {
+      const path = `${crypto.randomUUID()}.jpg`;
+      const { error: upErr } = await supabase.storage.from("tournament-images").upload(path, blob, { contentType: "image/jpeg" });
+      if (upErr) throw upErr;
+      const url = supabase.storage.from("tournament-images").getPublicUrl(path).data.publicUrl;
+      updateTournament({ image: url });
+      return {};
+    } catch (err) {
+      console.error("uploadTournamentImage:", err?.message || err);
+      return { error: err?.message || "No se pudo subir la imagen." };
+    }
   };
 
   const [matchDuration, setMatchDuration] = useState(35);
@@ -2389,7 +2452,7 @@ export default function PickleballTournamentApp() {
             activeTournamentId && tournament ? (
               <TorneosSection
                 role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
-                tournament={tournament} setTournament={updateTournament} dates={dates}
+                tournament={tournament} setTournament={updateTournament} uploadTournamentImage={uploadTournamentImage} dates={dates}
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory}
@@ -3057,12 +3120,16 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 // más -- para que inscribirse en varias de una salga más barato por categoría que hacerlo
 // una por una. `field` es el prefijo del patch ("presalePrice" o "regularPrice"); los tres
 // niveles son field+"1"/"2"/"3".
+// Cada campo es el precio MARGINAL de esa categoría, no un total de bundle (v2.33.0) -- 1ra
+// categoría, 2da categoría (lo que se SUMA por agregar una segunda), 3ra en adelante (lo que se
+// suma por cada categoría después de la 2da). Ver tournamentRegPrice para cómo se suman.
 function TieredPriceFields({ tournament, set, field }) {
+  const tierLabel = { 1: "1ra cat.", 2: "+2da cat.", 3: "+3ra cat. c/u" };
   return (
     <div className="grid grid-cols-3 gap-2">
       {[1, 2, 3].map((n) => (
         <div key={n}>
-          <p className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>{n === 3 ? "3+ cat." : `${n} cat.`}</p>
+          <p className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>{tierLabel[n]}</p>
           <div className="relative">
             <DollarSign size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" color="#78829A" />
             <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 26, fontSize: 13 }}
@@ -3074,10 +3141,30 @@ function TieredPriceFields({ tournament, set, field }) {
   );
 }
 
-function TorneoTab({ tournament, setTournament: updateTournament, dates, courts, club, categories, occupiedKeys }) {
+function TorneoTab({ tournament, setTournament: updateTournament, uploadTournamentImage, dates, courts, club, categories, occupiedKeys }) {
   const set = (k, v) => updateTournament({ [k]: v });
   const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
   const isPublished = tournament.status === "published";
+
+  // Flyer promocional del torneo (v2.33.0), mismo patrón que OpenPlayForm/resizeImageToBlob --
+  // a diferencia de Open Play (formulario de una sola pasada), Generalidades autoguarda campo
+  // por campo, así que la imagen se sube DE UNA al elegir el archivo (no hay botón "Guardar"
+  // que la dispare después) y uploadTournamentImage ya deja la URL puesta en el torneo.
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageError, setImageError] = useState("");
+  const handleImage = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setImageError(""); setImageUploading(true);
+    try {
+      const blob = await resizeImageToBlob(f);
+      const result = await uploadTournamentImage(blob);
+      if (result?.error) setImageError(result.error);
+    } catch (err) {
+      setImageError(err.message);
+    }
+    setImageUploading(false);
+  };
 
   // Aviso informativo (v2.24.0), NO bloqueante -- a diferencia de Open Play/Clase, un torneo
   // no "reserva" bloques al guardar estos campos: el calendario real lo arma runScheduler
@@ -3139,6 +3226,20 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts,
           <div>
             <Label>Nombre del torneo</Label>
             <input style={inputStyle} value={tournament.name} onChange={(e) => set("name", e.target.value)} placeholder="Copa Verano Pickleball" />
+          </div>
+          <div>
+            <Label>Imagen (flyer promocional, opcional)</Label>
+            <div className="flex items-center gap-3">
+              {tournament.image && (
+                <img src={tournament.image} alt="Flyer del torneo" className="w-14 h-14 rounded-xl object-cover shrink-0" style={{ border: `1px solid ${COLORS.line}` }} />
+              )}
+              <label className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm cursor-pointer" style={{ border: `1.5px dashed ${COLORS.line}`, color: tournament.image ? COLORS.court : "#6B7688" }}>
+                <ImageIcon size={14} /> {imageUploading ? "Subiendo imagen…" : tournament.image ? "Imagen actual -- toca para cambiarla" : "Subir imagen"}
+                <input type="file" accept="image/*" className="hidden" onChange={handleImage} disabled={imageUploading} />
+              </label>
+            </div>
+            {imageError && <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>{imageError}</p>}
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se muestra en la tarjeta del torneo en Actividades, igual que la imagen de un Open Play.</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -3222,9 +3323,9 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts,
               </div>
             </div>
             <div>
-              <Label>Precio de preventa (por cantidad de categorías)</Label>
+              <Label>Precio de preventa (por categoría inscrita)</Label>
               <TieredPriceFields tournament={tournament} set={set} field="presalePrice" />
-              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Es el precio TOTAL de inscribirse en esa cantidad de categorías de una, no por-categoría multiplicado -- 3+ cubre 3 o más.</p>
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se suman: "1ra cat." es el precio de inscribirse en una sola categoría, "+2da cat." es lo que se AGREGA por anotarse en una segunda, y "+3ra cat. c/u" es lo que se agrega por cada categoría después de esa. Ej: 20 + 10 + 5 → inscribirse en 3 categorías junto cuesta $35.</p>
             </div>
           </div>
         </Card>
@@ -3242,9 +3343,9 @@ function TorneoTab({ tournament, setTournament: updateTournament, dates, courts,
             </div>
           </div>
           <div className="mt-3">
-            <Label>Precio regular, fuera de preventa (por cantidad de categorías)</Label>
+            <Label>Precio regular, fuera de preventa (por categoría inscrita)</Label>
             <TieredPriceFields tournament={tournament} set={set} field="regularPrice" />
-            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Precio TOTAL de inscribirse en esa cantidad de categorías de una -- 3+ cubre 3 o más.</p>
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Mismo criterio que la preventa: se suman. "1ra cat." + "+2da cat." + "+3ra cat. c/u" por cada categoría adicional.</p>
           </div>
         </Card>
       </div>
@@ -4029,7 +4130,7 @@ function TorneosSection(props) {
   }, [role]);
 
   const {
-    tournament, setTournament, dates, categories, activeCat, setActiveCatId,
+    tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
     addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, setTeamPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
@@ -4068,7 +4169,7 @@ function TorneosSection(props) {
       </div>
 
       {subTab === "config" && role === "admin" && (
-        <TorneoTab tournament={tournament} setTournament={setTournament} dates={dates} courts={courts}
+        <TorneoTab tournament={tournament} setTournament={setTournament} uploadTournamentImage={uploadTournamentImage} dates={dates} courts={courts}
           club={club} categories={categories} occupiedKeys={occupiedKeys} />
       )}
 
@@ -5240,13 +5341,13 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const [done, setDone] = useState(null); // nombres de las categorías recién confirmadas
 
   const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
-  // Precio TOTAL del carrito según cuántas categorías se eligieron de una (1/2/3+ tienen su
-  // propio precio de bundle, ver tournamentRegPrice) -- ya NO es un precio por categoría que
-  // se multiplica. pricePerTeam reparte ese total en partes iguales entre los equipos que se
-  // van a crear, para que la suma de priceUsd guardada en cada equipo dé el total real
-  // cobrado (buildClientActivity() suma priceUsd por jugador para las estadísticas del
-  // club -- si acá se guardara el total completo en cada equipo, esa suma inflaría el
-  // ingreso real del carrito por la cantidad de categorías elegidas).
+  // Precio TOTAL del carrito según cuántas categorías se eligieron de una -- cada una suma su
+  // propio precio marginal (ver tournamentRegPrice, v2.33.0: 1ra + 2da + 3ra en adelante,
+  // c/u). pricePerTeam reparte ese total en partes iguales entre los equipos que se van a
+  // crear, para que la suma de priceUsd guardada en cada equipo dé el total real cobrado
+  // (buildClientActivity() suma priceUsd por jugador para las estadísticas del club -- si acá
+  // se guardara el total completo en cada equipo, esa suma inflaría el ingreso real del
+  // carrito por la cantidad de categorías elegidas).
   const total = selectedCats.length > 0 ? tournamentRegPrice(tournament, selectedCats.length) : 0;
   const pricePerTeam = selectedCats.length > 0 ? total / selectedCats.length : 0;
   const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]?.name);
@@ -5282,21 +5383,27 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
         Categorías abiertas
       </SectionTitle>
 
-      {/* Precio de bundle: cuanto más categorías elijas de una, más barato sale por
-         categoría -- se muestra antes de la lista para que el jugador sepa el trato de
-         entrada, ya que las tarjetas de abajo ya no llevan un precio fijo por categoría
-         (dejó de tener sentido, el total depende de cuántas se elijan juntas). */}
+      {/* Precio acumulado por categorías elegidas juntas -- cada una SUMA su propio precio
+         marginal (v2.33.0, ver tournamentRegPrice), ya no es un precio de bundle fijo. Se
+         muestra antes de la lista para que el jugador sepa el trato de entrada, ya que las
+         tarjetas de abajo ya no llevan un precio fijo por categoría (depende de cuántas se
+         elijan juntas). */}
       {[1, 2, 3].some((n) => tournamentRegPrice(tournament, n) > 0) && (
-        <div className="flex flex-wrap gap-2 mb-4">
-          {[1, 2, 3].map((n) => {
-            const price = tournamentRegPrice(tournament, n);
-            if (!price) return null;
-            return (
-              <span key={n} className="text-xs px-3 py-1.5 rounded-full font-semibold" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                {n === 3 ? "3+" : n} categoría{n === 1 ? "" : "s"}: <b>{formatMoney(price)}</b>
-              </span>
-            );
-          })}
+        <div className="mb-4">
+          <div className="flex flex-wrap gap-2">
+            {[1, 2, 3].map((n) => {
+              const price = tournamentRegPrice(tournament, n);
+              if (!price) return null;
+              return (
+                <span key={n} className="text-xs px-3 py-1.5 rounded-full font-semibold" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                  {n} categoría{n === 1 ? "" : "s"}: <b>{formatMoney(price)}</b>
+                </span>
+              );
+            })}
+          </div>
+          {tournamentTierPrice(tournament, 3) > 0 && (
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Cada categoría adicional después de la 3ra suma {formatMoney(tournamentTierPrice(tournament, 3))} más.</p>
+          )}
         </div>
       )}
 
@@ -5382,21 +5489,27 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
             </div>
 
             <div className="space-y-1.5 mb-4">
-              {selectedCats.map((c) => {
+              {/* Precio marginal por línea (v2.33.0): la 1ra categoría marcada muestra el
+                 precio de tier 1, la 2da el de tier 2, y la 3ra en adelante el de tier 3 --
+                 mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo se
+                 arma la suma antes de pagar. */}
+              {selectedCats.map((c, i) => {
                 const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
+                const tierPrice = tournamentTierPrice(tournament, Math.min(3, i + 1));
                 return (
-                  <div key={c.id} className="px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
-                    <p className="font-semibold" style={{ color: COLORS.ink }}>
-                      {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
-                    </p>
-                    {c.modality !== "individual" && (
-                      <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
-                    )}
+                  <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                    <div className="min-w-0">
+                      <p className="font-semibold truncate" style={{ color: COLORS.ink }}>
+                        {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                      </p>
+                      {c.modality !== "individual" && (
+                        <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
+                      )}
+                    </div>
+                    <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
                   </div>
                 );
               })}
-              {/* No hay precio por línea -- el total es de bundle según cuántas categorías se
-                 eligieron juntas, no una suma de precios individuales (ver tournamentRegPrice). */}
               <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm font-bold" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
                 <span>Total ({selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"})</span>
                 <span className="mono">{formatMoney(total)}</span>
@@ -6074,35 +6187,19 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
   const [imageError, setImageError] = useState("");
   // Se sube a Supabase Storage como Blob directo (ver addOpenPlay) y una serie recurrente
   // reutiliza la misma URL en todas sus ocurrencias -- por eso aquí solo hace falta un Blob
-  // liviano, no un data URL. Se reescala a un máximo de 1280px y se recomprime a JPEG ~75%
-  // con canvas.toBlob() -- a propósito NO se usa toDataURL()/FileReader.readAsDataURL: pasar
-  // por un string base64 (y luego fetch(dataURL) para reconvertirlo a Blob al subir) es lo
-  // que hacía que cargar una imagen "tardara" y lo más probable detrás de que las series
-  // largas siguieran fallando -- fetch() sobre data: URIs grandes es frágil en varios
-  // navegadores. canvas.toBlob() + URL.createObjectURL() nunca generan ese string gigante.
-  const MAX_IMAGE_DIM = 1280;
-  const handleImage = (e) => {
+  // liviano, no un data URL. El reescalado/recompresión vive en resizeImageToBlob() (helper
+  // compartido con el flyer de Torneo, ver TorneoTab) -- ver esa función para el porqué de
+  // canvas.toBlob() en vez de toDataURL()/FileReader.readAsDataURL.
+  const handleImage = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     setImageError(""); setImageProcessing(true);
-    const objectUrl = URL.createObjectURL(f);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
-      const w = Math.round(img.width * scale) || 1;
-      const h = Math.round(img.height * scale) || 1;
-      const canvas = document.createElement("canvas");
-      canvas.width = w; canvas.height = h;
-      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      canvas.toBlob((blob) => {
-        setImageProcessing(false);
-        if (!blob) { setImageError("No se pudo procesar esa imagen -- prueba con otro archivo."); return; }
-        setImageBlob(blob);
-      }, "image/jpeg", 0.75);
-    };
-    img.onerror = () => { URL.revokeObjectURL(objectUrl); setImageProcessing(false); setImageError("No se pudo leer esa imagen -- prueba con otro archivo."); };
-    img.src = objectUrl;
+    try {
+      setImageBlob(await resizeImageToBlob(f));
+    } catch (err) {
+      setImageError(err.message);
+    }
+    setImageProcessing(false);
   };
 
   // Choque de horario (v2.24.0): las fechas a validar son las de la serie existente cuando se
@@ -6909,6 +7006,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       // categorías todavía" con "hay categorías pero nadie se anotó aún" -- distinguir los
       // dos casos importa más ahora que hay varias tarjetas de torneo a la vez.
       const noCatsYet = tCats.length === 0;
+      // Precio de inscripción (v2.33.0): antes decía "Ver detalles", sin ninguna cifra, a
+      // diferencia de Open Play/Clase que sí muestran su precio en la card. Se usa el precio
+      // de la 1ra categoría (tournamentRegPrice con catCount=1) como entrada -- "Desde" porque
+      // sumar más categorías en el mismo carrito cuesta más, nunca menos (ver
+      // tournamentRegPrice/InscripcionTab).
+      const entryPrice = tournamentRegPrice(t, 1);
       items.push({
         key: `t-${t.id}`, kind: "torneo", title: t.name || "Torneo del club",
         description: noCatsYet ? "Sin categorías aún." : `${tCats.length} categoría(s) abiertas.`,
@@ -6916,7 +7019,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // pasada" o filtrarlo por día de la semana necesita el rango completo, no solo el
         // primer día.
         date: t.startDate, endDate: t.endDate, startTime: t.dailyStart, endTime: t.dailyEnd,
-        price: "Ver detalles", image: null, recurring: false,
+        price: entryPrice > 0 ? `Desde ${formatMoney(entryPrice)}` : "Gratis", image: t.image || null, recurring: false,
         meta: { text: noCatsYet ? "Sin categorías aún" : `${teamCount} equipo(s) inscrito(s)` },
         onClick: () => openTournament(t.id),
         // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
