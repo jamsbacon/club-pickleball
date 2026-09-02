@@ -1,0 +1,14 @@
+-- v2.29.0: los planes de membresía (Plan PRO y Plan VIP) prometen "Precio Open Play: 100%
+-- (Gratis)" en su propio rate card -- pero esa promesa nunca estuvo conectada al precio real
+-- que paga un miembro al inscribirse a un Open Play (memberPrice vive en cada open_play,
+-- independiente del rate card del plan, por diseño -- ver nota en App.jsx). Alguien del club
+-- creó "Lunes de DUPR" y "Martes de escalera" con un member_price manual (5 en ambos casos,
+-- contra un price de 7 y 5 respectivamente) que no refleja el 100% prometido -- de ahí salía
+-- el 29% de descuento que se vio en pruebas (no es un número que Claude haya inventado, es
+-- round((1 - 5/7) * 100)).
+--
+-- Fix: todo Open Play existente pasa a member_price = 0 (gratis para cualquier plan pago).
+-- El default del formulario de creación (OpenPlayForm) también cambia de 5 a 0 para que un
+-- Open Play nuevo nazca ya alineado con la política del club, en vez de depender de que el
+-- admin se acuerde de ponerlo en cero cada vez.
+update public.open_plays set member_price = 0 where member_price <> 0;

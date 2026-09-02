@@ -987,7 +987,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.28.0";
+const APP_VERSION = "2.29.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5840,7 +5840,10 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
   const [imageProcessing, setImageProcessing] = useState(false);
   const [level, setLevel] = useState(initial?.level ?? "Todos");
   const [price, setPrice] = useState(initial?.price ?? 5);
-  const [memberPrice, setMemberPrice] = useState(initial?.memberPrice ?? 5);
+  // Default 0 (v2.29.0), no 5 -- Plan PRO y Plan VIP prometen "100% (Gratis)" en Open Plays
+  // dentro de su propio rate card (Membresías); si esto arranca en un número distinto de 0,
+  // el precio real que paga un socio deja de coincidir con lo que el club promete ahí.
+  const [memberPrice, setMemberPrice] = useState(initial?.memberPrice ?? 0);
   const [description, setDescription] = useState(initial?.description ?? "");
   const [courtIds, setCourtIds] = useState(initial?.courtIds ?? []);
   const [date, setDate] = useState(initial?.date ?? "");
@@ -5934,7 +5937,15 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
           <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
+          <div>
+            <Label>Precio con membresía (USD)</Label>
+            <input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} />
+            {Number(memberPrice) > 0 && (
+              <p className="text-[11px] mt-1" style={{ color: "#8A5A16" }}>
+                Plan PRO y VIP prometen Open Plays gratis en su tabla de Membresías -- deja esto en $0.00 salvo que quieras cobrarles igual.
+              </p>
+            )}
+          </div>
           <div><Label>Cupos (quorum máximo)</Label><input type="number" min={1} style={inputStyle} value={capacity} onChange={(e) => setCapacity(e.target.value)} /></div>
         </div>
         <div><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 70 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
@@ -6553,6 +6564,16 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
 
   const classSeriesForKey = (key) => classSeries.find((list) => (list[0].recurringGroupId || list[0].id) === key);
 
+  // Un socio activo (cualquier plan pago) ve el precio de miembro directo en la tarjeta de la
+  // lista -- "Gratis" si esa actividad es de cortesía para su plan -- en vez del precio base
+  // que ve un no-socio. Antes la tarjeta siempre mostraba rep.price sin importar quién mirara
+  // (v2.29.0): un miembro solo veía su precio real al entrar al detalle, no antes.
+  const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
+  const displayPrice = (rep) => {
+    const usd = isMember ? (rep.memberPrice ?? rep.price) : rep.price;
+    return usd > 0 ? formatMoney(usd) : "Gratis";
+  };
+
   // One flat, browsable list mixing Open Plays, Clases and the tournament — this is what
   // feeds the search box and the "Disponibles ahora / Open Plays / Clases / Torneos" chips.
   const listItems = useMemo(() => {
@@ -6566,7 +6587,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         key: `op-${key}`, kind: "open_play", title: rep.name,
         description: rep.description || `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
-        price: rep.price > 0 ? formatMoney(rep.price) : "Gratis", image: rep.image, recurring: isSeries,
+        price: displayPrice(rep), image: rep.image, recurring: isSeries,
         meta: slotsLeft !== null
           ? { text: slotsLeft > 0 ? `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}` : "Cupo lleno", full: slotsLeft === 0 }
           : { text: `${rep.registrations.length} inscrito(s)` },
@@ -6580,7 +6601,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       items.push({
         key: `cl-${key}`, kind: "clase", title: rep.academyName, description: `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
-        price: rep.price > 0 ? formatMoney(rep.price) : "Gratis", image: null, recurring: isSeries,
+        price: displayPrice(rep), image: null, recurring: isSeries,
         meta: { text: `${rep.registrations.length} inscrito(s)` },
         onClick: () => setSelected({ kind: "clase", key }),
       });
@@ -6607,7 +6628,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       });
     });
     return items;
-  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament]);
+  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament, isMember]);
 
   const filteredItems = listItems.filter((it) => {
     if (filterKind !== "all" && it.kind !== filterKind) return false;
