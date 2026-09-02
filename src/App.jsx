@@ -25,7 +25,11 @@ const uid = (p = "id") => `${p}_${__id++}`;
 // `initialPaymentStatus` calcula el estado de arranque a partir del método elegido en
 // CheckoutPanel -- efectivo nunca arranca "verificado" solo por completar el checkout, porque
 // nadie del club ha visto el dinero todavía.
-const initialPaymentStatus = (paymentMethod) => (paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo");
+// `priceUsd` es opcional -- cuando el total a cobrar es $0 (100% de descuento de plan, o un
+// bloque gratis de cupo mensual, v2.30.0) no hay nada que verificar, así que arranca
+// "confirmada" directo sin importar el método elegido.
+const initialPaymentStatus = (paymentMethod, priceUsd) =>
+  (priceUsd != null && Number(priceUsd) === 0) ? "confirmada" : (paymentMethod === "movil" ? "pendiente_verificacion" : "pendiente_efectivo");
 const PAYMENT_STATUS_META = {
   pendiente_efectivo: { label: "Por pagar", bg: "#EDEFF4", fg: "#6B7688" },
   pendiente_verificacion: { label: "Pago por verificar", bg: "#FBF3E4", fg: "#8A5A16" },
@@ -230,14 +234,14 @@ function tournamentRegPrice(tournament, catCount) {
   return Number(tournament[`regularPrice${tier}`]) || 0;
 }
 
-// Resolves a court's price for a given time-of-day, honoring an optional list of
+// Resolves a court's BASE price for a given time-of-day, honoring an optional list of
 // time-window overrides (peak/off-peak pricing) before falling back to the court's base price.
+// Used to just return {base, member} -- member pricing moved to the membership plan's own
+// courtDiscountPct (v2.30.0, see ReservasTab), applied uniformly on top of whatever this
+// returns instead of a flat per-court/per-rule override that could drift from the plan.
 function courtPriceInfo(court, timeMin) {
   const rule = (court.priceRules || []).find((r) => timeMin >= timeToMinutes(r.startTime) && timeMin < timeToMinutes(r.endTime));
-  const base = Number(rule ? rule.price : court.pricePerBlock) || 0;
-  const memberRaw = rule ? rule.memberPrice : court.memberPrice;
-  const member = memberRaw === undefined || memberRaw === null || memberRaw === "" ? base : Number(memberRaw) || 0;
-  return { base, member };
+  return Number(rule ? rule.price : court.pricePerBlock) || 0;
 }
 
 /* =========================================================================
@@ -987,7 +991,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.29.0";
+const APP_VERSION = "2.30.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1196,7 +1200,7 @@ export default function PickleballTournamentApp() {
   const mapBookingRow = (r) => ({
     id: r.id, courtId: r.court_id, date: r.date, timeMin: r.time_min, blockMinutes: r.block_minutes,
     userId: r.user_id, userName: r.user_name, status: r.status, paymentMethod: r.payment_method,
-    reference: r.reference, proofName: r.proof_name,
+    reference: r.reference, proofName: r.proof_name, freeBlock: !!r.free_block,
     priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
     createdAt: new Date(r.created_at).getTime(),
   });
@@ -1213,17 +1217,28 @@ export default function PickleballTournamentApp() {
   const [classes, setClasses] = useState([]);
 
   // ---- Membresías ----
-  // Each plan carries a "rateCard" — free-form priced line items (court booking, Open Plays,
-  // league days, monthly classes, drills, etc.) shown side-by-side in the comparison table.
-  // Real checkout math for courts/Open Plays/classes reads the flat memberPrice set on each
-  // item instead (see courtPriceInfo/memberDiscountPct) — the rateCard here is the plan's
-  // advertised rate sheet, editable independently of what's actually been created yet.
+  // Each plan carries a "rateCard" — free-form line items (league days, drills, etc.) for
+  // anything that doesn't have a real booking flow yet. Court reservations and Open Plays
+  // used to read a flat memberPrice set on each individual item instead, completely
+  // disconnected from what the plan itself advertised (courtPriceInfo/memberDiscountPct) --
+  // that's exactly what let a court/Open Play drift out of sync with its own plan's promised
+  // discount (v2.29.0 fixed one instance of this; v2.30.0 removes the whole failure mode).
+  // courtDiscountPct/openPlayDiscountPct/freeBlocksPerMonth are now the single source of
+  // truth for those two categories — editing the plan changes the real price everywhere
+  // instantly. Classes keep their own item-level memberPrice: the club never defined a
+  // plan-wide class discount, so there's nothing real to migrate there yet.
   const mapPlanRow = (r) => ({
     id: r.id, name: r.name, monthlyPrice: Number(r.monthly_price), privateCourtAccess: r.private_court_access,
     maxMembers: r.max_members != null ? Number(r.max_members) : null,
     // Cuántas horas de anticipación puede reservar cancha/actividades alguien con este plan
     // (v2.27.0) -- 48h por defecto si el plan es viejo y no trae el campo todavía.
     bookingWindowHours: r.booking_window_hours != null ? Number(r.booking_window_hours) : 48,
+    // % de descuento sobre el precio base de cancha/Open Play para socios de este plan
+    // (v2.30.0), y cuántos bloques de cancha completamente gratis (fuera de horario pico y
+    // fuera de días de torneo) tiene cada socio por mes calendario.
+    courtDiscountPct: r.court_discount_pct != null ? Number(r.court_discount_pct) : 0,
+    openPlayDiscountPct: r.open_play_discount_pct != null ? Number(r.open_play_discount_pct) : 0,
+    freeBlocksPerMonth: r.free_blocks_per_month != null ? Number(r.free_blocks_per_month) : 0,
     description: r.description || "",
     // `value` es texto libre ya formateado ("4/mes", "100% (Gratis)", "5 días"...) -- un
     // precio numérico no alcanza a representar todos los beneficios del rate card (v2.22.0).
@@ -1751,11 +1766,14 @@ export default function PickleballTournamentApp() {
 
   // ---- Reservas ----
   const createBooking = async (data) => {
-    const status = initialPaymentStatus(data.paymentMethod);
+    // `free_block` (cupo mensual gratis del plan, v2.30.0) es lo que deja contar cuántos
+    // bloques gratis ya usó este socio este mes (ver ReservasTab) -- el estado de pago sale
+    // solo de priceUsd (0 => "confirmada" directo, nada que verificar).
+    const status = initialPaymentStatus(data.paymentMethod, data.priceUsd);
     const { data: row, error } = await supabase.from("bookings").insert({
       court_id: data.courtId, date: data.date, time_min: data.timeMin, block_minutes: data.blockMinutes,
-      user_id: data.userId, user_name: data.userName, status,
-      payment_method: data.paymentMethod, reference: data.reference, proof_name: data.proofName,
+      user_id: data.userId, user_name: data.userName, status, free_block: !!data.freeBlock,
+      payment_method: data.freeBlock ? null : data.paymentMethod, reference: data.reference, proof_name: data.proofName,
       price_usd: data.priceUsd, price_bs: data.priceBs,
     }).select().single();
     if (error) { console.error("createBooking:", error.message); return null; }
@@ -2029,7 +2047,7 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("open_play_registrations").insert({
       open_play_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
       reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
-      payment_status: initialPaymentStatus(reg.paymentMethod),
+      payment_status: initialPaymentStatus(reg.paymentMethod, reg.priceUsd),
     }).select().single();
     if (error) { console.error("registerForOpenPlay:", error.message); return; }
     setOpenPlays((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
@@ -2038,7 +2056,7 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("class_registrations").insert({
       class_id: id, user_id: reg.userId, user_name: reg.userName, payment_method: reg.paymentMethod,
       reference: reg.reference, proof_name: reg.proofName, price_usd: reg.priceUsd, price_bs: reg.priceBs,
-      payment_status: initialPaymentStatus(reg.paymentMethod),
+      payment_status: initialPaymentStatus(reg.paymentMethod, reg.priceUsd),
     }).select().single();
     if (error) { console.error("registerForClass:", error.message); return; }
     setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
@@ -2088,6 +2106,8 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("membership_plans").insert({
       name: plan.name, monthly_price: plan.monthlyPrice, private_court_access: plan.privateCourtAccess,
       max_members: plan.maxMembers === "" ? null : plan.maxMembers, booking_window_hours: plan.bookingWindowHours,
+      court_discount_pct: plan.courtDiscountPct, open_play_discount_pct: plan.openPlayDiscountPct,
+      free_blocks_per_month: plan.freeBlocksPerMonth,
       description: plan.description, rate_card: plan.rateCard,
     }).select().single();
     if (error) { console.error("addMembershipPlan:", error.message); return; }
@@ -2101,6 +2121,9 @@ export default function PickleballTournamentApp() {
     if ("privateCourtAccess" in patch) dbPatch.private_court_access = patch.privateCourtAccess;
     if ("maxMembers" in patch) dbPatch.max_members = patch.maxMembers === "" ? null : patch.maxMembers;
     if ("bookingWindowHours" in patch) dbPatch.booking_window_hours = patch.bookingWindowHours;
+    if ("courtDiscountPct" in patch) dbPatch.court_discount_pct = patch.courtDiscountPct;
+    if ("openPlayDiscountPct" in patch) dbPatch.open_play_discount_pct = patch.openPlayDiscountPct;
+    if ("freeBlocksPerMonth" in patch) dbPatch.free_blocks_per_month = patch.freeBlocksPerMonth;
     if ("description" in patch) dbPatch.description = patch.description;
     if ("rateCard" in patch) dbPatch.rate_card = patch.rateCard;
     supabase.from("membership_plans").update(dbPatch).eq("id", id).then(({ error }) => {
@@ -3172,7 +3195,6 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
-  const [memberPrice, setMemberPrice] = useState(8);
   const [hasSpecialPricing, setHasSpecialPricing] = useState(false);
   const [newRules, setNewRules] = useState([]);
   const setC = (k, v) => updateClub({ [k]: v });
@@ -3181,10 +3203,10 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
   const handleAddCourt = () => {
     const n = name.trim() || `Cancha ${courts.length + 1}`;
     addCourt({
-      name: n, isPrivate, pricePerBlock: Number(price) || 0, memberPrice: Number(memberPrice) || 0,
+      name: n, isPrivate, pricePerBlock: Number(price) || 0,
       priceRules: hasSpecialPricing ? newRules : [],
     });
-    setName(""); setIsPrivate(false); setPrice(8); setMemberPrice(8); setHasSpecialPricing(false); setNewRules([]);
+    setName(""); setIsPrivate(false); setPrice(8); setHasSpecialPricing(false); setNewRules([]);
   };
 
   const blocksPerDay = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes).length;
@@ -3273,8 +3295,8 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
       </Card>
 
       <Card>
-        <SectionTitle sub="Cada cancha puede ser pública (cualquiera reserva) o privada (prioridad para miembros), con precio normal, precio con membresía, y horarios con precio especial.">Canchas</SectionTitle>
-        <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+        <SectionTitle sub="Cada cancha puede ser pública (cualquiera reserva) o privada (prioridad para miembros). El precio con membresía sale solo del % de descuento en canchas que definas por plan, en Membresías.">Canchas</SectionTitle>
+        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 mb-2">
           <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Cancha 3" /></div>
           <div>
             <Label>Acceso</Label>
@@ -3282,7 +3304,6 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
               options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
           </div>
           <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
-          <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         </div>
 
         <div className="rounded-xl p-3 mb-4" style={{ background: "#EEF1F7" }}>
@@ -3322,18 +3343,19 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
 }
 
 // Shared by the "add court" form and each existing CourtCard — a small list of
-// {startTime, endTime, price, memberPrice} time-window overrides (e.g. tarifa nocturna,
-// fin de semana) that courtPriceInfo() checks before falling back to the court's base price.
+// {startTime, endTime, price} time-window overrides (e.g. tarifa nocturna, fin de semana)
+// that courtPriceInfo() checks before falling back to the court's base price. No memberPrice
+// per rule anymore (v2.30.0) -- el descuento de socio sale del plan, parejo en cualquier
+// horario, no de un segundo precio cargado a mano por cada regla.
 function PriceRuleEditor({ rules, onChange }) {
   const [from, setFrom] = useState("18:00");
   const [to, setTo] = useState("22:00");
   const [rulePrice, setRulePrice] = useState(0);
-  const [ruleMemberPrice, setRuleMemberPrice] = useState(0);
 
   const addRule = () => {
     if (!from || !to || from >= to) return;
-    onChange([...rules, { id: uid("rule"), startTime: from, endTime: to, price: Number(rulePrice) || 0, memberPrice: Number(ruleMemberPrice) || 0 }]);
-    setRulePrice(0); setRuleMemberPrice(0);
+    onChange([...rules, { id: uid("rule"), startTime: from, endTime: to, price: Number(rulePrice) || 0 }]);
+    setRulePrice(0);
   };
   const removeRule = (id) => onChange(rules.filter((r) => r.id !== id));
 
@@ -3341,15 +3363,14 @@ function PriceRuleEditor({ rules, onChange }) {
     <div className="space-y-2">
       {rules.map((r) => (
         <div key={r.id} className="flex items-center justify-between px-2.5 py-2 rounded-lg text-xs" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
-          <span>{formatTimeAmPm(r.startTime)}–{formatTimeAmPm(r.endTime)} · {formatMoney(r.price)} normal / {formatMoney(r.memberPrice ?? r.price)} miembro</span>
+          <span>{formatTimeAmPm(r.startTime)}–{formatTimeAmPm(r.endTime)} · {formatMoney(r.price)}</span>
           <button onClick={() => removeRule(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
         </div>
       ))}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 items-end">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 items-end">
         <div><Label>Desde</Label><input type="time" style={inputStyle} value={from} onChange={(e) => setFrom(e.target.value)} /></div>
         <div><Label>Hasta</Label><input type="time" style={inputStyle} value={to} onChange={(e) => setTo(e.target.value)} /></div>
-        <div><Label>Precio normal</Label><input type="number" min={0} style={inputStyle} value={rulePrice} onChange={(e) => setRulePrice(e.target.value)} /></div>
-        <div><Label>Precio miembro</Label><input type="number" min={0} style={inputStyle} value={ruleMemberPrice} onChange={(e) => setRuleMemberPrice(e.target.value)} /></div>
+        <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={rulePrice} onChange={(e) => setRulePrice(e.target.value)} /></div>
         <button onClick={addRule} className="py-2.5 rounded-lg text-xs font-bold h-[38px]" style={{ background: COLORS.court, color: "#fff" }}>
           <Plus size={14} className="inline" />
         </button>
@@ -3359,7 +3380,7 @@ function PriceRuleEditor({ rules, onChange }) {
 }
 
 // A single court row in the admin's Canchas list — click the pencil to edit its name,
-// access, base/member price and its time-based special-pricing rules in place.
+// access, base price and its time-based special-pricing rules in place.
 function CourtCard({ court, onUpdate, onRemove }) {
   const [editing, setEditing] = useState(false);
   const rules = court.priceRules || [];
@@ -3379,9 +3400,7 @@ function CourtCard({ court, onUpdate, onRemove }) {
           )}
         </span>
         <div className="flex items-center gap-3">
-          <span className="mono text-xs" style={{ color: "#6B7688" }}>
-            {formatMoney(court.pricePerBlock)} <span style={{ color: "#9AA6BC" }}>normal</span> · {formatMoney(court.memberPrice ?? court.pricePerBlock)} <span style={{ color: "#9AA6BC" }}>miembro</span>
-          </span>
+          <span className="mono text-xs" style={{ color: "#6B7688" }}>{formatMoney(court.pricePerBlock)}</span>
           <button onClick={() => setEditing((s) => !s)} style={{ color: editing ? COLORS.court : "#9AA6BC" }}><Pencil size={14} /></button>
           <button onClick={onRemove} className="text-gray-400 hover:text-red-500"><Trash2 size={15} /></button>
         </div>
@@ -3389,14 +3408,13 @@ function CourtCard({ court, onUpdate, onRemove }) {
 
       {editing && (
         <div className="px-3 pb-3 pt-2 space-y-3" style={{ borderTop: `1px solid ${COLORS.line}`, background: "#fff" }}>
-          <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-2">
+          <div className="grid sm:grid-cols-3 gap-2">
             <div><Label>Nombre</Label><input style={inputStyle} value={court.name} onChange={(e) => onUpdate({ name: e.target.value })} /></div>
             <div>
               <Label>Acceso</Label>
               <Segmented value={court.isPrivate ? "priv" : "pub"} onChange={(v) => onUpdate({ isPrivate: v === "priv" })} options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
             </div>
             <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={court.pricePerBlock} onChange={(e) => onUpdate({ pricePerBlock: Number(e.target.value) || 0 })} /></div>
-            <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={court.memberPrice ?? court.pricePerBlock} onChange={(e) => onUpdate({ memberPrice: Number(e.target.value) || 0 })} /></div>
           </div>
           <div>
             <Label>Precios especiales por horario</Label>
@@ -5469,7 +5487,12 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
 
   const discounted = Number(baseUsd) * (1 - (Number(discountPct) || 0) / 100);
   const bs = discounted * (Number(club.bsPerUsd) || 0);
-  const canConfirm = (!requireName || userName.trim()) && (method === "efectivo" || (reference.trim() && proofName));
+  // Totalmente gratis (100% de descuento, o un bloque gratis del plan pasado como baseUsd=0,
+  // v2.30.0) -- no hay nada que pagar, así que no tiene sentido pedir método de pago,
+  // referencia ni comprobante. Antes esto igual mostraba "$0.00" y exigía subir un
+  // comprobante para pagar cero dólares.
+  const isFree = discounted <= 0;
+  const canConfirm = (!requireName || userName.trim()) && (isFree || method === "efectivo" || (reference.trim() && proofName));
 
   const handleFile = (e) => {
     const f = e.target.files?.[0];
@@ -5478,7 +5501,7 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
 
   const submit = () => {
     if (!canConfirm) return;
-    onConfirm({ userName: userName.trim() || "Invitado", paymentMethod: method, reference: reference.trim(), proofName, priceUsd: discounted, priceBs: bs });
+    onConfirm({ userName: userName.trim() || "Invitado", paymentMethod: isFree ? null : method, reference: isFree ? "" : reference.trim(), proofName: isFree ? "" : proofName, priceUsd: discounted, priceBs: bs });
   };
 
   return (
@@ -5588,6 +5611,24 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
 
   const lockedPrivate = court && court.isPrivate && !currentPlan?.privateCourtAccess;
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
+  // % de descuento sobre el precio base de cancha para socios de este plan (v2.30.0) -- vive
+  // en el plan, no en cada cancha, así que cambiar el plan cambia el precio real al instante
+  // en vez de depender de que alguien actualice el memberPrice de cada cancha a mano.
+  const courtDiscountPct = isMember ? (currentPlan?.courtDiscountPct ?? 0) : 0;
+
+  // Bloques de cancha completamente gratis por mes de plan (v2.30.0) -- "* Disfrutable en
+  // bloques de horarios fríos (De 8 a 5pm) y en días de NO torneos, sujeto a disponibilidad",
+  // tal como lo anuncia la tabla de Membresías. Se cuenta en caliente (reservas activas de
+  // este mes calendario marcadas free_block=true) en vez de un contador aparte -- cancelar una
+  // reserva gratis libera el cupo solo.
+  const OFF_PEAK_START = timeToMinutes("08:00"), OFF_PEAK_END = timeToMinutes("17:00");
+  const isOffPeakBlock = (timeMin) => timeMin >= OFF_PEAK_START && timeMin < OFF_PEAK_END;
+  const isTournamentDay = (d) => categories.some((c) => c.matches.some((m) => m.day === d && !isByeMatch(m)));
+  const freeBlocksPerMonth = currentPlan?.freeBlocksPerMonth ?? 0;
+  const monthKey = date.slice(0, 7);
+  const freeBlocksUsedThisMonth = bookings.filter((b) => b.userId === currentUser.id && b.freeBlock && b.status !== "cancelada" && b.date.slice(0, 7) === monthKey).length;
+  const freeBlocksLeft = Math.max(0, freeBlocksPerMonth - freeBlocksUsedThisMonth);
+  const canUseFreeBlock = (timeMin) => isMember && freeBlocksLeft > 0 && isOffPeakBlock(timeMin) && !isTournamentDay(date);
 
   // El calendario de Reservas es para crear reservas nuevas -- nunca tiene sentido navegarlo
   // antes de hoy (admin incluido: el historial de reservas ya se ve más abajo en "Todas las
@@ -5610,7 +5651,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   };
 
   const confirm = (checkout) => {
-    createBooking({ courtId: court.id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, ...checkout });
+    createBooking({ courtId: court.id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, freeBlock: canUseFreeBlock(selectedTime), ...checkout });
     setSelectedTime(null);
     setCourtId(null);
   };
@@ -5722,27 +5763,42 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                         </div>
                       );
                     }
-                    const { base, member } = courtPriceInfo(c, selectedTime);
-                    const shownPrice = isMember ? member : base;
+                    const base = courtPriceInfo(c, selectedTime);
+                    const useFreeBlock = canUseFreeBlock(selectedTime);
+                    const shownPrice = useFreeBlock ? 0 : (isMember ? base * (1 - courtDiscountPct / 100) : base);
                     return (
                       <button key={c.id} onClick={() => setCourtId(c.id)}
                         className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5"
                         style={{ background: "#EAEEF5", color: COLORS.ink }}>
                         {c.isPrivate && <Lock size={12} />} {c.name}
-                        <span className="text-[10px] font-semibold opacity-80">{formatMoney(shownPrice)}</span>
+                        <span className="text-[10px] font-semibold opacity-80">{shownPrice > 0 ? formatMoney(shownPrice) : "Gratis"}</span>
                       </button>
                     );
                   })}
                 </div>
                 {role !== "admin" && availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
+                {/* Bloques gratis del plan (v2.30.0) -- solo aplica fuera de horario pico y en
+                   días sin torneo, tal como lo anuncia Membresías; se muestra acá (antes de
+                   elegir cancha) para que quede claro por qué el precio de abajo puede salir
+                   en $0 sin haber tocado nada todavía. */}
+                {isMember && freeBlocksPerMonth > 0 && (
+                  <p className="text-[11px] mt-3" style={{ color: canUseFreeBlock(selectedTime) ? COLORS.court : "#8A5A16" }}>
+                    {canUseFreeBlock(selectedTime)
+                      ? `¡Este horario cuenta como bloque gratis! Te quedan ${freeBlocksLeft} de ${freeBlocksPerMonth} este mes.`
+                      : freeBlocksLeft === 0
+                        ? `Ya usaste tus ${freeBlocksPerMonth} bloques gratis de este mes.`
+                        : `Bloques gratis (${freeBlocksLeft} disponibles) solo aplican de 8am a 5pm en días sin torneo.`}
+                  </p>
+                )}
               </>
             ) : lockedPrivate ? (
               <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
                 <Lock size={13} /> Esta cancha es privada — necesitas una membresía con acceso a canchas privadas. Revisa la sección Membresías.
               </div>
             ) : (
-              <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}`} baseUsd={courtPriceInfo(court, selectedTime).base}
-                discountPct={isMember ? memberDiscountPct(courtPriceInfo(court, selectedTime).base, courtPriceInfo(court, selectedTime).member) : 0}
+              <CheckoutPanel title={`${club.blockMinutes} min en ${court.name}${canUseFreeBlock(selectedTime) ? " · Bloque gratis de tu plan" : ""}`}
+                baseUsd={canUseFreeBlock(selectedTime) ? 0 : courtPriceInfo(court, selectedTime)}
+                discountPct={canUseFreeBlock(selectedTime) ? 0 : courtDiscountPct}
                 club={club} defaultName={currentUser.name}
                 onConfirm={confirm} onCancel={() => setCourtId(null)} confirmLabel="Confirmar reserva" />
             )}
@@ -5840,10 +5896,6 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
   const [imageProcessing, setImageProcessing] = useState(false);
   const [level, setLevel] = useState(initial?.level ?? "Todos");
   const [price, setPrice] = useState(initial?.price ?? 5);
-  // Default 0 (v2.29.0), no 5 -- Plan PRO y Plan VIP prometen "100% (Gratis)" en Open Plays
-  // dentro de su propio rate card (Membresías); si esto arranca en un número distinto de 0,
-  // el precio real que paga un socio deja de coincidir con lo que el club promete ahí.
-  const [memberPrice, setMemberPrice] = useState(initial?.memberPrice ?? 0);
   const [description, setDescription] = useState(initial?.description ?? "");
   const [courtIds, setCourtIds] = useState(initial?.courtIds ?? []);
   const [date, setDate] = useState(initial?.date ?? "");
@@ -5909,7 +5961,7 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
   const [error, setError] = useState("");
   const submit = async () => {
     setError(""); setSubmitting(true);
-    const result = await onSubmit({ name: name.trim(), imageBlob, level, price: Number(price) || 0, memberPrice: Number(memberPrice) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
+    const result = await onSubmit({ name: name.trim(), imageBlob, level, price: Number(price) || 0, capacity: Number(capacity) || 0, description, courtIds, date, startTime, endTime, recurrence: isRecurring ? { until: recurUntil } : null });
     setSubmitting(false);
     if (result?.error) setError(result.error);
   };
@@ -5934,20 +5986,17 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
               {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
-          <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label>Precio con membresía (USD)</Label>
-            <input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} />
-            {Number(memberPrice) > 0 && (
-              <p className="text-[11px] mt-1" style={{ color: "#8A5A16" }}>
-                Plan PRO y VIP prometen Open Plays gratis en su tabla de Membresías -- deja esto en $0.00 salvo que quieras cobrarles igual.
-              </p>
-            )}
-          </div>
           <div><Label>Cupos (quorum máximo)</Label><input type="number" min={1} style={inputStyle} value={capacity} onChange={(e) => setCapacity(e.target.value)} /></div>
         </div>
+        {/* El precio de socio ya no se carga por actividad (v2.30.0) -- sale solo del %
+           de descuento en Open Play que definas en Membresías para cada plan, así que
+           cambiar el plan cambia el precio real acá sin tener que volver a editar esto. */}
+        <p className="text-[11px]" style={{ color: "#6B7688" }}>
+          El precio de socio lo define cada plan (Membresías → % de descuento en Open Play), no esta actividad.
+        </p>
         <div><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 70 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
@@ -6401,7 +6450,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
             <AlertTriangle size={13} /> Tu plan{currentPlan?.name ? ` (${currentPlan.name})` : ""} permite inscribirte con hasta {formatBookingWindow(currentPlan?.bookingWindowHours ?? 48)} de anticipación -- todavía no se abre para esta fecha.
           </div>
         ) : (
-          <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
+          <CheckoutPanel title={`Inscripción a ${e.name}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? (currentPlan?.openPlayDiscountPct ?? 0) : 0} club={club} defaultName={currentUser.name}
             onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
         )
       )}
@@ -6569,8 +6618,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
   // que ve un no-socio. Antes la tarjeta siempre mostraba rep.price sin importar quién mirara
   // (v2.29.0): un miembro solo veía su precio real al entrar al detalle, no antes.
   const isMember = !!currentPlan && currentPlan.monthlyPrice > 0;
-  const displayPrice = (rep) => {
-    const usd = isMember ? (rep.memberPrice ?? rep.price) : rep.price;
+  // Open Play usa el % del plan (v2.30.0, mismo criterio que EventDetail) -- Clases todavía
+  // no tiene un descuento de plan real, así que se queda con su memberPrice de siempre.
+  const displayPrice = (rep, kind) => {
+    const usd = !isMember ? rep.price
+      : kind === "open_play" ? rep.price * (1 - (currentPlan?.openPlayDiscountPct ?? 0) / 100)
+        : (rep.memberPrice ?? rep.price);
     return usd > 0 ? formatMoney(usd) : "Gratis";
   };
 
@@ -6587,7 +6640,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         key: `op-${key}`, kind: "open_play", title: rep.name,
         description: rep.description || `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
-        price: displayPrice(rep), image: rep.image, recurring: isSeries,
+        price: displayPrice(rep, "open_play"), image: rep.image, recurring: isSeries,
         meta: slotsLeft !== null
           ? { text: slotsLeft > 0 ? `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}` : "Cupo lleno", full: slotsLeft === 0 }
           : { text: `${rep.registrations.length} inscrito(s)` },
@@ -6601,7 +6654,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       items.push({
         key: `cl-${key}`, kind: "clase", title: rep.academyName, description: `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
-        price: displayPrice(rep), image: null, recurring: isSeries,
+        price: displayPrice(rep, "clase"), image: null, recurring: isSeries,
         meta: { text: `${rep.registrations.length} inscrito(s)` },
         onClick: () => setSelected({ kind: "clase", key }),
       });
@@ -6628,7 +6681,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       });
     });
     return items;
-  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament, isMember]);
+  }, [openPlaySeries, classSeries, tournaments, categories, todayIso, openTournament, isMember, currentPlan]);
 
   const filteredItems = listItems.filter((it) => {
     if (filterKind !== "all" && it.kind !== filterKind) return false;
@@ -6799,6 +6852,12 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
   const [privateCourtAccess, setPrivateCourtAccess] = useState(initial?.privateCourtAccess ?? true);
   const [maxMembers, setMaxMembers] = useState(initial?.maxMembers ?? "");
   const [bookingWindowHours, setBookingWindowHours] = useState(initial?.bookingWindowHours ?? 48);
+  // Descuentos que SÍ se aplican de verdad en el checkout (v2.30.0) -- ver comentario largo
+  // en mapPlanRow. Antes esto vivía como un memberPrice suelto por cancha/Open Play, sin
+  // ninguna conexión con lo que el plan promete acá.
+  const [courtDiscountPct, setCourtDiscountPct] = useState(initial?.courtDiscountPct ?? 0);
+  const [openPlayDiscountPct, setOpenPlayDiscountPct] = useState(initial?.openPlayDiscountPct ?? 0);
+  const [freeBlocksPerMonth, setFreeBlocksPerMonth] = useState(initial?.freeBlocksPerMonth ?? 0);
   const [description, setDescription] = useState(initial?.description || "");
   const [rateCard, setRateCard] = useState(initial?.rateCard || []);
   const [rateLabel, setRateLabel] = useState("");
@@ -6835,6 +6894,28 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
           Hasta cuánto tiempo por adelantado puede reservar cancha o inscribirse en Open Plays/Clases alguien con este plan -- ahora mismo: <b>{formatBookingWindow(bookingWindowHours)}</b>.
         </p>
       </div>
+
+      {/* Beneficios que SÍ se aplican solos en el checkout (v2.30.0) -- editar esto acá
+         cambia el precio real de cualquier cancha/Open Play al instante, sin tener que ir a
+         tocar cada cancha o cada actividad una por una. */}
+      <div className="grid sm:grid-cols-3 gap-3 mt-3">
+        <div>
+          <Label>Descuento en canchas (%)</Label>
+          <input type="number" min={0} max={100} style={inputStyle} value={courtDiscountPct} onChange={(e) => setCourtDiscountPct(e.target.value)} />
+        </div>
+        <div>
+          <Label>Descuento en Open Play (%)</Label>
+          <input type="number" min={0} max={100} style={inputStyle} value={openPlayDiscountPct} onChange={(e) => setOpenPlayDiscountPct(e.target.value)} />
+        </div>
+        <div>
+          <Label>Bloques de cancha gratis / mes</Label>
+          <input type="number" min={0} style={inputStyle} value={freeBlocksPerMonth} onChange={(e) => setFreeBlocksPerMonth(e.target.value)} />
+        </div>
+      </div>
+      <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+        Los bloques gratis solo aplican en horario frío (8am–5pm) y en días sin torneo, sujeto a disponibilidad -- ese límite no se puede desactivar acá.
+      </p>
+
       <div className="mt-3"><Label>Descripción</Label><textarea style={{ ...inputStyle, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
 
       <div className="mt-4">
@@ -6860,7 +6941,14 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
       </div>
 
       <div className="flex gap-2 pt-4">
-        <button disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess, maxMembers: maxMembers === "" ? null : Number(maxMembers), bookingWindowHours: Number(bookingWindowHours) || 48, description, rateCard })}
+        <button disabled={!name.trim()} onClick={() => onSave({
+          name: name.trim(), monthlyPrice: Number(monthlyPrice) || 0, privateCourtAccess,
+          maxMembers: maxMembers === "" ? null : Number(maxMembers), bookingWindowHours: Number(bookingWindowHours) || 48,
+          courtDiscountPct: Math.min(100, Math.max(0, Number(courtDiscountPct) || 0)),
+          openPlayDiscountPct: Math.min(100, Math.max(0, Number(openPlayDiscountPct) || 0)),
+          freeBlocksPerMonth: Math.max(0, Number(freeBlocksPerMonth) || 0),
+          description, rateCard,
+        })}
           style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }} className="flex-1 py-2 rounded-xl font-semibold text-sm">{initial ? "Guardar cambios" : "Crear plan"}</button>
         <button onClick={onCancel} className="px-3 rounded-xl text-sm text-gray-400">Cancelar</button>
       </div>
@@ -6953,6 +7041,20 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
           );
         })}
         <div className="flex items-center justify-between gap-3 text-xs">
+          <span style={{ color: "#93A8C9" }}>Bloque de reserva gratis*</span>
+          <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span style={{ color: "#93A8C9" }}>Descuento en canchas*</span>
+          <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.courtDiscountPct > 0 ? `${plan.courtDiscountPct}% off` : "Sin descuento"}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span style={{ color: "#93A8C9" }}>Precio Open Play</span>
+          <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>
+            {plan.openPlayDiscountPct >= 100 ? "100% (Gratis)" : plan.openPlayDiscountPct > 0 ? `${plan.openPlayDiscountPct}% off` : "Sin descuento"}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3 text-xs">
           <span style={{ color: "#93A8C9" }}>Ventana de reserva</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{formatBookingWindow(plan.bookingWindowHours)}</span>
         </div>
@@ -6983,10 +7085,10 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
     orderedPlans.forEach((p) => (p.rateCard || []).forEach((r) => { if (!seen.includes(r.label)) seen.push(r.label); }));
     return seen;
   }, [orderedPlans]);
-  // Beneficios cuya etiqueta lleva "*" en el rate card traen la misma nota al pie (ventana de
-  // reserva y bloques gratis, por ahora) -- se muestra una sola vez debajo de toda la
-  // comparativa en vez de repetirla, igual que en el cuadro que armó el club.
-  const hasFootnote = rateLabels.some((lbl) => lbl.includes("*"));
+  // "Bloque de reserva gratis*" y "Descuento en canchas*" (filas fijas, ya no vienen del rate
+  // card desde v2.30.0) comparten la misma nota al pie -- se muestra una sola vez si algún
+  // plan de verdad ofrece alguno de los dos, igual que en el cuadro que armó el club.
+  const hasFootnote = orderedPlans.some((p) => p.freeBlocksPerMonth > 0 || p.courtDiscountPct > 0);
 
   const badgeFor = (idx) => {
     if (idx === 0 && paidPlans.length > 0) return { label: "MEJOR VALOR", color: COLORS.ball, text: COLORS.courtDark };
@@ -7100,6 +7202,12 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
             <tbody>
               <ComparisonRow label="Costo mensual" plans={orderedPlans}
                 render={(p) => (p.monthlyPrice > 0 ? formatMoney(p.monthlyPrice) : "Pago por uso")} highlight />
+              <ComparisonRow label="Bloque de reserva gratis*" plans={orderedPlans}
+                render={(p) => (p.freeBlocksPerMonth > 0 ? `${p.freeBlocksPerMonth}/mes` : "Ninguno")} />
+              <ComparisonRow label="Descuento en canchas*" plans={orderedPlans}
+                render={(p) => (p.courtDiscountPct > 0 ? `${p.courtDiscountPct}% off` : "Sin descuento")} />
+              <ComparisonRow label="Precio Open Play" plans={orderedPlans}
+                render={(p) => (p.openPlayDiscountPct >= 100 ? "100% (Gratis)" : p.openPlayDiscountPct > 0 ? `${p.openPlayDiscountPct}% off` : "Sin descuento")} />
               {rateLabels.map((lbl) => (
                 <ComparisonRow key={lbl} label={lbl} plans={orderedPlans}
                   render={(p) => (p.rateCard || []).find((r) => r.label === lbl)?.value ?? "—"} />
