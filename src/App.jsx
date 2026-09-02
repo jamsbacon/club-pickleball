@@ -991,7 +991,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.31.0";
+const APP_VERSION = "2.31.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5699,6 +5699,16 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
               Tu plan{currentPlan?.name ? ` (${currentPlan.name})` : ""} permite reservar con hasta <b>{formatBookingWindow(bookingWindowHours)}</b> de anticipación -- hasta el {formatDateHuman(maxDateIso)}.
             </p>
           )}
+          {/* Contador de bloques gratis del mes, siempre visible (antes solo aparecía dentro
+              del modal al elegir horario) -- así el socio ve su cupo sin tener que primero
+              tocar un horario. Mismo cálculo en caliente que canUseFreeBlock (v2.31.1). */}
+          {role !== "admin" && isMember && freeBlocksPerMonth > 0 && (
+            <p className="text-[11px] mt-1 font-semibold" style={{ color: freeBlocksLeft > 0 ? COLORS.court : "#8A5A16" }}>
+              {freeBlocksLeft > 0
+                ? `Te quedan ${freeBlocksLeft} de ${freeBlocksPerMonth} bloques de reserva gratis este mes.`
+                : `Ya usaste tus ${freeBlocksPerMonth} bloques de reserva gratis de este mes.`}
+            </p>
+          )}
         </div>
 
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
@@ -7535,9 +7545,18 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
           <p className="text-sm" style={{ color: "#6B7688" }}>No tienes una membresía paga — pagas por uso en cada reserva, Open Play o clase.</p>
         )}
 
-        {plan?.rateCard?.length > 0 && (
+        {isPaidPlan && (
           <ul className="mt-3 space-y-1">
-            {plan.rateCard.slice(0, 4).map((r) => (
+            <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
+              <Check size={12} color={COLORS.court} /> Bloques de reserva gratis — {plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}
+            </li>
+            <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
+              <Check size={12} color={COLORS.court} /> Descuento en canchas — {plan.courtDiscountPct > 0 ? `${plan.courtDiscountPct}% off` : "Sin descuento"}
+            </li>
+            <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
+              <Check size={12} color={COLORS.court} /> Open Play — {plan.openPlayDiscountPct >= 100 ? "100% (Gratis)" : plan.openPlayDiscountPct > 0 ? `${plan.openPlayDiscountPct}% off` : "Sin descuento"}
+            </li>
+            {plan.rateCard?.map((r) => (
               <li key={r.label} className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
                 <Check size={12} color={COLORS.court} /> {r.label} — {r.value}
               </li>
