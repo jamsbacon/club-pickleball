@@ -288,6 +288,27 @@ function resizeImageToBlob(file) {
   });
 }
 
+// Resiliencia sin internet para el día de un torneo (v2.34.0): antes, si el organizador
+// registraba resultados o movía partidos justo cuando se iba el internet, el guardado en
+// Supabase fallaba en silencio (solo console.error, sin aviso ni reintento) y se perdía para
+// siempre. Y si además se cerraba/refrescaba la pestaña en medio del apagón, hasta el
+// calendario/categorías que sí se veían en pantalla desaparecían, porque nada quedaba guardado
+// localmente -- la app queda en blanco hasta que vuelva la señal. Estos dos helpers guardan un
+// snapshot en localStorage (club, canchas, torneos, categorías y la cola de cambios
+// pendientes) para que reabrir la app durante un apagón siga mostrando el torneo tal como
+// quedó, en vez de una pantalla vacía. Alcance a propósito: solo Torneo -- Reservas y el resto
+// de la app no pasan por acá.
+const LS_PREFIX = "pickle-hub-cache:";
+function loadCache(key, fallback) {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function saveCache(key, value) {
+  try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch { /* storage lleno o bloqueado -- no es crítico, se sigue funcionando en memoria */ }
+}
+
 /* =========================================================================
    ANALYTICS HELPERS — unify every source of revenue (reservas, open plays,
    clases, membresías) into one transaction list, then aggregate it by day,
@@ -1089,7 +1110,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.33.0";
+const APP_VERSION = "2.34.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1200,8 +1221,14 @@ export default function PickleballTournamentApp() {
     memberPrice: Number(r.member_price), priceRules: r.price_rules || [],
   });
 
-  const [club, setClub] = useState(null);
-  const [courts, setCourts] = useState([]);
+  // Fallback histórico si por algún motivo la fila semilla de `clubs` no existe (no confundir
+  // con un error de red -- ver más abajo).
+  const FALLBACK_CLUB = { id: null, name: "Pickle Hub", openTime: "07:00", closeTime: "22:00", blockMinutes: 90, bsPerUsd: 180, pagoMovil: { banco: "", telefono: "", cedula: "" } };
+  // Semilla desde caché (v2.34.0) para que reabrir la app durante un apagón de internet siga
+  // mostrando el club/canchas reales en vez de un torneo sin canchas -- ver nota de
+  // loadCache/saveCache.
+  const [club, setClub] = useState(() => loadCache("club", null) || FALLBACK_CLUB);
+  const [courts, setCourts] = useState(() => loadCache("courts", []));
   const [clubDataLoading, setClubDataLoading] = useState(true);
 
   useEffect(() => {
@@ -1210,17 +1237,19 @@ export default function PickleballTournamentApp() {
         supabase.from("clubs").select("*").limit(1),
         supabase.from("courts").select("*").order("created_at"),
       ]);
+      // En error (sin señal) no se pisa lo que ya había en caché/estado con el default vacío
+      // -- eso dejaría Torneos sin canchas justo cuando más hace falta.
       if (clubRes.error) console.error("fetch clubs:", clubRes.error.message);
+      else setClub(clubRes.data?.[0] ? mapClubRow(clubRes.data[0]) : FALLBACK_CLUB);
       if (courtsRes.error) console.error("fetch courts:", courtsRes.error.message);
-      // Fallback defensivo si por algún motivo la fila semilla de `clubs` no existe --
-      // evita que la app quede sin poder renderizar en vez de romperse.
-      setClub(clubRes.data?.[0]
-        ? mapClubRow(clubRes.data[0])
-        : { id: null, name: "Pickle Hub", openTime: "07:00", closeTime: "22:00", blockMinutes: 90, bsPerUsd: 180, pagoMovil: { banco: "", telefono: "", cedula: "" } });
-      setCourts((courtsRes.data || []).map(mapCourtRow));
+      else setCourts((courtsRes.data || []).map(mapCourtRow));
       setClubDataLoading(false);
     })();
   }, []);
+  // Mantiene la copia en caché al día con CUALQUIER cambio posterior, sin importar de dónde
+  // venga (carga inicial exitosa, updateClub, addCourt/updateCourt/removeCourt...).
+  useEffect(() => { saveCache("club", club); }, [club]);
+  useEffect(() => { saveCache("courts", courts); }, [courts]);
 
   // Actualiza local al toque (UI instantánea) y persiste en Supabase en segundo plano.
   const updateClub = (patch) => {
@@ -1479,13 +1508,14 @@ export default function PickleballTournamentApp() {
   // la pestaña Torneos (null = se muestra la lista, ver TournamentsListTab); `tournament` es
   // ese torneo puntual, derivado, tal como lo esperan TorneosSection y todo lo que cuelga de
   // ahí (no cambiaron su forma de recibir "el torneo" y "sus categorías", solo cuál les llega).
-  const [tournaments, setTournaments] = useState([]);
+  const [tournaments, setTournaments] = useState(() => loadCache("tournaments", []));
   useEffect(() => {
     supabase.from("tournaments").select("*").order("created_at", { ascending: false }).then(({ data, error }) => {
       if (error) { console.error("fetch tournaments:", error.message); return; }
       setTournaments((data || []).map(mapTournamentRow));
     });
   }, []);
+  useEffect(() => { saveCache("tournaments", tournaments); }, [tournaments]);
   const [activeTournamentId, setActiveTournamentId] = useState(null);
   const tournament = tournaments.find((t) => t.id === activeTournamentId) || null;
 
@@ -1584,13 +1614,17 @@ export default function PickleballTournamentApp() {
   // query) -- necesario para que occupiedKeys (más abajo) bloquee canchas cruzando torneos.
   // Cada pantalla de un torneo puntual (TorneosSection) recibe el subconjunto ya filtrado por
   // `tournamentId` al armar sus props, nunca este array completo directo.
-  const [categories, setCategories] = useState([]);
+  const [categories, setCategories] = useState(() => loadCache("categories", []));
   useEffect(() => {
     supabase.from("categories").select("*").order("created_at").then(({ data, error }) => {
       if (error) { console.error("fetch categories:", error.message); return; }
       setCategories(data.map(mapCategoryRow));
     });
   }, []);
+  // Mantiene la copia en caché al día con CUALQUIER cambio (carga inicial, updateCategory,
+  // runScheduler, addCategory/removeCategory...) -- así reabrir la app durante un apagón sigue
+  // mostrando el calendario/categorías tal como quedaron, en vez de pantalla vacía (v2.34.0).
+  useEffect(() => { saveCache("categories", categories); }, [categories]);
   const [activeCatId, setActiveCatId] = useState(null);
   const [scheduleInfo, setScheduleInfo] = useState(null);
   // App-wide player ranking directory: { "nombre en minúsculas": { name, ranking } }
@@ -1647,17 +1681,56 @@ export default function PickleballTournamentApp() {
   // en el siguiente render. Por eso `updated` se calcula ACÁ AFUERA, a partir del
   // `categories` del closure de este render (que si es el actual), y se usa tanto para
   // el setState como para el guardado en Supabase.
+  // Cola de cambios de torneo pendientes de sincronizar (v2.34.0): updateCategory/runScheduler
+  // ya actualizan el estado local al instante (optimista) -- lo que faltaba era qué pasa si el
+  // guardado en Supabase FALLA (sin señal en medio de un torneo): antes se perdía en silencio,
+  // solo un console.error, sin aviso ni reintento. Como cada guardado manda la fila COMPLETA de
+  // la categoría (no un delta), no hace falta una cola de operaciones en orden -- basta con
+  // quedarse con el ÚLTIMO intento pendiente por categoría (en un ref, para no depender de
+  // closures viejas) y reintentarlo entero en cuanto vuelva la señal. `pendingCategoryCount` es
+  // solo para que la UI muestre el aviso ("N cambios sin sincronizar").
+  const pendingCategoryWritesRef = useRef(loadCache("pendingCategoryWrites", {})); // { [catId]: { fields, upsert } }
+  const [pendingCategoryCount, setPendingCategoryCount] = useState(Object.keys(pendingCategoryWritesRef.current).length);
+
+  const persistCategoryWrite = (id, fields, upsert = false) => {
+    const query = upsert
+      ? supabase.from("categories").upsert({ id, ...fields })
+      : supabase.from("categories").update(fields).eq("id", id);
+    query.then(({ error }) => {
+      const next = { ...pendingCategoryWritesRef.current };
+      if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
+      else delete next[id];
+      pendingCategoryWritesRef.current = next;
+      saveCache("pendingCategoryWrites", next);
+      setPendingCategoryCount(Object.keys(next).length);
+    });
+  };
+  const flushPendingCategoryWrites = () => {
+    Object.entries(pendingCategoryWritesRef.current).forEach(([id, { fields, upsert }]) => persistCategoryWrite(id, fields, upsert));
+  };
+  // Reintenta la cola sola: al recuperar señal (evento "online" del navegador) y de respaldo
+  // cada 20s -- "online" no siempre dispara de forma confiable (wifi "conectado" pero sin
+  // salida real a internet), así que el intervalo es quien de verdad garantiza que se vacíe.
+  // También reintenta una vez al montar, por si quedaron pendientes de una sesión anterior.
+  useEffect(() => {
+    if (Object.keys(pendingCategoryWritesRef.current).length > 0) flushPendingCategoryWrites();
+    const onOnline = () => flushPendingCategoryWrites();
+    window.addEventListener("online", onOnline);
+    const interval = setInterval(() => { if (Object.keys(pendingCategoryWritesRef.current).length > 0) flushPendingCategoryWrites(); }, 20000);
+    return () => { window.removeEventListener("online", onOnline); clearInterval(interval); };
+  }, []);
+
   const updateCategory = (id, updater) => {
     const current = categories.find((c) => c.id === id);
     if (!current) return;
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
-    supabase.from("categories").update({
+    persistCategoryWrite(id, {
       name: updated.name, max_teams: updated.maxTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
       teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
-    }).eq("id", id).then(({ error }) => { if (error) console.error("updateCategory:", error.message); });
+    });
   };
 
   // Reprograma un partido ya agendado a mano (grid de CalendarioTab, tap-origen →
@@ -2333,14 +2406,16 @@ export default function PickleballTournamentApp() {
     setCategories((prev) => prev.map((c) => clone.find((cc) => cc.id === c.id) || c));
     setScheduleInfo(info);
     setTab("torneos");
-    // buildSchedule pudo tocar matches/groups de varias categorías a la vez -- upsert en bloque
-    // (updateCategory solo cubre una categoría por llamada, no sirve para este caso).
-    supabase.from("categories").upsert(clone.map((c) => ({
-      id: c.id, tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
+    // buildSchedule pudo tocar matches/groups de varias categorías a la vez -- un
+    // persistCategoryWrite (upsert) por categoría, en vez de un solo upsert masivo, para que si
+    // el internet se va a mitad de esto, cada categoría que no se alcance a guardar quede en la
+    // cola de pendientes por su cuenta (v2.34.0) en vez de perderse toda la tanda junta.
+    clone.forEach((c) => persistCategoryWrite(c.id, {
+      tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
       max_teams: c.maxTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
       draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
       teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
-    }))).then(({ error }) => { if (error) console.error("runScheduler persist:", error.message); });
+    }, true));
   };
 
   const stats = {
@@ -2465,6 +2540,7 @@ export default function PickleballTournamentApp() {
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
                 submitScore={submitScore}
+                pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 onBackToList={() => { setActiveTournamentId(null); setActiveCatId(null); }}
                 onRemoveTournament={() => { removeTournament(tournament.id); setActiveTournamentId(null); setActiveCatId(null); }}
               />
@@ -4136,6 +4212,7 @@ function TorneosSection(props) {
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
+    pendingCategoryCount, flushPendingCategoryWrites,
   } = props;
   const isAdmin = role === "admin";
 
@@ -4157,6 +4234,20 @@ function TorneosSection(props) {
         )}
       </div>
       <h2 className="disp text-xl md:text-[22px] mb-4" style={{ color: COLORS.courtDark }}>{tournament.name}</h2>
+
+      {/* Aviso de resiliencia sin internet (v2.34.0) -- solo el admin puede generar estos
+         cambios pendientes (resultados, calendario, etc.), así que solo a él le hace falta
+         verlo. No dice "sin conexión" en general (navigator.onLine no es confiable) -- dice
+         justo lo que importa: cuántos cambios reales todavía no llegaron a Supabase. */}
+      {isAdmin && pendingCategoryCount > 0 && (
+        <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl mb-4 text-sm" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+          <span className="flex items-center gap-2">
+            <AlertTriangle size={15} className="shrink-0" />
+            {pendingCategoryCount} cambio{pendingCategoryCount === 1 ? "" : "s"} de este torneo sin sincronizar todavía -- se guardaron en este teléfono y se suben solos en cuanto vuelva la señal.
+          </span>
+          <button onClick={flushPendingCategoryWrites} className="font-bold underline shrink-0">Reintentar ahora</button>
+        </div>
+      )}
 
       <div className="flex gap-2 mb-5 overflow-x-auto pb-1">
         {visibleSubItems.map((it) => (
