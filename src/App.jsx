@@ -1160,7 +1160,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.39.0";
+const APP_VERSION = "2.39.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1323,16 +1323,20 @@ export default function PickleballTournamentApp() {
   const syncBcvRate = async () => {
     setRateStatus((s) => ({ ...s, loading: true, error: null }));
     try {
-      const res = await fetch("https://bcv.today/api/v1/rate.json");
+      // v2.39.1: bcv.today (la API de antes) dejó de existir -- el dominio ni siquiera
+      // resuelve por DNS, no fue un bloqueo puntual. dolarapi.com es el reemplazo: mismo
+      // concepto (tasa EUR "oficial" del BCV, no la oficial en USD ni el paralelo) en un
+      // servicio real y activo hoy.
+      const res = await fetch("https://ve.dolarapi.com/v1/euros/oficial");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (!data.EUR) throw new Error("La respuesta no trajo tasa EUR");
-      updateClub({ bsPerUsd: Number(data.EUR) });
-      setRateStatus({ loading: false, error: null, lastSync: Date.now(), source: "bcv_eur", effectiveDate: data.effective_date });
+      if (!data.promedio) throw new Error("La respuesta no trajo tasa EUR");
+      updateClub({ bsPerUsd: Number(data.promedio) });
+      setRateStatus({ loading: false, error: null, lastSync: Date.now(), source: "bcv_eur", effectiveDate: data.fechaActualizacion ? data.fechaActualizacion.slice(0, 10) : null });
     } catch (err) {
       setRateStatus((s) => ({
         ...s, loading: false,
-        error: `No se pudo conectar con la API del BCV (${err.message || "error de red"}). La tasa se mantiene editable manualmente.`,
+        error: `No se pudo conectar con la API de tasas (${err.message || "error de red"}). La tasa se mantiene editable manualmente.`,
       }));
     }
   };
@@ -3613,7 +3617,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
                   {rateStatus.error
                     ? rateStatus.error
                     : rateStatus.lastSync
-                      ? `Última sincronización: hace ${minutesAgo <= 0 ? "menos de 1" : minutesAgo} min${rateStatus.effectiveDate ? ` · vigente ${rateStatus.effectiveDate}` : ""}`
+                      ? `Última sincronización: hace ${minutesAgo <= 0 ? "menos de 1" : minutesAgo} min${rateStatus.effectiveDate ? ` · vigente ${formatDateHuman(rateStatus.effectiveDate)}` : ""}`
                       : "Aún no se ha sincronizado."}
                 </p>
               </div>
