@@ -1160,7 +1160,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.40.0";
+const APP_VERSION = "2.40.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6868,6 +6868,15 @@ function WalkInRegistration({ users, basePrice, club, onAdd }) {
         .slice(0, 6)
     : [];
 
+  // Aviso de posible duplicado (v2.40.1) -- si el admin escribió el nombre completo de un
+  // socio real pero NO lo seleccionó de la lista (typeó de más rápido que lo que tardó en
+  // aparecer el dropdown, o ni lo miró), la inscripción quedaría "sin cuenta" por accidente
+  // cuando en realidad esa persona sí tiene una. Coincidencia exacta de nombre (no solo
+  // "incluye", como en `results`) para no molestar con falsos positivos por substring.
+  const exactMatch = !selectedUser && query.trim().length > 0
+    ? users.find((u) => u.role !== "admin" && u.name.trim().toLowerCase() === query.trim().toLowerCase())
+    : null;
+
   const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); };
   const clearUser = () => { setSelectedUser(null); setQuery(""); };
 
@@ -6916,6 +6925,12 @@ function WalkInRegistration({ users, basePrice, club, onAdd }) {
           {saving ? "..." : "Agregar"}
         </button>
       </div>
+      {exactMatch && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs mt-2 flex-wrap" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+          <span className="flex items-center gap-1.5"><AlertTriangle size={13} className="shrink-0" /> Ya existe un socio llamado "{exactMatch.name}" ({exactMatch.email}). ¿Es la misma persona?</span>
+          <button type="button" onClick={() => pickUser(exactMatch)} className="font-bold underline shrink-0">Sí, es él/ella</button>
+        </div>
+      )}
       <p className="text-[10px] mt-1.5" style={{ color: "#6B7688" }}>Arranca "Por pagar" -- confirma el pago en la lista de abajo cuando llegue a la cancha. Si es socio con descuento, ajusta el precio antes de agregar.</p>
     </div>
   );
