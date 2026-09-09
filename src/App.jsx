@@ -219,6 +219,35 @@ function memberDiscountPct(base, memberPrice) {
   return Math.max(0, Math.round((1 - m / b) * 100));
 }
 
+// Precio con descuento de un ítem del tarifario de un plan pago, calculado en caliente contra
+// lo que YA cobra "Sin plan" por ese mismo concepto (v2.38.0) -- generaliza el mismo criterio
+// que courtDiscountPct/openPlayDiscountPct (v2.30.0, un % en el plan aplicado sobre un precio
+// base ajeno) a la lista libre de conceptos del tarifario ("Precio Liga Propia", etc.), que
+// antes guardaba un valor tipeado a mano por plan, sin ninguna conexión entre ellos. Devuelve
+// null si no hay de dónde calcularlo (el plan base no tiene ese concepto todavía).
+function rateItemDiscountedPrice(discountPct, basePriceUsd) {
+  if (basePriceUsd == null) return null;
+  return Number(basePriceUsd) * (1 - (Number(discountPct) || 0) / 100);
+}
+
+// Texto a mostrar para el concepto `label` de un plan cualquiera. El plan base (Sin plan,
+// monthlyPrice === 0) muestra su propio precio tal cual -- es la fuente de verdad. Cualquier
+// otro plan muestra el precio YA con su descuento aplicado, recalculado del precio ACTUAL de
+// `basePlan` -- si mañana cambia el precio base, esto se actualiza solo, sin tener que volver
+// a tipear nada en cada plan pago.
+function rateItemDisplay(plan, label, basePlan) {
+  if (!plan) return "—";
+  if (plan.monthlyPrice === 0) {
+    const item = plan.rateCard?.find((r) => r.label === label);
+    return item?.priceUsd != null ? formatMoney(item.priceUsd) : "—";
+  }
+  const item = plan.rateCard?.find((r) => r.label === label);
+  const baseItem = basePlan?.rateCard?.find((r) => r.label === label);
+  const discounted = item ? rateItemDiscountedPrice(item.discountPct, baseItem?.priceUsd) : null;
+  if (discounted == null) return "—";
+  return discounted <= 0 ? "Gratis" : formatMoney(discounted);
+}
+
 // Precio MARGINAL de agregar la categoría #`tier` al carrito (tier 3 cubre la 3ra Y cualquier
 // categoría después de esa, ver tournamentRegPrice -- no hay un cuarto nivel). Presale gana
 // mientras hoy caiga dentro de [presaleStart, presaleEnd] (y esté cargado); si no, cae al
@@ -1110,7 +1139,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.37.0";
+const APP_VERSION = "2.38.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1367,12 +1396,16 @@ export default function PickleballTournamentApp() {
     openPlayDiscountPct: r.open_play_discount_pct != null ? Number(r.open_play_discount_pct) : 0,
     freeBlocksPerMonth: r.free_blocks_per_month != null ? Number(r.free_blocks_per_month) : 0,
     description: r.description || "",
-    // `value` es texto libre ya formateado ("4/mes", "100% (Gratis)", "5 días"...) -- un
-    // precio numérico no alcanza a representar todos los beneficios del rate card (v2.22.0).
-    // Fallback a `price` por si queda algún rate card viejo sin migrar.
+    // Cada ítem del tarifario guarda UNA de dos cosas, según sea o no el plan base (v2.38.0):
+    // el plan base (Sin plan, monthlyPrice===0) guarda priceUsd -- el precio real, fuente de
+    // verdad. Cualquier plan pago guarda discountPct -- % de descuento sobre lo que el plan
+    // base cobra por ese MISMO label -- ver rateItemDisplay, que resuelve cuál mostrar. Ya no
+    // se guarda un `value` pre-formateado a mano (eso era lo que dejaba un plan pago
+    // desactualizado si el precio base cambiaba después).
     rateCard: (r.rate_card || []).map((it, i) => ({
       id: it.id || `${r.id}-rate-${i}`, label: it.label,
-      value: it.value != null ? it.value : (it.price > 0 ? formatMoney(it.price) : "Gratis"),
+      priceUsd: it.priceUsd != null ? Number(it.priceUsd) : undefined,
+      discountPct: it.discountPct != null ? Number(it.discountPct) : undefined,
     })),
   });
   const [membershipPlans, setMembershipPlans] = useState([]);
@@ -7472,7 +7505,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
 // table below — it's the plan's advertised rate sheet, independent of what's actually
 // bookable yet. `value` is free text (v2.22.0) so it can hold "$5.00", "4/mes", "5 días" or
 // "100% (Gratis)" alike -- not every benefit is a USD price.
-function MembershipPlanForm({ initial, onSave, onCancel }) {
+function MembershipPlanForm({ initial, basePlan, onSave, onCancel }) {
   const [name, setName] = useState(initial?.name || "");
   const [monthlyPrice, setMonthlyPrice] = useState(initial?.monthlyPrice ?? 30);
   const [privateCourtAccess, setPrivateCourtAccess] = useState(initial?.privateCourtAccess ?? true);
@@ -7487,12 +7520,32 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
   const [description, setDescription] = useState(initial?.description || "");
   const [rateCard, setRateCard] = useState(initial?.rateCard || []);
   const [rateLabel, setRateLabel] = useState("");
-  const [rateValue, setRateValue] = useState("");
+  const [ratePriceUsd, setRatePriceUsd] = useState("");
+  const [rateDiscountPct, setRateDiscountPct] = useState("");
+
+  // Este plan ES "Sin plan" (el precio real de cada concepto vive acá) o es un plan pago (cada
+  // concepto guarda un % de descuento sobre lo que Sin plan cobra por lo mismo) -- v2.38.0.
+  // Reactivo al campo de arriba: si el admin cambia el precio mensual mientras arma el
+  // formulario, el editor del tarifario cambia de modo al toque.
+  const isBasePlan = Number(monthlyPrice) === 0;
+  // Conceptos de Sin plan que este plan pago todavía no tiene agregados -- son las únicas
+  // opciones válidas para el selector de abajo, porque sin un precio base no hay de dónde
+  // calcular el descuento.
+  const availableBaseItems = (basePlan?.rateCard || []).filter((bi) => !rateCard.some((r) => r.label === bi.label));
+  const selectedBaseItem = (basePlan?.rateCard || []).find((bi) => bi.label === rateLabel);
+  const previewDiscounted = selectedBaseItem ? rateItemDiscountedPrice(rateDiscountPct, selectedBaseItem.priceUsd) : null;
 
   const addRate = () => {
-    if (!rateLabel.trim() || !rateValue.trim()) return;
-    setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel.trim(), value: rateValue.trim() }]);
-    setRateLabel(""); setRateValue("");
+    if (!rateLabel.trim()) return;
+    if (isBasePlan) {
+      if (ratePriceUsd === "") return;
+      setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel.trim(), priceUsd: Number(ratePriceUsd) || 0 }]);
+      setRateLabel(""); setRatePriceUsd("");
+    } else {
+      if (!selectedBaseItem) return;
+      setRateCard((rc) => [...rc, { id: uid("rate"), label: rateLabel, discountPct: Math.min(100, Math.max(0, Number(rateDiscountPct) || 0)) }]);
+      setRateLabel(""); setRateDiscountPct("");
+    }
   };
   const removeRate = (id) => setRateCard((rc) => rc.filter((r) => r.id !== id));
 
@@ -7546,24 +7599,65 @@ function MembershipPlanForm({ initial, onSave, onCancel }) {
 
       <div className="mt-4">
         <Label>Tarifario (se muestra en la comparativa de planes)</Label>
+        <p className="text-[11px] -mt-1 mb-2" style={{ color: "#6B7688" }}>
+          {isBasePlan
+            ? "Este es el plan base -- el precio que cargues acá es el que ven quienes no tienen membresía, y del que salen los descuentos de los planes pagos."
+            : "Cada concepto se calcula solo, como % de descuento sobre lo que cobra Sin plan -- si mañana cambia ese precio base, esto se actualiza sin tener que volver a tocarlo."}
+        </p>
         <div className="space-y-1.5 mb-2">
-          {rateCard.map((r) => (
-            <div key={r.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg text-xs" style={{ background: "#EEF1F7" }}>
-              <span>{r.label}</span>
-              <div className="flex items-center gap-2">
-                <span className="mono font-bold">{r.value}</span>
-                <button onClick={() => removeRate(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
+          {rateCard.map((r) => {
+            const baseItem = (basePlan?.rateCard || []).find((bi) => bi.label === r.label);
+            const discounted = isBasePlan ? null : rateItemDiscountedPrice(r.discountPct, baseItem?.priceUsd);
+            return (
+              <div key={r.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg text-xs" style={{ background: "#EEF1F7" }}>
+                <span>{r.label}</span>
+                <div className="flex items-center gap-2">
+                  <span className="mono font-bold">
+                    {isBasePlan
+                      ? formatMoney(r.priceUsd)
+                      : discounted == null ? "—" : `${r.discountPct}% off → ${discounted <= 0 ? "Gratis" : formatMoney(discounted)}`}
+                  </span>
+                  <button onClick={() => removeRate(r.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
+                </div>
               </div>
+            );
+          })}
+        </div>
+        {isBasePlan ? (
+          <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
+            <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Precio Liga Propia" /></div>
+            <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={ratePriceUsd} onChange={(e) => setRatePriceUsd(e.target.value)} placeholder="8.00" /></div>
+            <button onClick={addRate} disabled={!rateLabel.trim() || ratePriceUsd === ""} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() && ratePriceUsd !== "" ? COLORS.court : "#E5E5E5", color: rateLabel.trim() && ratePriceUsd !== "" ? "#fff" : "#999" }}>
+              <Plus size={14} />
+            </button>
+          </div>
+        ) : !basePlan ? (
+          <p className="text-xs italic" style={{ color: "#B23A1B" }}>Crea primero el plan "Sin plan" (precio $0) -- de ahí sale el precio base de cada concepto.</p>
+        ) : availableBaseItems.length === 0 ? (
+          <p className="text-xs italic" style={{ color: "#6B7688" }}>Ya agregaste todos los conceptos de Sin plan. Para uno nuevo, agrégalo primero allá.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
+              <div>
+                <Label>Concepto</Label>
+                <select style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)}>
+                  <option value="">Elige uno de Sin plan…</option>
+                  {availableBaseItems.map((bi) => <option key={bi.label} value={bi.label}>{bi.label} ({formatMoney(bi.priceUsd)})</option>)}
+                </select>
+              </div>
+              <div><Label>Descuento (%)</Label><input type="number" min={0} max={100} style={inputStyle} value={rateDiscountPct} onChange={(e) => setRateDiscountPct(e.target.value)} /></div>
+              <button onClick={addRate} disabled={!selectedBaseItem} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: selectedBaseItem ? COLORS.court : "#E5E5E5", color: selectedBaseItem ? "#fff" : "#999" }}>
+                <Plus size={14} />
+              </button>
             </div>
-          ))}
-        </div>
-        <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
-          <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Bloque de reserva gratis*" /></div>
-          <div><Label>Valor</Label><input style={inputStyle} value={rateValue} onChange={(e) => setRateValue(e.target.value)} placeholder="4/mes, $5.00, 100% (Gratis)…" /></div>
-          <button onClick={addRate} disabled={!rateLabel.trim() || !rateValue.trim()} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() && rateValue.trim() ? COLORS.court : "#E5E5E5", color: rateLabel.trim() && rateValue.trim() ? "#fff" : "#999" }}>
-            <Plus size={14} />
-          </button>
-        </div>
+            {selectedBaseItem && (
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+                Sin plan cobra <b>{formatMoney(selectedBaseItem.priceUsd)}</b> por esto -- con {Number(rateDiscountPct) || 0}% de descuento, este plan quedaría en{" "}
+                <b style={{ color: COLORS.court }}>{previewDiscounted <= 0 ? "Gratis" : formatMoney(previewDiscounted)}</b>.
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       <div className="flex gap-2 pt-4">
@@ -7607,7 +7701,7 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
 // teléfono). Debajo de `md` se cambia a esto: una card completa por plan, apiladas, sin
 // scroll horizontal -- mismos datos que la tabla (mismo `rateLabels`, mismo `planState`),
 // simplemente reformateados como lista vertical de beneficio→valor en vez de columnas.
-function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, onDelete }) {
+function PlanCard({ plan, idx, rateLabels, basePlan, state, isAdmin, onCheckout, onEdit, onDelete }) {
   const { badge, isCurrent, isExpired, pending, locked, isFull, slotsLeft } = state;
   const accent = idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE";
   const blockedForNew = isFull && !isCurrent;
@@ -7657,15 +7751,12 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
         )}
       </div>
       <div className="px-5 py-4 space-y-2.5" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-        {rateLabels.map((lbl) => {
-          const item = (plan.rateCard || []).find((r) => r.label === lbl);
-          return (
-            <div key={lbl} className="flex items-center justify-between gap-3 text-xs">
-              <span style={{ color: "#93A8C9" }}>{lbl}</span>
-              <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{item ? item.value : "—"}</span>
-            </div>
-          );
-        })}
+        {rateLabels.map((lbl) => (
+          <div key={lbl} className="flex items-center justify-between gap-3 text-xs">
+            <span style={{ color: "#93A8C9" }}>{lbl}</span>
+            <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{rateItemDisplay(plan, lbl, basePlan)}</span>
+          </div>
+        ))}
         <div className="flex items-center justify-between gap-3 text-xs">
           <span style={{ color: "#93A8C9" }}>Bloque de reserva gratis*</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}</span>
@@ -7703,6 +7794,9 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
   const paidPlans = [...membershipPlans].filter((p) => p.monthlyPrice > 0).sort((a, b) => b.monthlyPrice - a.monthlyPrice);
   const freePlans = membershipPlans.filter((p) => p.monthlyPrice === 0);
   const orderedPlans = [...paidPlans, ...freePlans];
+  // "Sin plan" -- de acá sale el precio real de cada concepto del tarifario; los planes pagos
+  // solo guardan un % de descuento sobre esto (v2.38.0, ver rateItemDisplay).
+  const basePlan = freePlans[0] || null;
 
   // Union every distinct rate-card label across plans, in first-seen order, so the
   // comparison table stays correct even if plans don't share the exact same line items.
@@ -7754,9 +7848,9 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
         {isAdmin && <button onClick={() => { setShowForm((s) => !s); setEditingPlanId(null); }} className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5" style={{ background: COLORS.courtDark, color: "#fff" }}><Plus size={14} /> Nuevo plan</button>}
       </div>
 
-      {isAdmin && showForm && <MembershipPlanForm onSave={(p) => { addMembershipPlan(p); setShowForm(false); }} onCancel={() => setShowForm(false)} />}
+      {isAdmin && showForm && <MembershipPlanForm basePlan={basePlan} onSave={(p) => { addMembershipPlan(p); setShowForm(false); }} onCancel={() => setShowForm(false)} />}
       {isAdmin && editingPlan && (
-        <MembershipPlanForm initial={editingPlan}
+        <MembershipPlanForm initial={editingPlan} basePlan={basePlan}
           onSave={(p) => { updateMembershipPlan(editingPlan.id, p); setEditingPlanId(null); }}
           onCancel={() => setEditingPlanId(null)} />
       )}
@@ -7841,7 +7935,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
                 render={(p) => (p.openPlayDiscountPct >= 100 ? "100% (Gratis)" : p.openPlayDiscountPct > 0 ? `${p.openPlayDiscountPct}% off` : "Sin descuento")} />
               {rateLabels.map((lbl) => (
                 <ComparisonRow key={lbl} label={lbl} plans={orderedPlans}
-                  render={(p) => (p.rateCard || []).find((r) => r.label === lbl)?.value ?? "—"} />
+                  render={(p) => rateItemDisplay(p, lbl, basePlan)} />
               ))}
               <ComparisonRow label="Ventana de reserva" plans={orderedPlans} render={(p) => formatBookingWindow(p.bookingWindowHours)} />
               <ComparisonRow label="Canchas privadas" plans={orderedPlans} render={(p) => p.privateCourtAccess} isBool />
@@ -7858,7 +7952,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
            información que la tabla de arriba (mismo rateLabels/planState). */}
         <div className="md:hidden px-4 pb-6 space-y-4">
           {orderedPlans.map((plan, idx) => (
-            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} state={planState(plan, idx)} isAdmin={isAdmin}
+            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} basePlan={basePlan} state={planState(plan, idx)} isAdmin={isAdmin}
               onCheckout={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))}
               onEdit={() => { setEditingPlanId((id) => (id === plan.id ? null : plan.id)); setShowForm(false); }}
               onDelete={() => removeMembershipPlan(plan.id)} />
@@ -7921,6 +8015,8 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, updateProfile
   };
 
   const plan = membershipPlans.find((p) => p.id === currentUser.planId) || membershipPlans[0] || null;
+  // Precio real de cada concepto del tarifario -- ver rateItemDisplay (v2.38.0).
+  const basePlan = membershipPlans.find((p) => p.monthlyPrice === 0) || null;
   const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
   const today = new Date().toISOString().slice(0, 10);
   const isExpired = isPaidPlan && !!currentUser.planExpiresAt && currentUser.planExpiresAt < today;
@@ -8048,7 +8144,7 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, updateProfile
             </li>
             {plan.rateCard?.map((r) => (
               <li key={r.label} className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
-                <Check size={12} color={COLORS.court} /> {r.label} — {r.value}
+                <Check size={12} color={COLORS.court} /> {r.label} — {rateItemDisplay(plan, r.label, basePlan)}
               </li>
             ))}
           </ul>
