@@ -1139,7 +1139,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.38.0";
+const APP_VERSION = "2.38.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7850,7 +7850,14 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
 
       {isAdmin && showForm && <MembershipPlanForm basePlan={basePlan} onSave={(p) => { addMembershipPlan(p); setShowForm(false); }} onCancel={() => setShowForm(false)} />}
       {isAdmin && editingPlan && (
-        <MembershipPlanForm initial={editingPlan} basePlan={basePlan}
+        // key={editingPlan.id} (v2.38.1) -- sin esto, cambiar de "Editar" un plan a otro sin
+        // cerrar el formulario primero reutilizaba la MISMA instancia de MembershipPlanForm:
+        // sus useState (name, monthlyPrice, rateCard...) solo se inicializan desde `initial` en
+        // el primer montaje, así que quedaban con los datos del plan anterior aunque
+        // `editingPlan`/`onSave` ya apuntaran al plan nuevo -- exactamente lo que dejó a Plan
+        // VIP con el nombre, precio y tarifario viejos de Plan PRO pisados encima al guardar.
+        // El key fuerza un remontaje limpio cada vez que cambia qué plan se está editando.
+        <MembershipPlanForm key={editingPlan.id} initial={editingPlan} basePlan={basePlan}
           onSave={(p) => { updateMembershipPlan(editingPlan.id, p); setEditingPlanId(null); }}
           onCancel={() => setEditingPlanId(null)} />
       )}
