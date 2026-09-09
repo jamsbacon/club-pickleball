@@ -4,7 +4,7 @@ import {
   Trophy, Users, MapPin, Calendar, ClipboardList, Plus, Trash2,
   ChevronRight, ChevronDown, ChevronUp, Shuffle, ArrowUpDown, CheckCircle2,
   Clock, AlertTriangle, Swords, ListOrdered, Settings2, X,
-  UserPlus, Pencil, Medal, Hourglass, DollarSign,
+  UserPlus, Pencil, Medal, Hourglass, Euro,
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
@@ -203,7 +203,7 @@ function formatBookingWindow(hours) {
   return `${h} hora${h === 1 ? "" : "s"}`;
 }
 
-function formatMoney(n, symbol = "$") {
+function formatMoney(n, symbol = "€") {
   const v = Number(n) || 0;
   return `${symbol}${v.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -1160,7 +1160,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.38.2";
+const APP_VERSION = "2.39.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3314,7 +3314,7 @@ function TieredPriceFields({ tournament, set, field }) {
         <div key={n}>
           <p className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>{tierLabel[n]}</p>
           <div className="relative">
-            <DollarSign size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" color="#78829A" />
+            <Euro size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" color="#78829A" />
             <input type="number" min={0} style={{ ...inputStyle, paddingLeft: 26, fontSize: 13 }}
               value={tournament[`${field}${n}`]} onChange={(e) => set(`${field}${n}`, e.target.value)} placeholder="0.00" />
           </div>
@@ -3508,7 +3508,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
             <div>
               <Label>Precio de preventa (por categoría inscrita)</Label>
               <TieredPriceFields tournament={tournament} set={set} field="presalePrice" />
-              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se suman: "1ra cat." es el precio de inscribirse en una sola categoría, "+2da cat." es lo que se AGREGA por anotarse en una segunda, y "+3ra cat. c/u" es lo que se agrega por cada categoría después de esa. Ej: 20 + 10 + 5 → inscribirse en 3 categorías junto cuesta $35.</p>
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se suman: "1ra cat." es el precio de inscribirse en una sola categoría, "+2da cat." es lo que se AGREGA por anotarse en una segunda, y "+3ra cat. c/u" es lo que se agrega por cada categoría después de esa. Ej: 20 + 10 + 5 → inscribirse en 3 categorías junto cuesta €35.</p>
             </div>
           </div>
         </Card>
@@ -3653,7 +3653,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
             <Segmented value={isPrivate ? "priv" : "pub"} onChange={(v) => setIsPrivate(v === "priv")}
               options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
           </div>
-          <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio / bloque (EUR)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
 
         <div className="rounded-xl p-3 mb-4" style={{ background: "#EEF1F7" }}>
@@ -3720,7 +3720,7 @@ function PriceRuleEditor({ rules, onChange }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 items-end">
         <div><Label>Desde</Label><input type="time" style={inputStyle} value={from} onChange={(e) => setFrom(e.target.value)} /></div>
         <div><Label>Hasta</Label><input type="time" style={inputStyle} value={to} onChange={(e) => setTo(e.target.value)} /></div>
-        <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={rulePrice} onChange={(e) => setRulePrice(e.target.value)} /></div>
+        <div><Label>Precio (EUR)</Label><input type="number" min={0} style={inputStyle} value={rulePrice} onChange={(e) => setRulePrice(e.target.value)} /></div>
         <button onClick={addRule} className="py-2.5 rounded-lg text-xs font-bold h-[38px]" style={{ background: COLORS.court, color: "#fff" }}>
           <Plus size={14} className="inline" />
         </button>
@@ -3764,7 +3764,7 @@ function CourtCard({ court, onUpdate, onRemove }) {
               <Label>Acceso</Label>
               <Segmented value={court.isPrivate ? "priv" : "pub"} onChange={(v) => onUpdate({ isPrivate: v === "priv" })} options={[{ value: "pub", label: "Pública" }, { value: "priv", label: "Privada" }]} />
             </div>
-            <div><Label>Precio / bloque (USD)</Label><input type="number" min={0} style={inputStyle} value={court.pricePerBlock} onChange={(e) => onUpdate({ pricePerBlock: Number(e.target.value) || 0 })} /></div>
+            <div><Label>Precio / bloque (EUR)</Label><input type="number" min={0} style={inputStyle} value={court.pricePerBlock} onChange={(e) => onUpdate({ pricePerBlock: Number(e.target.value) || 0 })} /></div>
           </div>
           <div>
             <Label>Precios especiales por horario</Label>
@@ -4040,7 +4040,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
       <div className="grid sm:grid-cols-3 gap-4">
         <StatCard label="Jugadores registrados" value={clients.length} icon={Users} />
         <StatCard label="Con membresía activa" value={totalMembers} icon={Award} />
-        <StatCard label="Suscripciones históricas" value={subscriptions.length} icon={DollarSign} />
+        <StatCard label="Suscripciones históricas" value={subscriptions.length} icon={Euro} />
       </div>
 
       {pendingSubs.length > 0 && (
@@ -4172,7 +4172,7 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
       </div>
 
       <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-        <StatCard label="Ingresos totales" value={formatMoney(totalRevenue)} icon={DollarSign} sub="Histórico, todas las fuentes" />
+        <StatCard label="Ingresos totales" value={formatMoney(totalRevenue)} icon={Euro} sub="Histórico, todas las fuentes" />
         <StatCard label="MRR (ingreso mensual recurrente)" value={formatMoney(mrr)} icon={TrendingUp} sub={`${totalMembers} socio${totalMembers === 1 ? "" : "s"} con plan vigente`} />
         <StatCard label="Ingreso promedio por socio" value={formatMoney(arpu)} icon={Wallet} sub="MRR ÷ membresías activas" />
         <StatCard label="Membresías activas" value={totalMembers} icon={Award} sub={risk.length > 0 ? `${risk.length} en riesgo` : undefined} />
@@ -6477,7 +6477,7 @@ function OpenPlayForm({ courts, onSubmit, onCancel, initial = null, hideDate = f
               {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
-          <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio (EUR)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div><Label>Cupos (quorum máximo)</Label><input type="number" min={1} style={inputStyle} value={capacity} onChange={(e) => setCapacity(e.target.value)} /></div>
@@ -6593,9 +6593,9 @@ function ClaseForm({ courts, onSubmit, onCancel, initial = null, hideDate = fals
               {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
-          <div><Label>Precio sin membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          <div><Label>Precio sin membresía (EUR)</Label><input type="number" min={0} style={inputStyle} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
         </div>
-        <div><Label>Precio con membresía (USD)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
+        <div><Label>Precio con membresía (EUR)</Label><input type="number" min={0} style={inputStyle} value={memberPrice} onChange={(e) => setMemberPrice(e.target.value)} /></div>
         <div><Label>Canchas a utilizar</Label><MultiCourtSelect courts={courts} value={courtIds} onChange={setCourtIds} /></div>
         <div className="grid grid-cols-3 gap-3">
           {!hideDate && (
@@ -7575,7 +7575,7 @@ function MembershipPlanForm({ initial, basePlan, onSave, onCancel }) {
       <h4 className="font-bold text-sm mb-4">{initial ? `Editar ${initial.name}` : "Nuevo plan de membresía"}</h4>
       <div className="grid sm:grid-cols-2 gap-3">
         <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></div>
-        <div><Label>Precio mensual (USD)</Label><input type="number" min={0} style={inputStyle} value={monthlyPrice} onChange={(e) => setMonthlyPrice(e.target.value)} /></div>
+        <div><Label>Precio mensual (EUR)</Label><input type="number" min={0} style={inputStyle} value={monthlyPrice} onChange={(e) => setMonthlyPrice(e.target.value)} /></div>
       </div>
       <div className="grid sm:grid-cols-2 gap-3 mt-3">
         <div>
@@ -7647,13 +7647,13 @@ function MembershipPlanForm({ initial, basePlan, onSave, onCancel }) {
         {isBasePlan ? (
           <div className="grid grid-cols-[2fr_1fr_auto] gap-2 items-end">
             <div><Label>Concepto</Label><input style={inputStyle} value={rateLabel} onChange={(e) => setRateLabel(e.target.value)} placeholder="Precio Liga Propia" /></div>
-            <div><Label>Precio (USD)</Label><input type="number" min={0} style={inputStyle} value={ratePriceUsd} onChange={(e) => setRatePriceUsd(e.target.value)} placeholder="8.00" /></div>
+            <div><Label>Precio (EUR)</Label><input type="number" min={0} style={inputStyle} value={ratePriceUsd} onChange={(e) => setRatePriceUsd(e.target.value)} placeholder="8.00" /></div>
             <button onClick={addRate} disabled={!rateLabel.trim() || ratePriceUsd === ""} className="px-3 py-2.5 rounded-xl text-xs font-bold h-[38px]" style={{ background: rateLabel.trim() && ratePriceUsd !== "" ? COLORS.court : "#E5E5E5", color: rateLabel.trim() && ratePriceUsd !== "" ? "#fff" : "#999" }}>
               <Plus size={14} />
             </button>
           </div>
         ) : !basePlan ? (
-          <p className="text-xs italic" style={{ color: "#B23A1B" }}>Crea primero el plan "Sin plan" (precio $0) -- de ahí sale el precio base de cada concepto.</p>
+          <p className="text-xs italic" style={{ color: "#B23A1B" }}>Crea primero el plan "Sin plan" (precio €0) -- de ahí sale el precio base de cada concepto.</p>
         ) : availableBaseItems.length === 0 ? (
           <p className="text-xs italic" style={{ color: "#6B7688" }}>Ya agregaste todos los conceptos de Sin plan. Para uno nuevo, agrégalo primero allá.</p>
         ) : (
