@@ -1160,7 +1160,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.39.1";
+const APP_VERSION = "2.40.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6847,6 +6847,80 @@ function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance, onSetPa
   );
 }
 
+// Inscripción rápida por el admin (v2.40.0) -- el primer día de actividades, exigirle a cada
+// inscrito el checkout completo (referencia, comprobante...) es una traba a la conversión que
+// no hace falta: el admin puede ir llenando el cupo él mismo desde la pestaña "Inscritos",
+// sin más dato que el nombre y el precio. Reutiliza registerForOpenPlay/registerForClass tal
+// cual -- arranca "Por pagar" (mismo criterio que TeamRegistration en torneos) y el admin
+// verifica el pago después, en la cancha, con el mismo PaymentStatusSelect que ya usa la
+// lista de inscritos. Búsqueda de socio opcional (mismo patrón de PartnerPicker) solo para
+// asociar userId -- el precio SIEMPRE lo escribe el admin a mano, porque acá no sabemos qué
+// plan tiene el socio elegido para calcularle el descuento solo.
+function WalkInRegistration({ users, basePrice, club, onAdd }) {
+  const [query, setQuery] = useState("");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [price, setPrice] = useState(String(basePrice ?? 0));
+  const [saving, setSaving] = useState(false);
+
+  const results = !selectedUser && query.trim().length > 0
+    ? users.filter((u) => u.role !== "admin" &&
+        (u.name.toLowerCase().includes(query.trim().toLowerCase()) || u.email.toLowerCase().includes(query.trim().toLowerCase())))
+        .slice(0, 6)
+    : [];
+
+  const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); };
+  const clearUser = () => { setSelectedUser(null); setQuery(""); };
+
+  const canAdd = query.trim().length > 0 && price.trim() !== "" && !isNaN(Number(price)) && Number(price) >= 0;
+
+  const submit = async () => {
+    if (!canAdd || saving) return;
+    setSaving(true);
+    const priceUsd = Number(price);
+    await onAdd({
+      userName: query.trim(), userId: selectedUser?.id, paymentMethod: "efectivo",
+      reference: "", proofName: "", priceUsd, priceBs: priceUsd * (Number(club.bsPerUsd) || 0),
+    });
+    setSaving(false);
+    setQuery(""); setSelectedUser(null); setPrice(String(basePrice ?? 0));
+  };
+
+  return (
+    <div className="rounded-xl p-3 mb-3" style={{ background: "#F4F6FA", border: `1px dashed ${COLORS.line}` }}>
+      <p className="text-xs font-bold mb-2 flex items-center gap-1.5" style={{ color: COLORS.courtDark }}><UserPlus size={13} /> Agregar inscrito (admin)</p>
+      <div className="flex gap-2 flex-wrap items-start">
+        <div className="relative flex-1 min-w-[160px]">
+          {selectedUser ? (
+            <div className="flex items-center justify-between px-3 py-2 rounded-xl" style={{ background: "#DCEBD5" }}>
+              <span className="text-sm font-semibold truncate">{selectedUser.name} <span className="text-xs font-normal text-gray-500">· {selectedUser.email}</span></span>
+              <button onClick={clearUser} className="text-gray-400 hover:text-red-500 shrink-0"><X size={13} /></button>
+            </div>
+          ) : (
+            <>
+              <input style={inputStyle} value={query} onChange={(ev) => setQuery(ev.target.value)} placeholder="Nombre del inscrito (o busca un socio)" />
+              {results.length > 0 && (
+                <div className="absolute z-10 left-0 right-0 mt-1 rounded-xl overflow-hidden shadow-lg" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                  {results.map((u) => (
+                    <button key={u.id} type="button" onClick={() => pickUser(u)} className="w-full text-left px-3 py-2 text-sm flex items-center gap-2" style={{ background: "#fff" }}>
+                      <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{u.name.charAt(0).toUpperCase()}</span>
+                      <span className="truncate">{u.name}<span className="text-gray-400"> · {u.email}</span></span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <input type="number" min="0" step="0.5" style={{ ...inputStyle, width: 90 }} value={price} onChange={(ev) => setPrice(ev.target.value)} placeholder="Precio" />
+        <button disabled={!canAdd || saving} onClick={submit} style={{ background: canAdd && !saving ? COLORS.court : "#E5E5E5", color: canAdd && !saving ? "#fff" : "#999" }} className="px-3 py-2 rounded-xl text-sm font-bold shrink-0">
+          {saving ? "..." : "Agregar"}
+        </button>
+      </div>
+      <p className="text-[10px] mt-1.5" style={{ color: "#6B7688" }}>Arranca "Por pagar" -- confirma el pago en la lista de abajo cuando llegue a la cancha. Si es socio con descuento, ajusta el precio antes de agregar.</p>
+    </div>
+  );
+}
+
 // `occurrences` is every future/today entry that shares e's recurringGroupId (or just [e]
 // for a one-off event). When there's more than one, the panel lists each date so the member
 // picks which session to check out for, instead of forcing a single date on a recurring series.
@@ -6973,6 +7047,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
               </select>
             </div>
           )}
+          <WalkInRegistration users={users} basePrice={e.price} club={club} onAdd={(reg) => onRegister(attendeesDateId, reg)} />
           <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} onSetPaymentStatus={onSetPaymentStatus} />
         </div>
       )}
@@ -7106,6 +7181,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
               </select>
             </div>
           )}
+          <WalkInRegistration users={users} basePrice={e.price} club={club} onAdd={(reg) => onRegister(attendeesDateId, reg)} />
           <AttendeesPanel occurrences={isSeries ? occurrences.filter((o) => o.id === attendeesDateId) : occurrences} users={users} onRemove={onRemoveRegistration} onSetAttendance={onSetAttendance} onSetPaymentStatus={onSetPaymentStatus} />
         </div>
       )}
