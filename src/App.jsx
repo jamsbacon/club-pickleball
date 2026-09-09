@@ -1110,7 +1110,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.36.0";
+const APP_VERSION = "2.37.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1387,7 +1387,7 @@ export default function PickleballTournamentApp() {
     id: r.id, planId: r.plan_id, userId: r.user_id, paymentMethod: r.payment_method,
     reference: r.reference, proofName: r.proof_name,
     priceUsd: r.price_usd != null ? Number(r.price_usd) : null, priceBs: r.price_bs != null ? Number(r.price_bs) : null,
-    createdAt: new Date(r.created_at).getTime(),
+    paymentStatus: r.payment_status || "pendiente_efectivo", createdAt: new Date(r.created_at).getTime(),
   });
   const [subscriptions, setSubscriptions] = useState([]);
   const fetchSubscriptions = async () => {
@@ -2365,25 +2365,54 @@ export default function PickleballTournamentApp() {
       if (error) console.error("removeMembershipPlan:", error.message);
     });
   };
+  // Todos los planes pagos son mensuales -- al activarse, vencen en 1 mes desde HOY (no desde
+  // que se pidió la suscripción, si quedó pendiente de verificar un tiempo -- el socio empieza
+  // a contar su mes desde que de verdad puede usarlo). Un plan gratuito ($0) no vence.
+  const computePlanExpiry = (planId) => {
+    const plan = membershipPlans.find((p) => p.id === planId);
+    if (!plan || !(plan.monthlyPrice > 0)) return null;
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 10);
+  };
+
+  // Activa de verdad el plan de un socio: le pone plan_id + fecha de vencimiento en su
+  // perfil. Separado de subscribeToPlan/setSubscriptionPaymentStatus porque ambos necesitan
+  // hacer exactamente esto, pero en momentos distintos (v2.37.0 -- ver comentario de abajo).
+  const activateProfilePlan = async (userId, planId) => {
+    const expiresAt = computePlanExpiry(planId);
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, planId, planExpiresAt: expiresAt } : u)));
+    const { error } = await supabase.from("profiles").update({ plan_id: planId, plan_expires_at: expiresAt }).eq("id", userId);
+    if (error) console.error("activateProfilePlan:", error.message);
+  };
+
   const subscribeToPlan = async (planId, checkout) => {
+    // v2.37.0: una suscripción a un plan pago ya NO activa el plan de una -- queda "pendiente
+    // de verificar" (mismo criterio que reservas/inscripciones a Open Play/Clase/Torneo) hasta
+    // que el admin confirme que de verdad llegó el pago (ver setSubscriptionPaymentStatus,
+    // Usuarios). Solo se activa de inmediato si no hay nada que verificar (priceUsd === 0).
+    const paymentStatus = initialPaymentStatus(checkout.paymentMethod, checkout.priceUsd);
     const { data: row, error } = await supabase.from("subscriptions").insert({
       plan_id: planId, user_id: currentUser?.id, payment_method: checkout.paymentMethod,
       reference: checkout.reference, proof_name: checkout.proofName, price_usd: checkout.priceUsd, price_bs: checkout.priceBs,
+      payment_status: paymentStatus,
     }).select().single();
     if (error) { console.error("subscribeToPlan:", error.message); return; }
     setSubscriptions((p) => [...p, mapSubscriptionRow(row)]);
-    // Todos los planes pagos son mensuales -- al (re)suscribirse, vence en 1 mes desde hoy.
-    // Un plan gratuito ($0, ej. "Sin membresía") no vence.
-    const plan = membershipPlans.find((p) => p.id === planId);
-    let expiresAt = null;
-    if (plan && plan.monthlyPrice > 0) {
-      const d = new Date();
-      d.setMonth(d.getMonth() + 1);
-      expiresAt = d.toISOString().slice(0, 10);
-    }
-    setProfiles((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId, planExpiresAt: expiresAt } : u)));
-    const { error: profErr } = await supabase.from("profiles").update({ plan_id: planId, plan_expires_at: expiresAt }).eq("id", currentUser?.id);
-    if (profErr) console.error("subscribeToPlan (profiles):", profErr.message);
+    if (paymentStatus === "confirmada") await activateProfilePlan(currentUser?.id, planId);
+  };
+
+  // Cambia el estado de pago de una suscripción (admin, Usuarios -- v2.37.0). A diferencia del
+  // mismo control en reservas/inscripciones (ahí es solo informativo, ver PaymentStatusSelect),
+  // acá SÍ activa beneficios reales: pasar a "confirmada" es lo que recién le pone plan_id/
+  // plan_expires_at al socio -- antes de eso, aunque haya "pagado", sigue con el plan que
+  // tenía (o sin plan) hasta que el admin lo confirme.
+  const setSubscriptionPaymentStatus = async (subscription, newStatus) => {
+    const wasConfirmed = subscription.paymentStatus === "confirmada";
+    setSubscriptions((prev) => prev.map((s) => (s.id === subscription.id ? { ...s, paymentStatus: newStatus } : s)));
+    const { error } = await supabase.from("subscriptions").update({ payment_status: newStatus }).eq("id", subscription.id);
+    if (error) { console.error("setSubscriptionPaymentStatus:", error.message); return; }
+    if (newStatus === "confirmada" && !wasConfirmed) await activateProfilePlan(subscription.userId, subscription.planId);
   };
 
   // Auto-edición de perfil (nombre, WhatsApp, zona, DUPR) desde el tab Perfil -- nunca manda
@@ -2514,11 +2543,11 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "club" && role === "admin" && (
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-              subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} />
+              subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} subscriptions={subscriptions} />
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
-            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} />
+            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} />
           )}
 
           {effectiveTab === "estadisticas" && role === "admin" && (
@@ -2580,13 +2609,13 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "membresias" && (
-            <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users}
+            <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
               addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role} />
           )}
 
           {effectiveTab === "perfil" && (
-            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} updateProfile={updateProfile} setTab={setTab} />
+            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} subscriptions={subscriptions} updateProfile={updateProfile} setTab={setTab} />
           )}
         </main>
       </div>
@@ -3458,7 +3487,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
    TAB: CANCHAS
    ========================================================================= */
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
-  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users }) {
+  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions }) {
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
@@ -3602,7 +3631,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
          ya sabe renderizar el modo admin (crear/editar/borrar planes) vs. cliente (comparar y
          suscribirse) según `role` -- acá siempre es "admin", así que actúa como panel de
          configuración con la misma tabla comparativa como vista previa en vivo. */}
-      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users}
+      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
         addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
         subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
     </div>
@@ -3926,7 +3955,7 @@ function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegist
    verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
    es el historial de altas, no se usa aquí más que para el contador de arriba.
    ========================================================================= */
-function UsuariosTab({ users, subscriptions, membershipPlans }) {
+function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus }) {
   const [query, setQuery] = useState("");
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -3936,6 +3965,14 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
   // Mismo criterio que Estadísticas (isActiveMember): un plan pago vencido ya no cuenta como
   // "membresía activa" acá tampoco, para que ambos tabs cuenten lo mismo.
   const totalMembers = clients.filter((u) => isActiveMember(u, planFor(u), todayIso)).length;
+
+  // Suscripciones que todavía no activan el plan del socio (v2.37.0, ver subscribeToPlan) --
+  // ordenadas por más antigua primero, para que el admin resuelva las que llevan más tiempo
+  // esperando antes que las recién llegadas.
+  const pendingSubs = useMemo(() => subscriptions
+    .filter((s) => s.paymentStatus !== "confirmada")
+    .map((s) => ({ ...s, user: users.find((u) => u.id === s.userId), plan: membershipPlans.find((p) => p.id === s.planId) }))
+    .sort((a, b) => a.createdAt - b.createdAt), [subscriptions, users, membershipPlans]);
 
   const q = query.trim().toLowerCase();
   const filtered = [...users]
@@ -3951,6 +3988,28 @@ function UsuariosTab({ users, subscriptions, membershipPlans }) {
         <StatCard label="Con membresía activa" value={totalMembers} icon={Award} />
         <StatCard label="Suscripciones históricas" value={subscriptions.length} icon={DollarSign} />
       </div>
+
+      {pendingSubs.length > 0 && (
+        <Card>
+          <SectionTitle sub="Se activan solas apenas confirmes el pago -- hasta entonces el socio sigue con el plan que ya tenía.">
+            Suscripciones pendientes de verificación
+          </SectionTitle>
+          <div className="space-y-1.5">
+            {pendingSubs.map((s) => (
+              <div key={s.id} className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl" style={{ background: "#EEF1F7" }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold truncate" style={{ color: COLORS.ink }}>{s.user?.name || "Usuario eliminado"}</p>
+                  <p className="text-xs truncate" style={{ color: "#6B7688" }}>
+                    {s.plan?.name || "Plan"} · {formatMoney(s.priceUsd)} · {s.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"}
+                    {s.reference ? ` · Ref: ${s.reference}` : ""}
+                  </p>
+                </div>
+                <PaymentStatusSelect status={s.paymentStatus} onChange={(v) => setSubscriptionPaymentStatus(s, v)} />
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card>
         <div className="relative mb-4">
@@ -7549,7 +7608,7 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
 // scroll horizontal -- mismos datos que la tabla (mismo `rateLabels`, mismo `planState`),
 // simplemente reformateados como lista vertical de beneficio→valor en vez de columnas.
 function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, onDelete }) {
-  const { badge, isCurrent, isExpired, locked, isFull, slotsLeft } = state;
+  const { badge, isCurrent, isExpired, pending, locked, isFull, slotsLeft } = state;
   const accent = idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE";
   const blockedForNew = isFull && !isCurrent;
   return (
@@ -7579,7 +7638,7 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
                 background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.14)",
                 color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
               }}>
-              {locked ? "Tu plan actual" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
+              {pending ? "Pendiente de verificar" : locked ? "Tu plan actual" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
             </button>
           ) : (
             <p className="text-xs text-center mt-4 py-3" style={{ color: "#7C8CA6" }}>Así reservas sin membresía</p>
@@ -7634,7 +7693,7 @@ function PlanCard({ plan, idx, rateLabels, state, isAdmin, onCheckout, onEdit, o
   );
 }
 
-function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
+function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
   const [showForm, setShowForm] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [checkoutPlanId, setCheckoutPlanId] = useState(null);
@@ -7673,11 +7732,16 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
     // Una membresía vencida sigue siendo "el plan actual" pero debe poder renovarse -- si no,
     // el botón queda deshabilitado para siempre.
     const isExpired = isCurrent && !!currentUser.planExpiresAt && currentUser.planExpiresAt < todayIso;
-    const locked = isCurrent && !isExpired;
+    // Suscripción a ESTE plan ya enviada pero todavía sin verificar (v2.37.0) -- mientras el
+    // admin no la confirme, currentUser.planId no cambia (ver subscribeToPlan), así que sin
+    // esto el botón seguiría ofreciendo "Suscribirme" de nuevo y dejaría mandar la misma
+    // solicitud varias veces.
+    const pending = subscriptions.some((s) => s.userId === currentUser.id && s.planId === plan.id && s.paymentStatus !== "confirmada");
+    const locked = (isCurrent && !isExpired) || pending;
     const activeMembers = plan.maxMembers != null ? users.filter((u) => u.planId === plan.id && (!u.planExpiresAt || u.planExpiresAt >= todayIso)).length : 0;
     const slotsLeft = plan.maxMembers != null ? Math.max(0, plan.maxMembers - activeMembers) : null;
     const isFull = plan.maxMembers != null && slotsLeft === 0;
-    return { badge, isCurrent, isExpired, locked, isFull, slotsLeft };
+    return { badge, isCurrent, isExpired, pending, locked, isFull, slotsLeft };
   };
 
   const selectedPlan = orderedPlans.find((p) => p.id === checkoutPlanId);
@@ -7717,7 +7781,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
                   <span className="text-[10px] font-extrabold uppercase tracking-widest" style={{ color: "#4E6180" }}>Beneficio</span>
                 </th>
                 {orderedPlans.map((plan, idx) => {
-                  const { badge, locked, isExpired, isFull, slotsLeft, isCurrent } = planState(plan, idx);
+                  const { badge, locked, isExpired, pending, isFull, slotsLeft, isCurrent } = planState(plan, idx);
                   const blockedForNew = isFull && !isCurrent;
                   return (
                     <th key={plan.id} className="align-bottom px-2 pb-0 text-center" style={{ minWidth: 128 }}>
@@ -7741,7 +7805,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
                               background: locked || blockedForNew ? "rgba(255,255,255,0.08)" : badge ? badge.color : "rgba(255,255,255,0.12)",
                               color: locked || blockedForNew ? "#6B7688" : badge ? badge.text : "#fff",
                             }}>
-                            {locked ? "Tu plan" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
+                            {pending ? "Pendiente" : locked ? "Tu plan" : blockedForNew ? "Cupo lleno" : isExpired ? "Renovar" : "Suscribirme"}
                           </button>
                         )}
                         {!isAdmin && plan.monthlyPrice === 0 && (
@@ -7832,7 +7896,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, addMembershipPlan
    (ver updateProfile en el componente principal y el trigger de la migración
    profile_plan_expiry.sql que revierte cualquier intento de auto-ascenderse).
    ========================================================================= */
-function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
+function ProfileTab({ currentUser, membershipPlans, subscriptions, updateProfile, setTab }) {
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone || "");
   const [zone, setZone] = useState(currentUser.zone || "");
@@ -7860,6 +7924,11 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
   const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
   const today = new Date().toISOString().slice(0, 10);
   const isExpired = isPaidPlan && !!currentUser.planExpiresAt && currentUser.planExpiresAt < today;
+  // Suscripción mandada pero todavía sin verificar (v2.37.0) -- mientras tanto el plan de
+  // arriba sigue siendo el que ya tenía (o "Sin membresía"), así que esto es lo único que le
+  // avisa que su solicitud sí se registró y está en cola.
+  const pendingSub = subscriptions.filter((s) => s.userId === currentUser.id && s.paymentStatus !== "confirmada").sort((a, b) => b.createdAt - a.createdAt)[0];
+  const pendingPlan = pendingSub && membershipPlans.find((p) => p.id === pendingSub.planId);
 
   return (
     <div className="mt-2 space-y-6 max-w-2xl">
@@ -7958,6 +8027,12 @@ function ProfileTab({ currentUser, membershipPlans, updateProfile, setTab }) {
           </p>
         ) : (
           <p className="text-sm" style={{ color: "#6B7688" }}>No tienes una membresía paga — pagas por uso en cada reserva, Open Play o clase.</p>
+        )}
+
+        {pendingSub && (
+          <p className="text-xs mt-3 px-3 py-2.5 rounded-lg flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            <Clock size={13} className="shrink-0" /> Tu suscripción a {pendingPlan?.name || "un plan"} está pendiente de verificación -- se activa apenas el club confirme tu pago.
+          </p>
         )}
 
         {isPaidPlan && (
