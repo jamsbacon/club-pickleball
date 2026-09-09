@@ -232,9 +232,11 @@ function rateItemDiscountedPrice(discountPct, basePriceUsd) {
 
 // Texto a mostrar para el concepto `label` de un plan cualquiera. El plan base (Sin plan,
 // monthlyPrice === 0) muestra su propio precio tal cual -- es la fuente de verdad. Cualquier
-// otro plan muestra el precio YA con su descuento aplicado, recalculado del precio ACTUAL de
-// `basePlan` -- si mañana cambia el precio base, esto se actualiza solo, sin tener que volver
-// a tipear nada en cada plan pago.
+// otro plan muestra el % de descuento JUNTO con el monto resultante ("38% off → $4.96", v2.38.2
+// -- antes solo mostraba el monto final y el socio tenía que adivinar de dónde salía), para que
+// no haga falta calcular nada a mano. Recalculado del precio ACTUAL de `basePlan` -- si mañana
+// cambia el precio base, esto se actualiza solo, sin tener que volver a tipear nada en cada
+// plan pago.
 function rateItemDisplay(plan, label, basePlan) {
   if (!plan) return "—";
   if (plan.monthlyPrice === 0) {
@@ -245,7 +247,26 @@ function rateItemDisplay(plan, label, basePlan) {
   const baseItem = basePlan?.rateCard?.find((r) => r.label === label);
   const discounted = item ? rateItemDiscountedPrice(item.discountPct, baseItem?.priceUsd) : null;
   if (discounted == null) return "—";
-  return discounted <= 0 ? "Gratis" : formatMoney(discounted);
+  const pct = Number(item.discountPct) || 0;
+  if (pct <= 0) return formatMoney(discounted);
+  return discounted <= 0 ? "100% (Gratis)" : `${pct}% off → ${formatMoney(discounted)}`;
+}
+
+// Precio de reserva de UNA cancha real (courts.price_per_block -- la fuente de verdad de
+// Mi Club → Canchas, nunca un número aparte tipeado en el plan) según el plan: Sin plan
+// muestra el precio real de esa cancha; cualquier plan pago muestra el % de descuento que YA
+// aplica de verdad en el checkout (plan.courtDiscountPct) junto al monto resultante -- mismo
+// formato "% off → $" que rateItemDisplay, pero para canchas reales en vez del tarifario libre
+// (v2.38.2, reemplaza la fila única "Descuento en canchas*" por una fila POR cancha, a pedido
+// del club: "el plan base debe mostrar el precio de cada cancha").
+function courtRowDisplay(plan, court) {
+  if (!plan) return "—";
+  const base = Number(court.pricePerBlock) || 0;
+  if (plan.monthlyPrice === 0) return formatMoney(base);
+  const pct = plan.courtDiscountPct || 0;
+  if (pct <= 0) return formatMoney(base);
+  const discounted = base * (1 - pct / 100);
+  return discounted <= 0 ? "100% (Gratis)" : `${pct}% off → ${formatMoney(discounted)}`;
 }
 
 // Precio MARGINAL de agregar la categoría #`tier` al carrito (tier 3 cubre la 3ra Y cualquier
@@ -1139,7 +1160,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.38.1";
+const APP_VERSION = "2.38.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2648,7 +2669,7 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "perfil" && (
-            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} subscriptions={subscriptions} updateProfile={updateProfile} setTab={setTab} />
+            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} subscriptions={subscriptions} courts={courts} updateProfile={updateProfile} setTab={setTab} />
           )}
         </main>
       </div>
@@ -7701,7 +7722,7 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
 // teléfono). Debajo de `md` se cambia a esto: una card completa por plan, apiladas, sin
 // scroll horizontal -- mismos datos que la tabla (mismo `rateLabels`, mismo `planState`),
 // simplemente reformateados como lista vertical de beneficio→valor en vez de columnas.
-function PlanCard({ plan, idx, rateLabels, basePlan, state, isAdmin, onCheckout, onEdit, onDelete }) {
+function PlanCard({ plan, idx, rateLabels, basePlan, courts, state, isAdmin, onCheckout, onEdit, onDelete }) {
   const { badge, isCurrent, isExpired, pending, locked, isFull, slotsLeft } = state;
   const accent = idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE";
   const blockedForNew = isFull && !isCurrent;
@@ -7761,10 +7782,12 @@ function PlanCard({ plan, idx, rateLabels, basePlan, state, isAdmin, onCheckout,
           <span style={{ color: "#93A8C9" }}>Bloque de reserva gratis*</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}</span>
         </div>
-        <div className="flex items-center justify-between gap-3 text-xs">
-          <span style={{ color: "#93A8C9" }}>Descuento en canchas*</span>
-          <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.courtDiscountPct > 0 ? `${plan.courtDiscountPct}% off` : "Sin descuento"}</span>
-        </div>
+        {courts.map((c) => (
+          <div key={c.id} className="flex items-center justify-between gap-3 text-xs">
+            <span style={{ color: "#93A8C9" }}>Precio {c.name}</span>
+            <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{courtRowDisplay(plan, c)}</span>
+          </div>
+        ))}
         <div className="flex items-center justify-between gap-3 text-xs">
           <span style={{ color: "#93A8C9" }}>Precio Open Play</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>
@@ -7805,10 +7828,10 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
     orderedPlans.forEach((p) => (p.rateCard || []).forEach((r) => { if (!seen.includes(r.label)) seen.push(r.label); }));
     return seen;
   }, [orderedPlans]);
-  // "Bloque de reserva gratis*" y "Descuento en canchas*" (filas fijas, ya no vienen del rate
-  // card desde v2.30.0) comparten la misma nota al pie -- se muestra una sola vez si algún
-  // plan de verdad ofrece alguno de los dos, igual que en el cuadro que armó el club.
-  const hasFootnote = orderedPlans.some((p) => p.freeBlocksPerMonth > 0 || p.courtDiscountPct > 0);
+  // "Bloque de reserva gratis*" (fila fija, ya no viene del rate card desde v2.30.0) es la
+  // única fila que de verdad depende de la nota al pie (horario frío/sin torneo) -- las filas
+  // de precio por cancha (v2.38.2) no tienen esa restricción, aplican siempre.
+  const hasFootnote = orderedPlans.some((p) => p.freeBlocksPerMonth > 0);
 
   const badgeFor = (idx) => {
     if (idx === 0 && paidPlans.length > 0) return { label: "MEJOR VALOR", color: COLORS.ball, text: COLORS.courtDark };
@@ -7936,8 +7959,10 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
                 render={(p) => (p.monthlyPrice > 0 ? formatMoney(p.monthlyPrice) : "Pago por uso")} highlight />
               <ComparisonRow label="Bloque de reserva gratis*" plans={orderedPlans}
                 render={(p) => (p.freeBlocksPerMonth > 0 ? `${p.freeBlocksPerMonth}/mes` : "Ninguno")} />
-              <ComparisonRow label="Descuento en canchas*" plans={orderedPlans}
-                render={(p) => (p.courtDiscountPct > 0 ? `${p.courtDiscountPct}% off` : "Sin descuento")} />
+              {courts.map((c) => (
+                <ComparisonRow key={c.id} label={`Precio ${c.name}`} plans={orderedPlans}
+                  render={(p) => courtRowDisplay(p, c)} />
+              ))}
               <ComparisonRow label="Precio Open Play" plans={orderedPlans}
                 render={(p) => (p.openPlayDiscountPct >= 100 ? "100% (Gratis)" : p.openPlayDiscountPct > 0 ? `${p.openPlayDiscountPct}% off` : "Sin descuento")} />
               {rateLabels.map((lbl) => (
@@ -7959,7 +7984,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
            información que la tabla de arriba (mismo rateLabels/planState). */}
         <div className="md:hidden px-4 pb-6 space-y-4">
           {orderedPlans.map((plan, idx) => (
-            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} basePlan={basePlan} state={planState(plan, idx)} isAdmin={isAdmin}
+            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} basePlan={basePlan} courts={courts} state={planState(plan, idx)} isAdmin={isAdmin}
               onCheckout={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))}
               onEdit={() => { setEditingPlanId((id) => (id === plan.id ? null : plan.id)); setShowForm(false); }}
               onDelete={() => removeMembershipPlan(plan.id)} />
@@ -7997,7 +8022,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
    (ver updateProfile en el componente principal y el trigger de la migración
    profile_plan_expiry.sql que revierte cualquier intento de auto-ascenderse).
    ========================================================================= */
-function ProfileTab({ currentUser, membershipPlans, subscriptions, updateProfile, setTab }) {
+function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updateProfile, setTab }) {
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone || "");
   const [zone, setZone] = useState(currentUser.zone || "");
@@ -8143,9 +8168,11 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, updateProfile
             <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
               <Check size={12} color={COLORS.court} /> Bloques de reserva gratis — {plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}
             </li>
-            <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
-              <Check size={12} color={COLORS.court} /> Descuento en canchas — {plan.courtDiscountPct > 0 ? `${plan.courtDiscountPct}% off` : "Sin descuento"}
-            </li>
+            {courts.map((c) => (
+              <li key={c.id} className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
+                <Check size={12} color={COLORS.court} /> Precio {c.name} — {courtRowDisplay(plan, c)}
+              </li>
+            ))}
             <li className="text-xs flex items-center gap-1.5" style={{ color: "#6B7688" }}>
               <Check size={12} color={COLORS.court} /> Open Play — {plan.openPlayDiscountPct >= 100 ? "100% (Gratis)" : plan.openPlayDiscountPct > 0 ? `${plan.openPlayDiscountPct}% off` : "Sin descuento"}
             </li>
