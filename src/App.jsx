@@ -1110,7 +1110,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.35.0";
+const APP_VERSION = "2.36.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2090,7 +2090,12 @@ export default function PickleballTournamentApp() {
       const occurrenceDates = expandWeeklyDates(data.date, recurrence?.until);
       const seriesId = occurrenceDates.length > 1 ? crypto.randomUUID() : null;
       const rows = occurrenceDates.map((dt) => ({
-        name: data.name, image: imageUrl, level: data.level, price: data.price, member_price: data.memberPrice,
+        // member_price ya no lo llena OpenPlayForm (v2.30.0: el precio de socio sale del %
+        // del plan, no de esta actividad) -- data.memberPrice siempre venía undefined, y
+        // mandarlo así rompía el insert entero (la columna es not null, sin poder omitirla).
+        // 0 es el valor correcto ahora: la columna queda muerta pero coherente con lo que ya
+        // se migró en el resto de Open Plays existentes (ver 20260902010829).
+        name: data.name, image: imageUrl, level: data.level, price: data.price, member_price: 0,
         capacity: data.capacity, description: data.description || "", court_ids: data.courtIds,
         date: dt, start_time: data.startTime, end_time: data.endTime, recurring_group_id: seriesId,
         occupied_blocks: computeOccupiedBlocks(data.courtIds, dt, data.startTime, data.endTime),
@@ -3160,6 +3165,38 @@ function Modal({ onClose, children, maxWidth = 560 }) {
       </div>
     </div>,
     document.body
+  );
+}
+
+// Confirmación antes de borrar (v2.36.0) -- ninguna acción destructiva debería dispararse con
+// un solo clic sin poder arrepentirse. `options` son los botones de acción REALES aparte de
+// "Cancelar" (que siempre se agrega solo): una sola opción para un borrado simple ("Eliminar"),
+// o dos para una actividad recurrente ("Solo esta fecha" / "Toda la serie") -- ver EventDetail/
+// ClassDetail, los primeros en usar esto.
+function ConfirmDeleteModal({ title, message, options, onCancel }) {
+  return (
+    <Modal onClose={onCancel} maxWidth={420}>
+      <div className="p-5">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#FBEAE3" }}>
+            <AlertTriangle size={17} color={COLORS.clay} />
+          </div>
+          <div className="min-w-0">
+            <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>{title}</p>
+            {message && <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{message}</p>}
+          </div>
+        </div>
+        <div className="space-y-2">
+          {options.map((opt, i) => (
+            <button key={i} onClick={opt.onClick} className="w-full py-2.5 rounded-xl font-bold text-sm"
+              style={{ background: opt.variant === "danger" ? COLORS.clay : "#EAEEF5", color: opt.variant === "danger" ? "#fff" : COLORS.ink }}>
+              {opt.label}
+            </button>
+          ))}
+          <button onClick={onCancel} className="w-full py-2 rounded-xl font-semibold text-sm" style={{ color: "#6B7688" }}>Cancelar</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 function SectionTitle({ children, sub }) {
@@ -6716,6 +6753,11 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   // Pestaña Inscritos: arranca en `e` -- la ocurrencia próxima que ya representa esta tarjeta
   // ("la fecha publicada") -- y deja elegir otra fecha de la serie desde el selector.
   const [attendeesDateId, setAttendeesDateId] = useState(e.id);
+  // Confirmación antes de borrar (v2.36.0) -- null (nada), {mode:"series"} (el botón de
+  // arriba en una serie: hay que elegir entre solo esta fecha o toda la serie) o
+  // {mode:"single", id, label} (un borrado sin ambigüedad -- el botón de arriba cuando NO es
+  // serie, o cualquier fila puntual de "Fechas").
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   return (
     <Card>
@@ -6747,9 +6789,16 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
-          {isSeries && onRemoveSeries && <button onClick={onRemoveSeries} title="Eliminar toda la serie" className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
           {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
-          {!isSeries && onRemove && <button onClick={() => onRemove(e.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          {/* Un solo botón de borrar sin importar si es serie o no (v2.36.0) -- antes una
+             serie SOLO ofrecía "borrar toda la serie" desde acá arriba (borrar una fecha
+             puntual quedaba escondido en la pestaña "Fechas", más abajo). Ahora siempre
+             pregunta primero, y si es recurrente, deja elegir entre las dos opciones en el
+             mismo popup. */}
+          {(onRemove || onRemoveSeries) && (
+            <button onClick={() => setConfirmDelete(isSeries ? { mode: "series" } : { mode: "single", id: e.id, label: e.name })}
+              className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+          )}
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
       </div>
@@ -6779,7 +6828,7 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
                 </span></span>
                 <div className="flex items-center gap-2">
                   {onEdit && <button onClick={() => onEdit(o)} title="Editar esta fecha" className="text-gray-300 hover:text-gray-600"><Pencil size={13} /></button>}
-                  {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
+                  {onRemove && <button onClick={() => setConfirmDelete({ mode: "single", id: o.id, label: formatDateHuman(o.date) })} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
                   <button disabled={isFull} onClick={() => setCheckoutId(o.id)} className="text-xs font-bold px-2.5 py-1 rounded-lg"
                     style={{
                       background: isFull ? "#EDEEF2" : checkoutId === o.id ? COLORS.court : "#fff",
@@ -6825,6 +6874,24 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
             onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar inscripción" />
         )
       )}
+
+      {confirmDelete?.mode === "series" && (
+        <ConfirmDeleteModal
+          title="¿Qué quieres eliminar?"
+          message={`"${e.name}" es una actividad recurrente, cada ${weekdayLabel(e.date)}.`}
+          options={[
+            { label: `Solo esta fecha (${formatDateHuman(e.date)})`, variant: "danger", onClick: () => onRemove(e.id) },
+            { label: "Toda la serie (todas las fechas)", variant: "danger", onClick: () => onRemoveSeries() },
+          ]}
+          onCancel={() => setConfirmDelete(null)} />
+      )}
+      {confirmDelete?.mode === "single" && (
+        <ConfirmDeleteModal
+          title="¿Eliminar esta actividad?"
+          message={`"${confirmDelete.label}" se borrará por completo. Esta acción no se puede deshacer.`}
+          options={[{ label: "Eliminar", variant: "danger", onClick: () => onRemove(confirmDelete.id) }]}
+          onCancel={() => setConfirmDelete(null)} />
+      )}
     </Card>
   );
 }
@@ -6844,6 +6911,8 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
   const [adminTab, setAdminTab] = useState("resumen");
   // Mismo criterio que EventDetail: arranca en la ocurrencia próxima ("la fecha publicada").
   const [attendeesDateId, setAttendeesDateId] = useState(e.id);
+  // Confirmación antes de borrar -- ver mismo comentario en EventDetail.
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   return (
     <Card>
@@ -6869,9 +6938,13 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
-          {isSeries && onRemoveSeries && <button onClick={onRemoveSeries} title="Eliminar toda la serie" className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
           {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
-          {!isSeries && onRemove && <button onClick={() => onRemove(e.id)} className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>}
+          {/* Un solo botón de borrar sin importar si es serie o no -- ver mismo comentario en
+             EventDetail. */}
+          {(onRemove || onRemoveSeries) && (
+            <button onClick={() => setConfirmDelete(isSeries ? { mode: "series" } : { mode: "single", id: e.id, label: e.academyName })}
+              className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+          )}
           <button onClick={onClose} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
         </div>
       </div>
@@ -6893,7 +6966,7 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
               <span>{formatDateHuman(o.date)} <span className="text-gray-500 text-xs">· {o.registrations.length} inscrito(s)</span></span>
               <div className="flex items-center gap-2">
                 {onEdit && <button onClick={() => onEdit(o)} title="Editar esta fecha" className="text-gray-300 hover:text-gray-600"><Pencil size={13} /></button>}
-                {onRemove && <button onClick={() => onRemove(o.id)} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
+                {onRemove && <button onClick={() => setConfirmDelete({ mode: "single", id: o.id, label: formatDateHuman(o.date) })} title="Eliminar esta fecha" className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>}
                 <button onClick={() => setCheckoutId(o.id)} className="text-xs font-bold px-2.5 py-1 rounded-lg"
                   style={{ background: checkoutId === o.id ? COLORS.court : "#fff", color: checkoutId === o.id ? "#fff" : COLORS.court, border: `1.5px solid ${COLORS.court}` }}>
                   {checkoutId === o.id ? "Seleccionada" : "Elegir"}
@@ -6929,6 +7002,24 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
           <CheckoutPanel title={`Cupo en clase con ${e.academyName}${isSeries ? ` · ${formatDateHuman(checkoutTarget.date)}` : ""}`} baseUsd={e.price} discountPct={isMember ? memberDiscountPct(e.price, e.memberPrice) : 0} club={club} defaultName={currentUser.name}
             onConfirm={(checkout) => onRegister(checkoutTarget.id, { ...checkout, userId: currentUser.id })} onCancel={onClose} confirmLabel="Confirmar cupo" />
         )
+      )}
+
+      {confirmDelete?.mode === "series" && (
+        <ConfirmDeleteModal
+          title="¿Qué quieres eliminar?"
+          message={`"${e.academyName}" es una actividad recurrente, cada ${weekdayLabel(e.date)}.`}
+          options={[
+            { label: `Solo esta fecha (${formatDateHuman(e.date)})`, variant: "danger", onClick: () => onRemove(e.id) },
+            { label: "Toda la serie (todas las fechas)", variant: "danger", onClick: () => onRemoveSeries() },
+          ]}
+          onCancel={() => setConfirmDelete(null)} />
+      )}
+      {confirmDelete?.mode === "single" && (
+        <ConfirmDeleteModal
+          title="¿Eliminar esta actividad?"
+          message={`"${confirmDelete.label}" se borrará por completo. Esta acción no se puede deshacer.`}
+          options={[{ label: "Eliminar", variant: "danger", onClick: () => onRemove(confirmDelete.id) }]}
+          onCancel={() => setConfirmDelete(null)} />
       )}
     </Card>
   );
