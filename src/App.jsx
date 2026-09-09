@@ -1110,7 +1110,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.34.0";
+const APP_VERSION = "2.34.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2631,20 +2631,6 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
     if (result?.error) setError(result.error);
   };
 
-  const fillDemoAdmin = () => {
-    setMode("login");
-    setEmail("admin@club.com");
-    setPassword("admin123");
-    setError("");
-  };
-
-  const fillDemoClient = () => {
-    setMode("login");
-    setEmail("cliente@club.com");
-    setPassword("cliente123");
-    setError("");
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: COLORS.courtDark }}>
       <div className="w-full max-w-md">
@@ -2745,28 +2731,7 @@ function AuthScreen({ club, registerUser, loginUser, resetPasswordUser, updatePa
               {submitting ? "Un momento…" : mode === "login" ? "Entrar" : mode === "register" ? "Crear cuenta" : mode === "recover" ? "Enviar enlace" : "Guardar nueva contraseña"}
             </button>
           </div>
-
-          {(mode === "login" || mode === "register") && (
-            <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-              <p className="text-xs mb-2" style={{ color: "#6B7688" }}>¿Quieres probar rápido alguna vista?</p>
-              <div className="space-y-2">
-                <button onClick={fillDemoClient} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                  <Users size={13} /> Usar cuenta demo de cliente
-                </button>
-                <button onClick={fillDemoAdmin} className="w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                  <Shield size={13} /> Usar cuenta demo de administrador
-                </button>
-              </div>
-              <p className="mono text-[10px] text-center mt-2" style={{ color: "#8891A0" }}>cliente@club.com · cliente123 &nbsp;·&nbsp; admin@club.com · admin123</p>
-            </div>
-          )}
         </div>
-
-        {(mode === "login" || mode === "register") && (
-          <p className="text-center text-[11px] mt-5" style={{ color: "#55677E" }}>
-            Regístrate normal o usa una de las cuentas demo para entrar rápido a la vista de cliente o de administrador.
-          </p>
-        )}
       </div>
     </div>
   );
