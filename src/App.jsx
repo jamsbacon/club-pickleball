@@ -8,7 +8,7 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -35,6 +35,38 @@ const PAYMENT_STATUS_META = {
   pendiente_efectivo: { label: "Por pagar", bg: "#EDEFF4", fg: "#6B7688" },
   pendiente_verificacion: { label: "Pago por verificar", bg: "#FBF3E4", fg: "#8A5A16" },
   confirmada: { label: "Pago verificado", bg: "#DCEBD5", fg: "#0A1830" },
+};
+
+// Notificaciones push (v2.42.0) -- pega a api/send-push.js con la sesión actual. Función de
+// nivel de módulo (no vive dentro de PickleballTournamentApp) para que cualquier componente
+// la pueda llamar directo, sin pasarla como prop por 5 niveles. A propósito nunca lanza: si
+// el push falla (sin conexión, el usuario nunca activó notificaciones, el endpoint no está
+// configurado todavía...) no debe tumbar la acción real que la disparó -- confirmar un pago,
+// crear una actividad -- solo se registra en consola.
+const sendPush = async (type, payload) => {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    if (!token) return;
+    await fetch("/api/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ type, ...payload }),
+    });
+  } catch (err) {
+    console.error("sendPush:", err?.message || err);
+  }
+};
+
+// Conversión estándar de la llave pública VAPID (base64url) al Uint8Array que pide
+// pushManager.subscribe -- la misma función que aparece en cualquier tutorial de Web Push.
+const urlBase64ToUint8Array = (base64String) => {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
 };
 
 function shuffle(arr) {
@@ -1160,7 +1192,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.40.1";
+const APP_VERSION = "2.42.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1660,6 +1692,11 @@ export default function PickleballTournamentApp() {
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
+    // Push "nueva actividad publicada" (v2.42.0) -- justo el momento en que un torneo pasa de
+    // borrador a visible para todos (ver "Torneo status" en CLAUDE.md), no antes.
+    if (patch.status === "published") {
+      sendPush("activity_published", { title: "Nuevo torneo publicado", body: `Ya puedes inscribirte en "${tournament.name}".`, url: "/" });
+    }
   };
 
   // Flyer promocional del torneo (v2.33.0), mismo patrón que addOpenPlay: el archivo ya viene
@@ -1932,6 +1969,14 @@ export default function PickleballTournamentApp() {
       c.teams = c.teams.map((t) => (t.id === teamId ? { ...t, paymentStatus } : t));
       return c;
     });
+    // Push "pago verificado" (v2.42.0) -- a cada jugador del equipo que tenga cuenta (un
+    // compañero invitado por correo, sin userId todavía, simplemente no recibe nada).
+    if (paymentStatus === "confirmada") {
+      const team = categories.find((c) => c.id === catId)?.teams.find((t) => t.id === teamId);
+      (team?.players || []).forEach((p) => {
+        if (p.userId) sendPush("payment_confirmed", { userId: p.userId, title: "Pago verificado", body: "Tu inscripción al torneo quedó confirmada.", url: "/" });
+      });
+    }
   };
 
   const generateDraw = (catId, opts) => {
@@ -2063,6 +2108,8 @@ export default function PickleballTournamentApp() {
     supabase.from("bookings").update({ status: "confirmada" }).eq("id", id).then(({ error }) => {
       if (error) console.error("confirmBooking:", error.message);
     });
+    const booking = bookings.find((b) => b.id === id);
+    if (booking?.userId) sendPush("payment_confirmed", { userId: booking.userId, title: "Pago verificado", body: "Tu reserva de cancha quedó confirmada.", url: "/" });
   };
 
   // ---- Eventos: Open Plays y Clases ----
@@ -2161,6 +2208,9 @@ export default function PickleballTournamentApp() {
       const { data: inserted, error } = await supabase.from("open_plays").insert(rows).select();
       if (error) throw error;
       setOpenPlays((p) => [...p, ...inserted.map((r) => mapOpenPlayRow({ ...r, open_play_registrations: [] }))]);
+      // Push "nueva actividad publicada" (v2.42.0) -- un solo aviso por creación, aunque sea
+      // una serie recurrente de varias fechas (nadie quiere 8 notificaciones idénticas).
+      sendPush("activity_published", { title: "Nuevo Open Play", body: `Se abrió "${data.name}" -- ${formatDateHuman(occurrenceDates[0])}.`, url: "/" });
       return {};
     } catch (err) {
       console.error("addOpenPlay:", err?.message || err);
@@ -2180,6 +2230,8 @@ export default function PickleballTournamentApp() {
       const { data: inserted, error } = await supabase.from("classes").insert(rows).select();
       if (error) throw error;
       setClasses((p) => [...p, ...inserted.map((r) => mapClassRow({ ...r, class_registrations: [] }))]);
+      // Push "nueva actividad publicada" (v2.42.0) -- ver mismo comentario en addOpenPlay.
+      sendPush("activity_published", { title: "Nueva clase", body: `Se abrió la clase con ${data.academyName} -- ${formatDateHuman(occurrenceDates[0])}.`, url: "/" });
       return {};
     } catch (err) {
       console.error("addClass:", err?.message || err);
@@ -2338,6 +2390,9 @@ export default function PickleballTournamentApp() {
     }).select().single();
     if (error) { console.error("registerForOpenPlay:", error.message); return; }
     setOpenPlays((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
+    // Push "cupo casi lleno" (v2.42.0) -- el servidor vuelve a chequear la capacidad real
+    // antes de mandar nada (ver api/send-push.js); esta llamada es solo un "avisa si aplica".
+    sendPush("capacity_alert", { activityKind: "open_play", occurrenceId: id, title: "¡Últimos cupos!", body: "Un Open Play se está llenando -- inscríbete antes de que se agote.", url: "/" });
   };
   const registerForClass = async (id, reg) => {
     const { data: row, error } = await supabase.from("class_registrations").insert({
@@ -2347,6 +2402,8 @@ export default function PickleballTournamentApp() {
     }).select().single();
     if (error) { console.error("registerForClass:", error.message); return; }
     setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
+    // Push "cupo casi lleno" -- ver mismo comentario en registerForOpenPlay.
+    sendPush("capacity_alert", { activityKind: "clase", occurrenceId: id, title: "¡Últimos cupos!", body: "Una clase se está llenando -- inscríbete antes de que se agote.", url: "/" });
   };
 
   // Gestión de inscritos por el admin (v2.19.0) -- quitar una inscripción (canceló, error de
@@ -2381,11 +2438,19 @@ export default function PickleballTournamentApp() {
     setOpenPlays((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, paymentStatus } : r)) } : e)));
     const { error } = await supabase.from("open_play_registrations").update({ payment_status: paymentStatus }).eq("id", registrationId);
     if (error) console.error("setOpenPlayPaymentStatus:", error.message);
+    if (paymentStatus === "confirmada") {
+      const userId = openPlays.find((e) => e.id === occurrenceId)?.registrations.find((r) => r.id === registrationId)?.userId;
+      if (userId) sendPush("payment_confirmed", { userId, title: "Pago verificado", body: "Tu inscripción al Open Play quedó confirmada.", url: "/" });
+    }
   };
   const setClassPaymentStatus = async (occurrenceId, registrationId, paymentStatus) => {
     setClasses((p) => p.map((e) => (e.id === occurrenceId ? { ...e, registrations: e.registrations.map((r) => (r.id === registrationId ? { ...r, paymentStatus } : r)) } : e)));
     const { error } = await supabase.from("class_registrations").update({ payment_status: paymentStatus }).eq("id", registrationId);
     if (error) console.error("setClassPaymentStatus:", error.message);
+    if (paymentStatus === "confirmada") {
+      const userId = classes.find((e) => e.id === occurrenceId)?.registrations.find((r) => r.id === registrationId)?.userId;
+      if (userId) sendPush("payment_confirmed", { userId, title: "Pago verificado", body: "Tu inscripción a la clase quedó confirmada.", url: "/" });
+    }
   };
 
   // ---- Membresías ----
@@ -2470,7 +2535,10 @@ export default function PickleballTournamentApp() {
     setSubscriptions((prev) => prev.map((s) => (s.id === subscription.id ? { ...s, paymentStatus: newStatus } : s)));
     const { error } = await supabase.from("subscriptions").update({ payment_status: newStatus }).eq("id", subscription.id);
     if (error) { console.error("setSubscriptionPaymentStatus:", error.message); return; }
-    if (newStatus === "confirmada" && !wasConfirmed) await activateProfilePlan(subscription.userId, subscription.planId);
+    if (newStatus === "confirmada" && !wasConfirmed) {
+      await activateProfilePlan(subscription.userId, subscription.planId);
+      sendPush("payment_confirmed", { userId: subscription.userId, title: "Pago verificado", body: "Tu membresía ya está activa.", url: "/" });
+    }
   };
 
   // Auto-edición de perfil (nombre, WhatsApp, zona, DUPR) desde el tab Perfil -- nunca manda
@@ -3544,6 +3612,54 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
 /* =========================================================================
    TAB: CANCHAS
    ========================================================================= */
+// Anuncio push a todos los socios (v2.42.0) -- llama directo a api/send-push.js (no hace
+// falta que el admin pase por ningún mutator de PickleballTournamentApp; sendPush ya valida
+// del lado del servidor que quien llama de verdad sea admin, ver ADMIN_ONLY_TYPES ahí).
+function AnnouncementCard() {
+  const [title, setTitleI] = useState("");
+  const [body, setBody] = useState("");
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const send = async () => {
+    if (!title.trim() || !body.trim() || sending) return;
+    setSending(true); setResult(null);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data?.session?.access_token;
+      const res = await fetch("/api/send-push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ type: "announcement", title: title.trim(), body: body.trim() }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "No se pudo enviar.");
+      setResult({ ok: true, sent: json.sent ?? 0 });
+      setTitleI(""); setBody("");
+    } catch (err) {
+      setResult({ ok: false, error: err.message || "No se pudo enviar." });
+    }
+    setSending(false);
+  };
+
+  return (
+    <Card>
+      <SectionTitle sub="Llega como notificación push a todos los socios que las tengan activadas desde su Perfil.">Enviar anuncio</SectionTitle>
+      <div className="space-y-3">
+        <div><Label>Título</Label><input style={inputStyle} value={title} onChange={(e) => setTitleI(e.target.value)} placeholder="Ej. Cambio de horario este finde" maxLength={60} /></div>
+        <div><Label>Mensaje</Label><textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Escribe el anuncio…" maxLength={200} /></div>
+        {result?.ok && <p className="text-xs font-semibold" style={{ color: COLORS.court }}>Enviado a {result.sent} socio{result.sent === 1 ? "" : "s"} suscrito{result.sent === 1 ? "" : "s"}.</p>}
+        {result && !result.ok && <p className="text-xs font-semibold" style={{ color: "#B23A1B" }}>{result.error}</p>}
+        <button disabled={sending || !title.trim() || !body.trim()} onClick={send}
+          style={{ background: COLORS.court, color: "#fff", opacity: sending || !title.trim() || !body.trim() ? 0.5 : 1 }}
+          className="px-4 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
+          <Megaphone size={14} /> {sending ? "Enviando…" : "Enviar anuncio"}
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
   membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions }) {
   const [name, setName] = useState("");
@@ -3569,6 +3685,8 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
 
   return (
     <div className="mt-2 space-y-5">
+      <AnnouncementCard />
+
       <Card>
         <SectionTitle sub="Define el horario general del club. Estos bloques son la base de Reservas, Actividades y Torneos.">Horario en bloques</SectionTitle>
         <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -8117,6 +8235,103 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
    (ver updateProfile en el componente principal y el trigger de la migración
    profile_plan_expiry.sql que revierte cualquier intento de auto-ascenderse).
    ========================================================================= */
+// Activar/desactivar notificaciones push (v2.42.0) -- una tarjeta chica, autocontenida, en el
+// tab Perfil (la ve tanto un cliente como el admin, cada uno con su propio estado: activar
+// notificaciones es por dispositivo/navegador, no por cuenta). "unsupported" cubre tanto un
+// navegador viejo como abrir la app por http sin TLS (Web Push exige un contexto seguro) --
+// en ese caso no se ofrece nada, en vez de mostrar un botón que va a fallar seguro.
+function NotificationsCard({ currentUser }) {
+  const [status, setStatus] = useState("checking"); // checking | unsupported | denied | off | on
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !window.isSecureContext) {
+        if (alive) setStatus("unsupported");
+        return;
+      }
+      if (Notification.permission === "denied") { if (alive) setStatus("denied"); return; }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (alive) setStatus(sub ? "on" : "off");
+      } catch {
+        if (alive) setStatus("off");
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const enable = async () => {
+    setBusy(true); setError("");
+    try {
+      if (Notification.permission !== "granted") {
+        const perm = await Notification.requestPermission();
+        if (perm !== "granted") { setStatus("denied"); setBusy(false); return; }
+      }
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(import.meta.env.VITE_VAPID_PUBLIC_KEY) });
+      const j = sub.toJSON();
+      const { error } = await supabase.from("push_subscriptions")
+        .upsert({ user_id: currentUser.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: "endpoint" });
+      if (error) throw error;
+      setStatus("on");
+    } catch (err) {
+      setError(err?.message || "No se pudo activar las notificaciones.");
+    }
+    setBusy(false);
+  };
+
+  const disable = async () => {
+    setBusy(true); setError("");
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+        await sub.unsubscribe();
+      }
+      setStatus("off");
+    } catch (err) {
+      setError(err?.message || "No se pudo desactivar las notificaciones.");
+    }
+    setBusy(false);
+  };
+
+  if (status === "unsupported") return null;
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ background: status === "on" ? COLORS.court : "#EEF1F7" }}>
+            {status === "on" ? <Bell size={16} color="#fff" /> : <BellOff size={16} color="#78829A" />}
+          </div>
+          <div className="min-w-0">
+            <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Notificaciones</p>
+            <p className="text-xs" style={{ color: "#6B7688" }}>
+              {status === "denied" ? "Las bloqueaste en el navegador -- para activarlas, cambia el permiso de notificaciones de este sitio."
+                : status === "on" ? "Activas en este dispositivo."
+                : "Avísame de pagos verificados, cupos casi llenos y anuncios del club."}
+            </p>
+          </div>
+        </div>
+        {status !== "denied" && status !== "checking" && (
+          <button disabled={busy} onClick={status === "on" ? disable : enable}
+            style={{ background: status === "on" ? "#EEF1F7" : COLORS.court, color: status === "on" ? COLORS.ink : "#fff", opacity: busy ? 0.6 : 1 }}
+            className="px-3.5 py-2 rounded-xl text-sm font-bold shrink-0">
+            {busy ? "..." : status === "on" ? "Desactivar" : "Activar"}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-xs font-semibold mt-2" style={{ color: "#B23A1B" }}>{error}</p>}
+    </Card>
+  );
+}
+
 function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updateProfile, setTab }) {
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone || "");
@@ -8229,6 +8444,8 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updat
           </button>
         </div>
       </Card>
+
+      <NotificationsCard currentUser={currentUser} />
 
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
