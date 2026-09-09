@@ -1110,7 +1110,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.34.1";
+const APP_VERSION = "2.35.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1400,11 +1400,20 @@ export default function PickleballTournamentApp() {
   // ---- Cuentas (login / registro) ----
   // Backend real: Supabase Auth guarda las credenciales; la tabla `profiles` (1:1 con
   // auth.users, creada por un trigger en cuanto alguien se registra — ver supabase/schema.sql)
-  // guarda el resto (name, role, planId, zone). `users` sigue siendo la lista completa de
-  // perfiles, igual que antes, para no tocar los componentes que ya la consumen
-  // (EstadisticasTab, LoyalClientsCard, PartnerPicker, InscripcionTab) — solo cambia de dónde
-  // sale el dato: antes vivía en memoria, ahora se trae de la tabla `profiles`.
-  const [users, setUsers] = useState([]);
+  // guarda el resto (name, role, planId, zone, teléfono, DUPR...).
+  //
+  // v2.35.0: `profiles` dejó de ser de lectura pública total -- ahora cada quien solo puede
+  // leer su PROPIA fila completa (o cualquiera, si es admin). Lo que sí sigue siendo público
+  // (buscar pareja de dobles por nombre/correo en PartnerPicker, mostrar nombres en equipos)
+  // vive en la vista `profiles_directory`, que solo expone id/name/email/role -- nunca
+  // teléfono, zona, DUPR, fecha de nacimiento ni plan de nadie más. `profiles` (estado local:
+  // la propia fila siempre, y TODAS si sos admin, según RLS) y `directory` (todas, pero solo
+  // esas 4 columnas) se combinan en el `users` derivado de abajo para que el resto de la app
+  // (EstadisticasTab, LoyalClientsCard, PartnerPicker, InscripcionTab...) siga viendo un solo
+  // array, igual que antes -- solo que ahora los campos privados de OTRA persona vienen
+  // ausentes en vez de expuestos.
+  const [profiles, setProfiles] = useState([]);
+  const [directory, setDirectory] = useState([]);
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   // Supabase abre una sesión temporal de "recuperación" cuando el usuario entra desde el
@@ -1412,7 +1421,6 @@ export default function PickleballTournamentApp() {
   // para forzar la pantalla de "elige tu nueva contraseña" en vez de dejarlo pasar a la app.
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const currentUserId = session?.user?.id || null;
-  const currentUser = users.find((u) => u.id === currentUserId) || null;
 
   const mapProfileRow = (p) => ({
     id: p.id, name: p.name, email: p.email, role: p.role, planId: p.plan_id,
@@ -1420,15 +1428,29 @@ export default function PickleballTournamentApp() {
     gender: p.gender || null, birthDate: p.birth_date || null, onboardingCompleted: p.onboarding_completed,
     planExpiresAt: p.plan_expires_at || null, createdAt: new Date(p.created_at).getTime(),
   });
+  const mapDirectoryRow = (r) => ({ id: r.id, name: r.name, email: r.email, role: r.role });
 
   const fetchAllProfiles = async () => {
     const { data, error } = await supabase.from("profiles").select("*").order("created_at");
     if (error) { console.error("fetchAllProfiles:", error.message); return; }
-    setUsers(data.map(mapProfileRow));
+    setProfiles(data.map(mapProfileRow));
   };
+  const fetchDirectory = async () => {
+    const { data, error } = await supabase.from("profiles_directory").select("*");
+    if (error) { console.error("fetch profiles_directory:", error.message); return; }
+    setDirectory(data.map(mapDirectoryRow));
+  };
+  const users = useMemo(() => {
+    const byId = {};
+    directory.forEach((d) => { byId[d.id] = d; });
+    profiles.forEach((p) => { byId[p.id] = { ...byId[p.id], ...p }; }); // el perfil completo (propio, o todos si admin) completa/pisa al del directorio
+    return Object.values(byId);
+  }, [directory, profiles]);
+  const currentUser = users.find((u) => u.id === currentUserId) || null;
 
   useEffect(() => {
     fetchAllProfiles();
+    fetchDirectory();
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setAuthLoading(false);
@@ -2354,7 +2376,7 @@ export default function PickleballTournamentApp() {
       d.setMonth(d.getMonth() + 1);
       expiresAt = d.toISOString().slice(0, 10);
     }
-    setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId, planExpiresAt: expiresAt } : u)));
+    setProfiles((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, planId, planExpiresAt: expiresAt } : u)));
     const { error: profErr } = await supabase.from("profiles").update({ plan_id: planId, plan_expires_at: expiresAt }).eq("id", currentUser?.id);
     if (profErr) console.error("subscribeToPlan (profiles):", profErr.message);
   };
@@ -2363,7 +2385,7 @@ export default function PickleballTournamentApp() {
   // role/plan_id, esos solo cambian vía subscribeToPlan o el admin (además, el trigger
   // profiles_prevent_role_self_escalation revierte cualquier intento de cambiar el role propio).
   const updateProfile = async (patch) => {
-    setUsers((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, ...patch } : u)));
+    setProfiles((prev) => prev.map((u) => (u.id === currentUser?.id ? { ...u, ...patch } : u)));
     const dbPatch = {};
     if ("name" in patch) dbPatch.name = patch.name;
     if ("zone" in patch) dbPatch.zone = patch.zone;
