@@ -1192,7 +1192,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.42.0";
+const APP_VERSION = "2.42.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1219,7 +1219,12 @@ const FORMAT_LABELS = {
 
 const MODALITY_LABELS = { individual: "Individual (single)", dobles: "Dobles" };
 const GENDER_LABELS = { masculino: "Masculino", femenino: "Femenino", mixto: "Mixto" };
-const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open / Profesional"];
+// "Master (+50)" (v2.42.1) es una categoría por edad, no por nivel de habilidad -- convive acá
+// porque LEVEL_OPTIONS es la misma lista que arma el nombre de categoría de torneo
+// (NewCategoryForm) y el "nivel recomendado" de Open Play/Clase; se agrega al final para no
+// mover el índice de ninguna opción existente (recommendFormat usa esa posición como
+// prioridad de cancha entre categorías -- ver comentario ahí).
+const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open / Profesional", "Master (+50)"];
 
 function makeCategoryName(modality, gender, level) {
   return `${MODALITY_LABELS[modality]} ${GENDER_LABELS[gender]} ${level}`.replace("Individual (single)", "Individual");
