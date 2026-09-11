@@ -8,7 +8,7 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -68,6 +68,15 @@ const urlBase64ToUint8Array = (base64String) => {
   for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
   return outputArray;
 };
+
+// Link para compartir una actividad (v2.43.0) -- `kind` es "open_play"/"clase"/"torneo", `id`
+// es la clave de la serie (recurringGroupId || id) para Open Play/Clase, o el id del torneo.
+// Un visitante sin cuenta que abre este link ve PublicActivityView (ver más abajo, cerca de
+// AuthScreen) SIN loguearse -- solo se le pide cuenta al tocar "Inscribirme". No usa un router
+// de verdad (no hace falta: query param + `window.history.replaceState` alcanza para un solo
+// destino posible) -- ver el parseo de `act` y el efecto de auto-navegación en
+// PickleballTournamentApp.
+const shareActivityUrl = (kind, id) => `${window.location.origin}${window.location.pathname}?act=${kind}:${id}`;
 
 function shuffle(arr) {
   const a = [...arr];
@@ -1192,7 +1201,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.42.3";
+const APP_VERSION = "2.43.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1293,6 +1302,24 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
    ========================================================================= */
 export default function PickleballTournamentApp() {
   const [tab, setTab] = useState("club");
+
+  // Link compartido de una actividad (v2.43.0) -- `?act=<kind>:<id>`, parseado UNA sola vez al
+  // montar (no reactivo a cambios de URL después: esta app no tiene router, un solo destino
+  // posible al abrir es todo lo que hace falta). Sin sesión, dispara PublicActivityView en vez
+  // de AuthScreen (ver más abajo); con sesión (ya la tenía, o la creó recién desde ahí), un
+  // efecto más abajo lo traduce a navegación real dentro de la app y limpia el query param.
+  const [publicAct] = useState(() => {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("act");
+      if (!raw) return null;
+      const sep = raw.indexOf(":");
+      if (sep < 0) return null;
+      const kind = raw.slice(0, sep), id = raw.slice(sep + 1);
+      if (!id || !["open_play", "clase", "torneo"].includes(kind)) return null;
+      return { kind, id };
+    } catch { return null; }
+  });
+  const publicActConsumedRef = useRef(false);
 
   // ---- Club-wide schedule & courts (shared by Reservas, Eventos y Torneos) ----
   // `clubs`/`courts` en Supabase son la fuente real; estos mappers convierten las filas
@@ -1542,6 +1569,20 @@ export default function PickleballTournamentApp() {
     return Object.values(byId);
   }, [directory, profiles]);
   const currentUser = users.find((u) => u.id === currentUserId) || null;
+
+  // Traduce el link compartido (`publicAct`) a navegación real UNA sola vez que hay sesión --
+  // ya sea porque el visitante se acaba de loguear/registrar desde PublicActivityView, o
+  // porque ya tenía sesión abierta en este dispositivo cuando tocó el link. "torneo" entra
+  // directo a ese torneo (activeTournamentId ya alcanza, TorneosSection se encarga del resto);
+  // Open Play/Clase necesitan que EventosTab, más abajo, abra el detalle -- eso lo hace su
+  // propio efecto leyendo el prop `autoOpen` que le pasamos con el mismo publicAct.
+  useEffect(() => {
+    if (!publicAct || !currentUser || publicActConsumedRef.current) return;
+    publicActConsumedRef.current = true;
+    if (publicAct.kind === "torneo") { setActiveTournamentId(publicAct.id); setActiveCatId(null); }
+    setTab(publicAct.kind === "torneo" ? "torneos" : "eventos");
+    window.history.replaceState({}, "", window.location.pathname);
+  }, [publicAct, currentUser]);
 
   useEffect(() => {
     fetchAllProfiles();
@@ -2161,7 +2202,13 @@ export default function PickleballTournamentApp() {
     if (error) { console.error("fetch classes:", error.message); return; }
     setClasses(data.map(mapClassRow));
   };
-  useEffect(() => { fetchOpenPlays(); fetchClasses(); }, []);
+  // Bandera de "ya sabemos qué hay" (v2.43.0), solo para PublicActivityView -- sin ella, un
+  // visitante sin cuenta con internet lento vería "esta actividad ya no está disponible" por
+  // el instante en que openPlays/classes todavía están vacíos, antes de que el fetch
+  // resuelva -- un falso negativo confuso. La app logueada no necesita este flag: ahí una
+  // lista vacía momentánea nunca se muestra como "no existe", solo como "cargando".
+  const [activitiesLoaded, setActivitiesLoaded] = useState(false);
+  useEffect(() => { Promise.all([fetchOpenPlays(), fetchClasses()]).finally(() => setActivitiesLoaded(true)); }, []);
 
   // Todo lo que ve el dashboard de Estadísticas se trae una sola vez al montar la app -- si un
   // socio se activa desde otra sesión (o el admin lo activa y sigue navegando sin recargar la
@@ -2634,6 +2681,23 @@ export default function PickleballTournamentApp() {
   }
 
   if (!currentUser) {
+    // Alguien sin cuenta abrió un link compartido (v2.43.0) -- ve la ficha pública de esa
+    // actividad en vez del login de una, y solo llega al login/registro si toca
+    // "Inscribirme" (ver PublicActivityView). Si el link ya no aplica (id inválido, o la
+    // actividad de verdad no existe/no está publicada) cae de vuelta al login normal más
+    // abajo -- resolvePublicActivity devuelve null y PublicActivityView ya sabe mostrar ese
+    // caso con su propio mensaje, no hace falta un branch aparte.
+    if (publicAct) {
+      return (
+        <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
+          <GlobalStyles />
+          <PublicActivityView
+            loading={!activitiesLoaded}
+            activity={activitiesLoaded ? resolvePublicActivity(publicAct, openPlays, classes, tournaments, categories) : null}
+            club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />
+        </div>
+      );
+    }
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
         <GlobalStyles />
@@ -2707,7 +2771,8 @@ export default function PickleballTournamentApp() {
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
-              onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }} />
+              onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }}
+              autoOpen={publicAct?.kind === "open_play" || publicAct?.kind === "clase" ? publicAct : null} />
           )}
 
           {effectiveTab === "torneos" && (
@@ -2773,6 +2838,123 @@ function GlobalStyles() {
       ::-webkit-scrollbar-thumb{background:#DCD6C4;border-radius:8px;}
       ::-webkit-scrollbar-track{background:transparent;}
     `}</style>
+  );
+}
+
+// Compartir por WhatsApp (v2.43.0) -- visible tanto para el admin como para el cliente (a
+// diferencia de casi todo lo demás en una ficha de actividad, esto nunca se filtra por
+// isAdmin). wa.me es el link universal de WhatsApp: abre la app si está instalada o WhatsApp
+// Web si no -- no hace falta ninguna API ni backend propio, el usuario elige a quién
+// mandárselo dentro de la propia WhatsApp.
+function ShareButton({ kind, id, text, className }) {
+  const url = shareActivityUrl(kind, id);
+  const waHref = `https://wa.me/?text=${encodeURIComponent(`${text}\n${url}`)}`;
+  return (
+    <a href={waHref} target="_blank" rel="noopener noreferrer" title="Compartir por WhatsApp"
+      onClick={(e) => e.stopPropagation()}
+      className={className || "text-gray-300 hover:text-green-600"}>
+      <Share2 size={16} />
+    </a>
+  );
+}
+
+// Arma el resumen público de una actividad a partir de lo que YA está cargado en memoria
+// (openPlays/classes/tournaments/categories se traen sin importar si hay sesión -- ver
+// fetchOpenPlays/fetchClasses y los efectos de tournaments/categories en
+// PickleballTournamentApp) -- nunca dispara una consulta propia. Mismo criterio de "torneo
+// publicado" que EventosTab/TournamentsListTab: un torneo en borrador no es visible ni
+// siquiera con el link directo en la mano.
+function resolvePublicActivity({ kind, id }, openPlays, classes, tournaments, categories) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  if (kind === "open_play") {
+    const rows = openPlays.filter((e) => (e.recurringGroupId || e.id) === id);
+    if (rows.length === 0) return null;
+    const rep = rows.find((o) => o.date >= todayIso) || rows[rows.length - 1];
+    const slotsLeft = rep.capacity ? Math.max(0, rep.capacity - rep.registrations.length) : null;
+    return {
+      kind, id, name: rep.name, description: rep.description || `Nivel ${rep.level}`, image: rep.image,
+      dateLabel: formatDateHuman(rep.date), timeLabel: `${formatTimeAmPm(rep.startTime)}–${formatTimeAmPm(rep.endTime)}`,
+      priceLabel: rep.price > 0 ? formatMoney(rep.price) : "Gratis",
+      spotsLabel: slotsLeft === null ? null : slotsLeft > 0 ? `${slotsLeft} cupo${slotsLeft === 1 ? "" : "s"} disponible${slotsLeft === 1 ? "" : "s"}` : "Cupo lleno",
+    };
+  }
+  if (kind === "clase") {
+    const rows = classes.filter((e) => (e.recurringGroupId || e.id) === id);
+    if (rows.length === 0) return null;
+    const rep = rows.find((c) => c.date >= todayIso) || rows[rows.length - 1];
+    return {
+      kind, id, name: rep.academyName, description: `Nivel ${rep.level}`, image: null,
+      dateLabel: formatDateHuman(rep.date), timeLabel: `${formatTimeAmPm(rep.startTime)}–${formatTimeAmPm(rep.endTime)}`,
+      priceLabel: rep.price > 0 ? formatMoney(rep.price) : "Gratis", spotsLabel: null,
+    };
+  }
+  if (kind === "torneo") {
+    const t = tournaments.find((x) => x.id === id && x.status === "published");
+    if (!t) return null;
+    const tCats = categories.filter((c) => c.tournamentId === t.id);
+    const entryPrice = tournamentRegPrice(t, 1);
+    return {
+      kind, id, name: t.name || "Torneo del club",
+      description: tCats.length ? `${tCats.length} categoría${tCats.length === 1 ? "" : "s"} abierta${tCats.length === 1 ? "" : "s"}.` : "Sin categorías aún.",
+      image: t.image || null,
+      dateLabel: t.startDate ? formatDateHuman(t.startDate) : "Fecha por confirmar",
+      timeLabel: t.dailyStart ? `${formatTimeAmPm(t.dailyStart)}–${formatTimeAmPm(t.dailyEnd)}` : "",
+      priceLabel: entryPrice > 0 ? `Desde ${formatMoney(entryPrice)}` : "Gratis", spotsLabel: null,
+    };
+  }
+  return null;
+}
+
+// Ficha pública de una actividad (v2.43.0) -- lo que ve alguien SIN cuenta que abre un link
+// compartido por WhatsApp. `activity` ya viene resuelta (resolvePublicActivity) o null si no
+// existe / (torneo) no está publicado. `loading` distingue "todavía no sabemos" (spinner) de
+// "de verdad no existe" -- sin esto, un visitante con internet lento vería "no disponible" por
+// un instante antes de que carguen los datos, un falso negativo confuso. Tocar "Inscribirme"
+// no inscribe nada acá -- solo abre el login/registro normal; la inscripción de verdad sigue
+// pasando por EventDetail/ClassDetail/InscripcionTab una vez adentro (ver auto-navegación en
+// PickleballTournamentApp).
+function PublicActivityView({ activity, loading, club, registerUser, loginUser, resetPasswordUser }) {
+  const [wantsAuth, setWantsAuth] = useState(false);
+
+  if (wantsAuth) {
+    return <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />;
+  }
+
+  return (
+    <div className="w-full min-h-screen flex items-center justify-center p-4" style={{ background: COLORS.chalk }}>
+      <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+        <div className="flex items-center gap-2 mb-5">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background: COLORS.court }}>
+            <PartyPopper size={18} color="#fff" />
+          </div>
+          <span className="font-extrabold truncate" style={{ color: COLORS.courtDark }}>{club?.name || "Pickle Hub"}</span>
+        </div>
+
+        {loading ? (
+          <p className="text-sm py-6 text-center" style={{ color: "#6B7688" }}>Cargando actividad…</p>
+        ) : activity ? (
+          <>
+            {activity.image && <img src={activity.image} alt="" className="w-full h-36 object-cover rounded-xl mb-4" />}
+            <p className="disp text-xl mb-1" style={{ color: COLORS.courtDark }}>{activity.name}</p>
+            <p className="text-sm mb-3" style={{ color: "#6B7688" }}>{activity.dateLabel}{activity.timeLabel && ` · ${activity.timeLabel}`}</p>
+            {activity.description && <p className="text-sm mb-4" style={{ color: "#3D4A5C" }}>{activity.description}</p>}
+            <div className="flex items-center justify-between mb-5 px-3 py-2.5 rounded-xl" style={{ background: "#EEF1F7" }}>
+              <span className="text-sm font-bold" style={{ color: COLORS.court }}>{activity.priceLabel}</span>
+              {activity.spotsLabel && <span className="text-xs" style={{ color: "#6B7688" }}>{activity.spotsLabel}</span>}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm mb-5" style={{ color: "#6B7688" }}>Esta actividad ya no está disponible, pero puedes iniciar sesión para ver todo lo que tiene el club ahora mismo.</p>
+        )}
+
+        {!loading && (
+          <button onClick={() => setWantsAuth(true)} style={{ background: COLORS.court, color: "#fff" }}
+            className="w-full py-3 rounded-xl font-bold text-sm">
+            {activity ? "Iniciar sesión para inscribirme" : "Iniciar sesión"}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -4497,7 +4679,14 @@ function TorneosSection(props) {
             className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
         )}
       </div>
-      <h2 className="disp text-xl md:text-[22px] mb-4" style={{ color: COLORS.courtDark }}>{tournament.name}</h2>
+      <div className="flex items-center gap-2 mb-4">
+        <h2 className="disp text-xl md:text-[22px]" style={{ color: COLORS.courtDark }}>{tournament.name}</h2>
+        {/* Compartir (v2.43.0) -- visible para admin y cliente por igual, ver mismo comentario
+           en EventDetail. Solo tiene sentido si el torneo ya está publicado -- uno en
+           borrador no es visible ni con el link en la mano (resolvePublicActivity lo filtra),
+           así que compartirlo ahora mandaría un link roto. */}
+        {tournament.status === "published" && <ShareButton kind="torneo" id={tournament.id} text={`Mira este torneo: ${tournament.name}`} />}
+      </div>
 
       {/* Aviso de resiliencia sin internet (v2.34.0) -- solo el admin puede generar estos
          cambios pendientes (resultados, calendario, etc.), así que solo a él le hace falta
@@ -7118,6 +7307,12 @@ function EventDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
           </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          {/* Compartir (v2.43.0) -- visible para admin y cliente por igual, a diferencia de
+             los botones de editar/borrar que le siguen. La clave del link es la de la serie
+             (recurringGroupId||e.id), igual que `selected.key` en EventosTab, para que un
+             evento recurrente comparta un solo link estable sin importar qué fecha esté "al
+             frente" ese día. */}
+          <ShareButton kind="open_play" id={e.recurringGroupId || e.id} text={`Mira este Open Play: ${e.name}`} />
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {/* Un solo botón de borrar sin importar si es serie o no (v2.36.0) -- antes una
@@ -7268,6 +7463,8 @@ function ClassDetail({ e, occurrences, courts, club, currentPlan, currentUser, u
           </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          {/* Compartir -- ver mismo comentario en EventDetail. */}
+          <ShareButton kind="clase" id={e.recurringGroupId || e.id} text={`Mira esta clase con ${e.academyName}`} />
           {isSeries && onEditSeries && <button onClick={onEditSeries} title="Editar toda la serie" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {!isSeries && onEdit && <button onClick={() => onEdit(e)} title="Editar" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>}
           {/* Un solo botón de borrar sin importar si es serie o no -- ver mismo comentario en
@@ -7364,10 +7561,22 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, onCreateTournament, role }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, onCreateTournament, role, autoOpen }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
+  // Abre el detalle solo (v2.43.0) cuando se llega desde un link compartido (`autoOpen`, ver
+  // PickleballTournamentApp) -- una vez, con un ref en vez de limpiar `autoOpen` desde el
+  // padre, porque el padre ya usó ese mismo valor para decidir tab/activeTournamentId y no
+  // vale la pena duplicar el "ya lo consumí" en dos componentes.
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!autoOpen || autoOpenedRef.current) return;
+    const exists = autoOpen.kind === "open_play"
+      ? openPlays.some((e) => (e.recurringGroupId || e.id) === autoOpen.id)
+      : classes.some((e) => (e.recurringGroupId || e.id) === autoOpen.id);
+    if (exists) { setSelected({ kind: autoOpen.kind, key: autoOpen.id }); autoOpenedRef.current = true; }
+  }, [autoOpen, openPlays, classes]);
   // { data, isSeries } del Open Play/Clase que se está editando ahora mismo -- data trae
   // todos los campos de OpenPlayForm/ClaseForm (una ocurrencia puntual, o la representante
   // de la serie si isSeries). null = no hay edición en curso (se ve EventDetail/ClassDetail
