@@ -1192,7 +1192,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.42.2";
+const APP_VERSION = "2.42.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4805,57 +4805,48 @@ function NewCategoryForm({ onCreate, onCancel }) {
 
 /* Player-name + ranking field: autofills the ranking from the app-wide directory
    (by prior tournament results) and only lets the organizer override it. */
-function PlayerField({ label, name, setName, ranking, setRanking, suggestedRanking }) {
-  const [editing, setEditing] = useState(false);
+// Sin edición manual de ranking (v2.42.3) -- antes el organizador podía tipear un número
+// propio con el lápiz, pero eso hacía que anotar un equipo pidiera un paso extra por
+// jugador para nada (el ranking sugerido, por historial de la app, ya es el dato correcto
+// casi siempre). Ahora el ranking sale solo, de una: se muestra tal cual lo calcula
+// suggestedRanking, sin campo ni botón que editarlo.
+function PlayerField({ label, name, setName, suggestedRanking }) {
   const suggestion = name.trim() ? suggestedRanking(name) : "";
-  const showSuggested = suggestion !== "" && !editing && String(ranking) === "";
   return (
     <div>
       <Label>{label}</Label>
       <input style={{ ...inputStyle, marginBottom: 6 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre" />
-      <div className="flex items-center gap-1.5">
-        <input type="number" style={inputStyle} disabled={showSuggested}
-          value={showSuggested ? suggestion : ranking}
-          onChange={(e) => setRanking(e.target.value)}
-          placeholder="Ranking" />
-        <button type="button" onClick={() => setEditing((e) => !e)} title="Editar ranking (solo organizador)"
-          className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
-          <Pencil size={13} />
-        </button>
+      <div className="px-3 py-2.5 rounded-xl text-sm" style={{ background: "#EEF1F7", color: suggestion !== "" ? COLORS.ink : "#9AA6BC" }}>
+        Ranking: <span className="font-semibold">{suggestion !== "" ? suggestion : "Sin historial (0)"}</span>
       </div>
-      {showSuggested && <p className="text-[10px] mt-1" style={{ color: "#6B7688" }}>Sugerido por ranking histórico — pulsa el lápiz para editarlo.</p>}
     </div>
   );
 }
 
 function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus }) {
   const isDoubles = cat.modality !== "individual";
-  const [p1, setP1] = useState(""); const [r1, setR1] = useState("");
-  const [p2, setP2] = useState(""); const [r2, setR2] = useState("");
+  const [p1, setP1] = useState("");
+  const [p2, setP2] = useState("");
   const full = cat.maxTeams && cat.teams.length >= cat.maxTeams;
 
   const submit = () => {
     if (!p1.trim()) return;
     if (isDoubles && !p2.trim()) return;
-    const r1Final = r1 !== "" ? r1 : suggestedRanking(p1);
-    const players = [{ name: p1.trim(), ranking: r1Final || 0 }];
-    if (isDoubles) {
-      const r2Final = r2 !== "" ? r2 : suggestedRanking(p2);
-      players.push({ name: p2.trim(), ranking: r2Final || 0 });
-    }
+    const players = [{ name: p1.trim(), ranking: suggestedRanking(p1) || 0 }];
+    if (isDoubles) players.push({ name: p2.trim(), ranking: suggestedRanking(p2) || 0 });
     addTeam(cat.id, players);
-    setP1(""); setR1(""); setP2(""); setR2("");
+    setP1(""); setP2("");
   };
 
   return (
     <Card>
-      <SectionTitle sub="El nombre del equipo se arma solo con los nombres de los jugadores. El ranking se sugiere del historial de la app y solo el organizador puede editarlo.">
+      <SectionTitle sub="El nombre del equipo se arma solo con los nombres de los jugadores. El ranking sale automático del historial de la app.">
         Equipos inscritos {cat.maxTeams ? `(${cat.teams.length}/${cat.maxTeams})` : ""}
       </SectionTitle>
 
       <div className={`grid gap-2 items-start mb-4 ${isDoubles ? "md:grid-cols-[1fr_1fr_auto]" : "md:grid-cols-[1fr_auto]"}`}>
-        <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} ranking={r1} setRanking={setR1} suggestedRanking={suggestedRanking} />
-        {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} ranking={r2} setRanking={setR2} suggestedRanking={suggestedRanking} />}
+        <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} suggestedRanking={suggestedRanking} />
+        {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} suggestedRanking={suggestedRanking} />}
         <button onClick={submit} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1 h-[38px] self-end">
           <Plus size={16} /> {full ? "Añadir (espera)" : "Añadir"}
         </button>
