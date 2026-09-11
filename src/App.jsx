@@ -1192,7 +1192,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.42.1";
+const APP_VERSION = "2.42.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4570,6 +4570,16 @@ function TorneosSection(props) {
 // pestañas navegan la MISMA `activeCat`/`setActiveCatId` (viven en TorneosSection), así que
 // elegir una categoría en una se mantiene elegida al pasar a las otras. `onCreateClick` solo
 // se pasa desde Categorías -- es la única pestaña donde se crean categorías nuevas.
+// Nivel primero y en negrita, después modalidad + género (v2.42.2) -- ej. "Open Dobles
+// Masculino". Distinto del orden en que se GUARDA `cat.name` (makeCategoryName arma
+// "Modalidad Género Nivel", ese orden no cambia -- ver comentario ahí); esto arma la etiqueta
+// de nuevo a partir de modality/gender/level en cada render, así que aplica igual a
+// categorías viejas y nuevas sin tocar ningún dato guardado.
+function CategoryLabel({ cat }) {
+  const modalityLabel = cat.modality === "individual" ? "Individual" : "Dobles";
+  return <><b>{cat.level}</b> {modalityLabel} {GENDER_LABELS[cat.gender]}</>;
+}
+
 function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, emptyHint }) {
   return (
     <Card>
@@ -4579,7 +4589,7 @@ function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, 
           <button key={c.id} onClick={() => setActiveCatId(c.id)}
             className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between group"
             style={{ background: activeCat?.id === c.id ? "#EAF3E6" : "transparent", color: activeCat?.id === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: activeCat?.id === c.id ? 700 : 500 }}>
-            <span className="truncate">{c.name}</span>
+            <span className="truncate"><CategoryLabel cat={c} /></span>
             <ChevronRight size={14} className="opacity-40 group-hover:opacity-100" />
           </button>
         ))}
