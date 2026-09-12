@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.44.2";
+const APP_VERSION = "2.44.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4803,7 +4803,9 @@ const TORNEO_SUB_ITEMS = [
   { id: "categorias", label: "Categorías", roles: ["admin"] },
   { id: "participantes", label: "Participantes", roles: ["admin"] },
   { id: "formatos", label: "Formatos", roles: ["admin"] },
-  { id: "inscripcion", label: "Inscripción", roles: ["cliente"] },
+  // v2.44.3: el admin también puede auto-inscribirse (con checkout real, no el roster manual
+  // de Participantes) -- antes esta pestaña ni le aparecía.
+  { id: "inscripcion", label: "Inscripción", roles: ["admin", "cliente"] },
   { id: "calendario", label: "Calendario", roles: ["admin", "cliente"] },
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
 ];
@@ -4995,7 +4997,7 @@ function TorneosSection(props) {
           matchDuration={matchDuration} breakM={breakM} />
       )}
 
-      {subTab === "inscripcion" && role === "cliente" && (
+      {subTab === "inscripcion" && (
         <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking}
           role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} setTab={setTab} />
       )}
