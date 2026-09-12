@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.44.3";
+const APP_VERSION = "2.44.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1894,18 +1894,24 @@ export default function PickleballTournamentApp() {
   const pendingCategoryWritesRef = useRef(loadCache("pendingCategoryWrites", {})); // { [catId]: { fields, upsert } }
   const [pendingCategoryCount, setPendingCategoryCount] = useState(Object.keys(pendingCategoryWritesRef.current).length);
 
-  const persistCategoryWrite = (id, fields, upsert = false) => {
+  // Async desde v2.44.4 (antes era fire-and-forget con .then()) -- devuelve {error} para que
+  // quien de verdad necesita saber si el guardado llegó a pasar (ver updateCategory) pueda
+  // esperarlo. Sigue encolando para reintento automático igual que antes -- esto no le quita
+  // la resiliencia sin internet al admin, solo le agrega a QUIEN LLAMA la posibilidad de
+  // enterarse del resultado en el momento, en vez de solo el aviso "N sin sincronizar" (que
+  // además es admin-only, ver más abajo el porqué de este cambio).
+  const persistCategoryWrite = async (id, fields, upsert = false) => {
     const query = upsert
       ? supabase.from("categories").upsert({ id, ...fields })
       : supabase.from("categories").update(fields).eq("id", id);
-    query.then(({ error }) => {
-      const next = { ...pendingCategoryWritesRef.current };
-      if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
-      else delete next[id];
-      pendingCategoryWritesRef.current = next;
-      saveCache("pendingCategoryWrites", next);
-      setPendingCategoryCount(Object.keys(next).length);
-    });
+    const { error } = await query;
+    const next = { ...pendingCategoryWritesRef.current };
+    if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
+    else delete next[id];
+    pendingCategoryWritesRef.current = next;
+    saveCache("pendingCategoryWrites", next);
+    setPendingCategoryCount(Object.keys(next).length);
+    return { error: error?.message || null };
   };
   const flushPendingCategoryWrites = () => {
     Object.entries(pendingCategoryWritesRef.current).forEach(([id, { fields, upsert }]) => persistCategoryWrite(id, fields, upsert));
@@ -1922,12 +1928,17 @@ export default function PickleballTournamentApp() {
     return () => { window.removeEventListener("online", onOnline); clearInterval(interval); };
   }, []);
 
+  // Devuelve la promesa de persistCategoryWrite (v2.44.4) -- el update optimista de
+  // setCategories sigue siendo instantáneo (nunca espera a la red), pero ahora quien llama
+  // PUEDE (no tiene que) esperar el resultado real antes de decirle al usuario "listo".
+  // Ningún llamador existente que no lo esperaba se rompe -- una promesa sin await simplemente
+  // corre en segundo plano, igual que antes.
   const updateCategory = (id, updater) => {
     const current = categories.find((c) => c.id === id);
-    if (!current) return;
+    if (!current) return Promise.resolve({ error: "Esta categoría ya no existe." });
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
-    persistCategoryWrite(id, {
+    return persistCategoryWrite(id, {
       name: updated.name, max_teams: updated.maxTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
@@ -2012,14 +2023,19 @@ export default function PickleballTournamentApp() {
   // `checkout` is optional — the organizer's manual roster editor (CategoriasTab) omits it;
   // the player self-registration screen (InscripcionTab) passes the CheckoutPanel result so
   // the payment/price sticks to the team record for the loyalty/revenue stats.
-  // Devuelve el id del equipo creado (v2.44.2) -- lo necesita InscripcionTab para armar el
-  // link "invitar a mi pareja" cuando players.length queda en 1 (dobles sin pareja todavía,
-  // ver joinTeam más abajo).
-  const addTeam = (catId, players, checkout) => {
+  // Devuelve {teamId, error} (v2.44.4, antes solo el id sin chequear si de verdad se guardó) --
+  // AWAIT de verdad al resultado de updateCategory en vez de fire-and-forget: un socio
+  // pagando su propia inscripción necesita saber YA MISMO si el guardado falló, no enterarse
+  // nunca porque el aviso de "sin sincronizar" solo lo ve el admin (ver persistCategoryWrite).
+  // Esto fue justo lo que pasó con al menos un socio real el día del lanzamiento -- el
+  // checkout mostraba "¡Listo!" con el equipo ya optimísticamente en pantalla, pero el guardado
+  // en Supabase nunca llegó a confirmar (quedó solo en la cola de reintento de este navegador,
+  // invisible para el jugador) y nunca apareció para el admin.
+  const addTeam = async (catId, players, checkout) => {
     const teamId = uid("team");
     const name = players.map((p) => p.name).join(" / ");
     players.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
-    updateCategory(catId, (c) => {
+    const result = await updateCategory(catId, (c) => {
       // Sin checkout (organizador anotando un walk-in a mano, ver InscripcionAdminForm) arranca
       // igual que un pago en efectivo -- "por pagar" -- nunca se asume cobrado solo por
       // registrarse; el admin lo pasa a "pago verificado" cuando de verdad reciba el dinero.
@@ -2032,7 +2048,7 @@ export default function PickleballTournamentApp() {
       }
       return c;
     });
-    return teamId;
+    return { teamId, error: result?.error };
   };
   // Une un segundo jugador a un equipo de DOBLES que quedó "esperando pareja" -- a diferencia
   // de addTeam, no crea un equipo nuevo (v2.44.2, reemplaza "invitar por correo/WhatsApp": antes
@@ -2041,9 +2057,11 @@ export default function PickleballTournamentApp() {
   // El precio/estado de pago de este jugador se guarda en SU PROPIO objeto dentro de
   // `players` -- nunca se mezcla con el de quien creó el equipo (createTeam ya dejó el suyo en
   // los campos de nivel de equipo, ver arriba), porque pudieron pagar en momentos y métodos
-  // distintos. Devuelve {error} si el cupo ya no existe o alguien más ya lo tomó primero -- el
-  // llamador debe avisarle a este jugador en vez de dejarlo pagar por un cupo fantasma.
-  const joinTeam = (catId, teamId, player, checkout) => {
+  // distintos. Devuelve {error} si el cupo ya no existe, alguien más ya lo tomó primero, o el
+  // guardado en Supabase falló de verdad (v2.44.4, AWAIT real -- ver mismo comentario en
+  // addTeam) -- el llamador debe avisarle a este jugador en vez de dejarlo creer que ya quedó
+  // unido cuando en realidad no se guardó nada.
+  const joinTeam = async (catId, teamId, player, checkout) => {
     const cat = categories.find((c) => c.id === catId);
     if (!cat) return { error: "Esta categoría ya no existe." };
     const team = cat.teams.find((t) => t.id === teamId) || cat.waitlist.find((t) => t.id === teamId);
@@ -2055,7 +2073,7 @@ export default function PickleballTournamentApp() {
       ...player, priceUsd: checkout.priceUsd, priceBs: checkout.priceBs, paymentMethod: checkout.paymentMethod,
       reference: checkout.reference, proofName: checkout.proofName, paymentStatus, joinedAt: Date.now(),
     };
-    updateCategory(catId, (c) => {
+    const result = await updateCategory(catId, (c) => {
       const patch = (t) => {
         if (t.id !== teamId) return t;
         const players = [...t.players, joinedPlayer];
@@ -2065,7 +2083,7 @@ export default function PickleballTournamentApp() {
       c.waitlist = c.waitlist.map(patch);
       return c;
     });
-    return {};
+    return { error: result?.error };
   };
   // Estado de pago del SEGUNDO jugador de un equipo, cuando pagó su propia inscripción por
   // separado (ver joinTeam) -- setTeamPaymentStatus sigue gobernando el pago de quien creó el
@@ -3143,6 +3161,7 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
 function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
 
   if (!info) {
     return (
@@ -3162,8 +3181,11 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
   const blocked = full || drawStarted || isOwnTeam || alreadyInCat;
   const price = tournamentRegPrice(tournament, 1);
 
-  const confirm = (checkout) => {
-    const result = joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id }, checkout);
+  const confirm = async (checkout) => {
+    if (confirming) return;
+    setConfirming(true); setError("");
+    const result = await joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id }, checkout);
+    setConfirming(false);
     if (result?.error) { setError(result.error); return; }
     setDone(true);
   };
@@ -3193,7 +3215,7 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
             <p className="text-sm mb-4" style={{ color: "#6B7688" }}>{cat.name} · {tournament.name}</p>
             {error && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>{error}</p>}
             <CheckoutPanel title="Tu inscripción" baseUsd={price} club={club} defaultName={currentUser.name}
-              onConfirm={confirm} onCancel={onClose} confirmLabel="Confirmar mi cupo" />
+              onConfirm={confirm} onCancel={onClose} confirmLabel={confirming ? "Confirmando…" : "Confirmar mi cupo"} />
           </>
         )}
       </div>
@@ -5279,14 +5301,19 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
+  const [error, setError] = useState("");
   const full = cat.maxTeams && cat.teams.length >= cat.maxTeams;
 
-  const submit = () => {
+  // Ahora espera el resultado real de addTeam (v2.44.4) -- antes disparaba y limpiaba los
+  // campos de una, sin chequear si el guardado en Supabase de verdad llegó a pasar.
+  const submit = async () => {
     if (!p1.trim()) return;
     if (isDoubles && !p2.trim()) return;
+    setError("");
     const players = [{ name: p1.trim(), ranking: suggestedRanking(p1) || 0 }];
     if (isDoubles) players.push({ name: p2.trim(), ranking: suggestedRanking(p2) || 0 });
-    addTeam(cat.id, players);
+    const result = await addTeam(cat.id, players);
+    if (result?.error) { setError("No se pudo guardar -- revisa tu conexión e intenta de nuevo."); return; }
     setP1(""); setP2("");
   };
 
@@ -5303,6 +5330,12 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
           <Plus size={16} /> {full ? "Añadir (espera)" : "Añadir"}
         </button>
       </div>
+
+      {error && (
+        <div className="text-xs px-3 py-2 rounded-lg mb-3 flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+          <AlertTriangle size={12} className="shrink-0" /> {error}
+        </div>
+      )}
 
       {full && (
         <div className="text-xs px-3 py-2 rounded-lg mb-3 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
@@ -6202,21 +6235,42 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   };
   const setPartner = (catId, p) => setPartners((prev) => ({ ...prev, [catId]: p }));
 
-  const confirm = (checkout) => {
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
+
+  // v2.44.4: espera de verdad a que cada equipo se GUARDE (addTeam ahora es async y confirma
+  // contra Supabase) antes de decir "¡Listo!" -- antes esto asumía éxito apenas se llamaba a
+  // addTeam, así que un guardado que fallara en silencio (sin internet un instante, error del
+  // servidor) igual mostraba la inscripción como confirmada. Así fue como al menos un socio
+  // real quedó convencido de estar inscrito sin que el equipo llegara nunca a la base de datos
+  // -- el aviso de "sin sincronizar" que hubiera delatado el problema es admin-only, el
+  // jugador nunca lo ve.
+  const confirm = async (checkout) => {
+    if (confirming) return;
+    setConfirming(true); setConfirmError("");
     // Categorías que quedan "esperando pareja" (v2.44.2) -- se les ofrece compartir un link
     // DESPUÉS de esta pantalla (ver el bloque `done` más abajo), nunca antes: mostrarlo en
     // medio del checkout era un punto de fuga (algo más en qué pensar antes de pagar) y
     // además hacía creer que la pareja ya había pagado, cuando en realidad todavía no existía.
     const pendingTeams = [];
-    selectedCats.forEach((c) => {
+    const failedCatNames = [];
+    for (const c of selectedCats) {
       const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
       const partner = c.modality !== "individual" ? partners[c.id] : null;
       if (partner && !partner.pending) players.push(partner);
       // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito
       // (para mostrarlo), pero cada equipo debe quedar con su parte proporcional.
-      const teamId = addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
-      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId });
-    });
+      const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+      if (result.error) { failedCatNames.push(c.name); continue; }
+      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
+    }
+    setConfirming(false);
+    if (failedCatNames.length > 0) {
+      // No se cierra el checkout ni se limpia la selección -- así puede reintentar sin tener
+      // que volver a elegir categorías/pareja/método de pago de cero.
+      setConfirmError(`No se pudo confirmar tu inscripción en: ${failedCatNames.join(", ")}. Revisa tu conexión e intenta de nuevo -- no se guardó nada para esas categorías.`);
+      return;
+    }
     setDone({ names: selectedCats.map((c) => c.name), pendingTeams });
     setSelectedIds([]);
     setPartners({});
@@ -6388,8 +6442,16 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Ej. 3.5" />
             </div>
 
+            {confirmError && (
+              <p className="text-xs font-semibold mb-3 px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+                <AlertTriangle size={13} className="shrink-0" /> {confirmError}
+              </p>
+            )}
+            {confirming && (
+              <p className="text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>Confirmando tu inscripción…</p>
+            )}
             <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={currentUser.name} requireName={false}
-              onConfirm={confirm} onCancel={() => setShowCheckout(false)} confirmLabel="Confirmar inscripción" />
+              onConfirm={confirm} onCancel={() => setShowCheckout(false)} confirmLabel={confirming ? "Confirmando…" : "Confirmar inscripción"} />
           </Card>
         </Modal>
       )}
