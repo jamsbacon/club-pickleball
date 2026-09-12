@@ -1201,7 +1201,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.43.1";
+const APP_VERSION = "2.44.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5770,12 +5770,18 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 // or email, or falls back to inviting someone not registered yet by name + email. Emits the
 // resolved player object ({userId, name, ranking} or {name, email, ranking}) via onChange,
 // or null while no valid partner is resolved yet.
-function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
+function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange, tournament, categoryName }) {
   const [mode, setMode] = useState("search");
   const [query, setQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState(null);
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  // Invitar por WhatsApp (v2.44.0) -- misma idea que "Invitar por correo" (nadie necesita
+  // tener cuenta todavía: el equipo se crea y se paga completo ya mismo, la pareja se entera
+  // después) pero sin pedir un dato que casi nadie usa para esto -- WhatsApp no necesita el
+  // número de la otra persona para compartir algo, `wa.me/?text=` abre el selector de
+  // contactos de la propia WhatsApp. Solo el nombre, más un botón que arma el mensaje.
+  const [waName, setWaName] = useState("");
   const [ranking, setRanking] = useState("");
 
   const results = mode === "search" && !selectedUser && query.trim().length > 0
@@ -5789,25 +5795,39 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
       onChange({ userId: selectedUser.id, name: selectedUser.name, ranking: Number(ranking) || 0 });
     } else if (mode === "invite" && inviteName.trim() && inviteEmail.trim()) {
       onChange({ name: inviteName.trim(), email: inviteEmail.trim(), ranking: Number(ranking) || 0 });
+    } else if (mode === "whatsapp" && waName.trim()) {
+      onChange({ name: waName.trim(), ranking: Number(ranking) || 0 });
     } else {
       onChange(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, selectedUser, inviteName, inviteEmail, ranking]);
+  }, [mode, selectedUser, inviteName, inviteEmail, waName, ranking]);
 
   const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); setRanking(suggestedRanking(u.name) || ""); };
   const clearUser = () => { setSelectedUser(null); setQuery(""); setRanking(""); };
-  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setInviteName(""); setInviteEmail(""); setRanking(""); };
+  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setInviteName(""); setInviteEmail(""); setWaName(""); setRanking(""); };
 
-  const hasPartner = (mode === "search" && selectedUser) || (mode === "invite" && inviteName.trim() && inviteEmail.trim());
+  const hasPartner = (mode === "search" && selectedUser) || (mode === "invite" && inviteName.trim() && inviteEmail.trim()) || (mode === "whatsapp" && waName.trim());
+
+  // Link a la ficha pública del torneo (ver ShareButton/shareActivityUrl, v2.43.0) -- así la
+  // pareja invitada ve de qué torneo se trata sin necesidad de cuenta todavía, aunque su
+  // inscripción ya haya quedado paga.
+  const waMessage = tournament
+    ? `Te inscribí como mi pareja en ${categoryName || "una categoría"} de ${tournament.name}. ¡Nos vemos en la cancha!\n${shareActivityUrl("torneo", tournament.id)}`
+    : "";
+  const waHref = `https://wa.me/?text=${encodeURIComponent(waMessage)}`;
 
   return (
     <div>
-      <div className="flex gap-1.5 mb-2">
+      <div className="flex gap-1.5 mb-2 flex-wrap">
         <button type="button" onClick={() => switchMode("search")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
           style={{ background: mode === "search" ? COLORS.court : "#EAEEF5", color: mode === "search" ? "#fff" : COLORS.ink }}>Buscar jugador</button>
         <button type="button" onClick={() => switchMode("invite")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
           style={{ background: mode === "invite" ? COLORS.court : "#EAEEF5", color: mode === "invite" ? "#fff" : COLORS.ink }}>Invitar por correo</button>
+        <button type="button" onClick={() => switchMode("whatsapp")} className="px-3 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1"
+          style={{ background: mode === "whatsapp" ? COLORS.court : "#EAEEF5", color: mode === "whatsapp" ? "#fff" : COLORS.ink }}>
+          <Share2 size={11} /> Invitar por WhatsApp
+        </button>
       </div>
 
       {mode === "search" ? (
@@ -5837,10 +5857,14 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
             )}
           </div>
         )
-      ) : (
+      ) : mode === "invite" ? (
         <div className="grid sm:grid-cols-2 gap-2 mb-2">
           <input style={inputStyle} value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Nombre de tu pareja" />
           <input type="email" style={inputStyle} value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="Correo de invitación" />
+        </div>
+      ) : (
+        <div className="mb-2">
+          <input style={inputStyle} value={waName} onChange={(e) => setWaName(e.target.value)} placeholder="Nombre de tu pareja" />
         </div>
       )}
 
@@ -5852,6 +5876,16 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
       )}
       {mode === "invite" && hasPartner && (
         <p className="text-[11px] mt-1.5 flex items-center gap-1" style={{ color: "#6B7688" }}><Mail size={11} /> Le llegará una invitación a {inviteEmail} para crear su cuenta.</p>
+      )}
+      {mode === "whatsapp" && hasPartner && (
+        <div className="mt-2">
+          <p className="text-[11px] mb-1.5" style={{ color: "#6B7688" }}>Tu pareja ya queda inscrita y pagada -- comparte esto para que se entere.</p>
+          <a href={waHref} target="_blank" rel="noopener noreferrer"
+            className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold"
+            style={{ background: "#25D366", color: "#fff" }}>
+            <Share2 size={14} /> Compartir por WhatsApp
+          </a>
+        </div>
       )}
     </div>
   );
@@ -5993,7 +6027,8 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               {isSelected && isDoubles && (
                 <div className="px-4 pb-4 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <Label>Tu pareja en esta categoría</Label>
-                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
+                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)}
+                    tournament={tournament} categoryName={c.name} />
                 </div>
               )}
             </div>
