@@ -78,6 +78,13 @@ const urlBase64ToUint8Array = (base64String) => {
 // PickleballTournamentApp.
 const shareActivityUrl = (kind, id) => `${window.location.origin}${window.location.pathname}?act=${kind}:${id}`;
 
+// Link para invitar a tu pareja a un cupo de dobles que quedó "esperando pareja" (v2.44.2,
+// reemplaza "invitar por correo/WhatsApp") -- `catId` identifica la categoría, `teamId` el
+// equipo dentro de ella (ambos hacen falta: los equipos viven en categories.teams, no en su
+// propia tabla). Quien abre este link ve JoinTeamView (cerca de PublicActivityView) y, si
+// decide unirse, paga SU PROPIA inscripción -- nunca la de quien lo invitó.
+const joinTeamUrl = (catId, teamId) => `${window.location.origin}${window.location.pathname}?join=${catId}:${teamId}`;
+
 function shuffle(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -445,9 +452,19 @@ function buildClientActivity(bookings, openPlays, classes, categories, users) {
   }));
   categories.forEach((c) => {
     [...c.teams, ...c.waitlist].forEach((t) => {
-      if (t.priceUsd === undefined) return; // manually-entered team, no checkout on record
-      const client = resolve(t.userId, null);
-      if (client) entries.push({ client, usd: Number(t.priceUsd) || 0, ts: t.createdAt, kind: "Torneo" });
+      if (t.priceUsd !== undefined) {
+        const client = resolve(t.userId, null);
+        if (client) entries.push({ client, usd: Number(t.priceUsd) || 0, ts: t.createdAt, kind: "Torneo" });
+      }
+      // Un jugador que se unió a un equipo ya creado (ver joinTeam, v2.44.2) pagó SU PROPIA
+      // inscripción por separado -- queda en su propio objeto de jugador, no en `t.priceUsd`
+      // (eso sigue siendo solo lo que pagó quien creó el equipo). Sin esto, su pago quedaría
+      // invisible para "Clientes más leales" pese a haber pagado de verdad.
+      (t.players || []).forEach((p) => {
+        if (p.priceUsd === undefined) return;
+        const client = resolve(p.userId, null);
+        if (client) entries.push({ client, usd: Number(p.priceUsd) || 0, ts: p.joinedAt || t.createdAt, kind: "Torneo" });
+      });
     });
   });
   return entries;
@@ -1202,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.44.1";
+const APP_VERSION = "2.44.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1321,6 +1338,27 @@ export default function PickleballTournamentApp() {
     } catch { return null; }
   });
   const publicActConsumedRef = useRef(false);
+
+  // Link "invitar a mi pareja" (v2.44.2) -- `?join=<catId>:<teamId>`, mismo criterio de parseo
+  // que publicAct. A diferencia de publicAct, esto no navega a ningún tab -- se resuelve
+  // siempre como un modal flotante (JoinTeamModal, con sesión) o una pantalla propia
+  // (PublicJoinTeamView, sin sesión) encima de lo que sea que la app esté mostrando, porque
+  // unirse a un equipo es una tarea puntual, no "ir a ver algo".
+  const [joinParam] = useState(() => {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("join");
+      if (!raw) return null;
+      const sep = raw.indexOf(":");
+      if (sep < 0) return null;
+      const catId = raw.slice(0, sep), teamId = raw.slice(sep + 1);
+      if (!catId || !teamId) return null;
+      return { catId, teamId };
+    } catch { return null; }
+  });
+  const [joinModalDismissed, setJoinModalDismissed] = useState(false);
+  useEffect(() => {
+    if (joinParam) window.history.replaceState({}, "", window.location.pathname);
+  }, []);
 
   // ---- Club-wide schedule & courts (shared by Reservas, Eventos y Torneos) ----
   // `clubs`/`courts` en Supabase son la fuente real; estos mappers convierten las filas
@@ -1974,7 +2012,11 @@ export default function PickleballTournamentApp() {
   // `checkout` is optional — the organizer's manual roster editor (CategoriasTab) omits it;
   // the player self-registration screen (InscripcionTab) passes the CheckoutPanel result so
   // the payment/price sticks to the team record for the loyalty/revenue stats.
+  // Devuelve el id del equipo creado (v2.44.2) -- lo necesita InscripcionTab para armar el
+  // link "invitar a mi pareja" cuando players.length queda en 1 (dobles sin pareja todavía,
+  // ver joinTeam más abajo).
   const addTeam = (catId, players, checkout) => {
+    const teamId = uid("team");
     const name = players.map((p) => p.name).join(" / ");
     players.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
     updateCategory(catId, (c) => {
@@ -1982,12 +2024,58 @@ export default function PickleballTournamentApp() {
       // igual que un pago en efectivo -- "por pagar" -- nunca se asume cobrado solo por
       // registrarse; el admin lo pasa a "pago verificado" cuando de verdad reciba el dinero.
       const paymentStatus = checkout ? initialPaymentStatus(checkout.paymentMethod) : "pendiente_efectivo";
-      const team = { id: uid("team"), name, players, createdAt: Date.now(), ...(checkout || {}), paymentStatus };
+      const team = { id: teamId, name, players, createdAt: Date.now(), ...(checkout || {}), paymentStatus };
       if (c.maxTeams && c.teams.length >= c.maxTeams) {
         c.waitlist = [...c.waitlist, team];
       } else {
         c.teams = [...c.teams, team];
       }
+      return c;
+    });
+    return teamId;
+  };
+  // Une un segundo jugador a un equipo de DOBLES que quedó "esperando pareja" -- a diferencia
+  // de addTeam, no crea un equipo nuevo (v2.44.2, reemplaza "invitar por correo/WhatsApp": antes
+  // ese modo anotaba a la pareja de una, sin cuenta ni pago propio, cobrándole todo al que
+  // creaba el equipo; ahora cada quien paga su propia inscripción, cuando de verdad se anota).
+  // El precio/estado de pago de este jugador se guarda en SU PROPIO objeto dentro de
+  // `players` -- nunca se mezcla con el de quien creó el equipo (createTeam ya dejó el suyo en
+  // los campos de nivel de equipo, ver arriba), porque pudieron pagar en momentos y métodos
+  // distintos. Devuelve {error} si el cupo ya no existe o alguien más ya lo tomó primero -- el
+  // llamador debe avisarle a este jugador en vez de dejarlo pagar por un cupo fantasma.
+  const joinTeam = (catId, teamId, player, checkout) => {
+    const cat = categories.find((c) => c.id === catId);
+    if (!cat) return { error: "Esta categoría ya no existe." };
+    const team = cat.teams.find((t) => t.id === teamId) || cat.waitlist.find((t) => t.id === teamId);
+    if (!team) return { error: "Este cupo ya no existe -- puede que lo hayan borrado." };
+    if ((team.players || []).length >= 2) return { error: "Este cupo ya se completó -- alguien más se anotó primero." };
+    upsertPlayerRanking(player.name, player.ranking, true);
+    const paymentStatus = initialPaymentStatus(checkout.paymentMethod, checkout.priceUsd);
+    const joinedPlayer = {
+      ...player, priceUsd: checkout.priceUsd, priceBs: checkout.priceBs, paymentMethod: checkout.paymentMethod,
+      reference: checkout.reference, proofName: checkout.proofName, paymentStatus, joinedAt: Date.now(),
+    };
+    updateCategory(catId, (c) => {
+      const patch = (t) => {
+        if (t.id !== teamId) return t;
+        const players = [...t.players, joinedPlayer];
+        return { ...t, players, name: players.map((p) => p.name).join(" / ") };
+      };
+      c.teams = c.teams.map(patch);
+      c.waitlist = c.waitlist.map(patch);
+      return c;
+    });
+    return {};
+  };
+  // Estado de pago del SEGUNDO jugador de un equipo, cuando pagó su propia inscripción por
+  // separado (ver joinTeam) -- setTeamPaymentStatus sigue gobernando el pago de quien creó el
+  // equipo, este es su equivalente para el que se unió después. Ver TeamRegistration para
+  // cuándo se muestra uno u otro (o ambos).
+  const setPlayerPaymentStatus = (catId, teamId, playerIdx, paymentStatus) => {
+    updateCategory(catId, (c) => {
+      const patch = (t) => (t.id === teamId ? { ...t, players: t.players.map((p, i) => (i === playerIdx ? { ...p, paymentStatus } : p)) } : t);
+      c.teams = c.teams.map(patch);
+      c.waitlist = c.waitlist.map(patch);
       return c;
     });
   };
@@ -2699,6 +2787,18 @@ export default function PickleballTournamentApp() {
         </div>
       );
     }
+    // Mismo criterio para un link "invitar a mi pareja" (v2.44.2, ver joinParam más arriba).
+    if (joinParam) {
+      return (
+        <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
+          <GlobalStyles />
+          <PublicJoinTeamView
+            loading={!activitiesLoaded}
+            info={activitiesLoaded ? resolveJoinInfo(joinParam, categories, tournaments) : null}
+            club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />
+        </div>
+      );
+    }
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
         <GlobalStyles />
@@ -2784,7 +2884,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory}
-                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist} setTeamPaymentStatus={setTeamPaymentStatus}
+                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -2818,6 +2918,15 @@ export default function PickleballTournamentApp() {
       </div>
 
       <MobileNav tab={effectiveTab} setTab={setTab} visibleNav={visibleNav} />
+
+      {/* Link "invitar a mi pareja" con sesión ya abierta (v2.44.2) -- flota encima de
+         cualquier tab en el que esté el usuario, en vez de forzar una navegación a Torneos:
+         unirse a un equipo es una tarea puntual de un solo paso, no algo que amerite dejar lo
+         que se estaba viendo. */}
+      {joinParam && !joinModalDismissed && (
+        <JoinTeamModal info={resolveJoinInfo(joinParam, categories, tournaments)} currentUser={currentUser} club={club}
+          joinTeam={joinTeam} onClose={() => setJoinModalDismissed(true)} />
+      )}
     </div>
   );
 }
@@ -2956,6 +3065,139 @@ function PublicActivityView({ activity, loading, club, registerUser, loginUser, 
         )}
       </div>
     </div>
+  );
+}
+
+// Resuelve un link "invitar a mi pareja" (v2.44.2, ver joinTeamUrl) contra lo que YA está
+// cargado en memoria (categories/tournaments se traen sin importar si hay sesión, igual que
+// resolvePublicActivity) -- null si la categoría/equipo/torneo ya no existen. `full` (el
+// equipo ya tiene sus 2 jugadores) y `drawStarted` (la categoría ya generó su calendario, ya
+// no admite inscritos nuevos) quedan calculados acá para que tanto la vista pública como el
+// modal con sesión compartan el mismo criterio de "este link ya no sirve".
+function resolveJoinInfo({ catId, teamId }, categories, tournaments) {
+  const cat = categories.find((c) => c.id === catId);
+  if (!cat) return null;
+  const team = (cat.teams || []).find((t) => t.id === teamId) || (cat.waitlist || []).find((t) => t.id === teamId);
+  if (!team) return null;
+  const tournament = tournaments.find((t) => t.id === cat.tournamentId);
+  if (!tournament) return null;
+  return { cat, team, tournament, full: (team.players || []).length >= 2, drawStarted: (cat.matches || []).length > 0 };
+}
+
+// Ficha pública de una invitación a equipo (v2.44.2) -- lo que ve alguien SIN cuenta que abre
+// un link "invitar a mi pareja". Mismo patrón que PublicActivityView: solo pide login/registro
+// al tocar el botón, nunca antes. Une-de-verdad-y-paga pasa por JoinTeamModal, después de
+// loguearse -- acá solo se muestra de qué se trata.
+function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, resetPasswordUser }) {
+  const [wantsAuth, setWantsAuth] = useState(false);
+
+  if (wantsAuth) {
+    return <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />;
+  }
+
+  const unavailable = !info || info.full || info.drawStarted;
+  const creatorName = info?.team.players[0]?.name;
+
+  return (
+    <div className="w-full min-h-screen flex items-center justify-center p-4" style={{ background: COLORS.chalk }}>
+      <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+        <div className="flex items-center gap-2 mb-5">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background: COLORS.court }}>
+            <UserPlus size={18} color="#fff" />
+          </div>
+          <span className="font-extrabold truncate" style={{ color: COLORS.courtDark }}>{club?.name || "Pickle Hub"}</span>
+        </div>
+
+        {loading ? (
+          <p className="text-sm py-6 text-center" style={{ color: "#6B7688" }}>Cargando invitación…</p>
+        ) : !unavailable ? (
+          <>
+            <p className="disp text-xl mb-1" style={{ color: COLORS.courtDark }}>Te invitó {creatorName}</p>
+            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>a jugar <b>{info.cat.name}</b> en {info.tournament.name}. Tu inscripción es propia -- pagas tú tu cupo al unirte.</p>
+          </>
+        ) : (
+          <p className="text-sm mb-5" style={{ color: "#6B7688" }}>
+            {info?.full ? "Este cupo ya se completó -- alguien más se anotó primero." : info?.drawStarted ? "Esta categoría ya cerró su inscripción." : "Este link ya no está disponible."}
+            {" "}Puedes iniciar sesión para ver todo lo que tiene el club ahora mismo.
+          </p>
+        )}
+
+        {!loading && (
+          <button onClick={() => setWantsAuth(true)} style={{ background: COLORS.court, color: "#fff" }}
+            className="w-full py-3 rounded-xl font-bold text-sm">
+            {!unavailable ? "Iniciar sesión para unirme" : "Iniciar sesión"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Modal para completar la unión a un equipo YA con sesión abierta (v2.44.2) -- ya sea porque
+// el jugador se acaba de loguear/registrar desde PublicJoinTeamView, o porque ya tenía sesión
+// en este dispositivo cuando tocó el link. Flota encima de la app (ver el render en
+// PickleballTournamentApp) sin importar en qué tab esté. Vuelve a chequear `full`/`drawStarted`
+// (pudieron cambiar entre que se resolvió el link y que se abre el modal) y agrega dos casos
+// propios: es tu propio cupo (te compartiste el link a ti mismo sin querer), o ya estás
+// inscrito en esta misma categoría con otro equipo.
+function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState("");
+
+  if (!info) {
+    return (
+      <Modal onClose={onClose} maxWidth={420}>
+        <div className="p-5">
+          <p className="text-sm" style={{ color: "#6B7688" }}>Este link ya no es válido -- puede que el cupo o la categoría se hayan borrado.</p>
+          <button onClick={onClose} className="w-full mt-4 py-2.5 rounded-xl text-sm font-bold" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
+        </div>
+      </Modal>
+    );
+  }
+
+  const { cat, team, tournament, full, drawStarted } = info;
+  const creator = team.players[0];
+  const isOwnTeam = creator.userId === currentUser.id;
+  const alreadyInCat = [...cat.teams, ...cat.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
+  const blocked = full || drawStarted || isOwnTeam || alreadyInCat;
+  const price = tournamentRegPrice(tournament, 1);
+
+  const confirm = (checkout) => {
+    const result = joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id }, checkout);
+    if (result?.error) { setError(result.error); return; }
+    setDone(true);
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div className="p-5">
+        {done ? (
+          <>
+            <div className="flex items-center gap-2 mb-3"><CheckCircle2 size={20} color={COLORS.court} /><p className="disp text-lg" style={{ color: COLORS.courtDark }}>¡Listo!</p></div>
+            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>Quedaste inscrito con {creator.name} en {cat.name}.</p>
+            <button onClick={onClose} className="w-full py-2.5 rounded-xl text-sm font-bold" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
+          </>
+        ) : blocked ? (
+          <>
+            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>
+              {isOwnTeam ? "Este es tu propio cupo -- comparte el link con tu pareja, no contigo mismo."
+                : alreadyInCat ? "Ya estás inscrito en esta categoría con otro equipo."
+                : full ? "Este cupo ya se completó -- alguien más se anotó primero."
+                : "Esta categoría ya cerró su inscripción."}
+            </p>
+            <button onClick={onClose} className="w-full py-2.5 rounded-xl text-sm font-bold" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
+          </>
+        ) : (
+          <>
+            <p className="disp text-lg mb-1" style={{ color: COLORS.courtDark }}>Únete a {creator.name}</p>
+            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>{cat.name} · {tournament.name}</p>
+            {error && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>{error}</p>}
+            <CheckoutPanel title="Tu inscripción" baseUsd={price} club={club} defaultName={currentUser.name}
+              onConfirm={confirm} onCancel={onClose} confirmLabel="Confirmar mi cupo" />
+          </>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -3480,14 +3722,32 @@ function Modal({ onClose, children, maxWidth = 560 }) {
   // `history.back()` una sola vez al desmontar para no dejar esa entrada de más colgando como
   // un "atrás" fantasma la próxima vez que alguien navegue. `closedByPopRef` distingue ambos
   // casos para no disparar `history.back()` dos veces.
+  //
+  // Blindaje contra React.StrictMode (v2.44.2) -- en desarrollo, StrictMode monta-desmonta-
+  // remonta este efecto dos veces seguidas para detectar efectos no idempotentes; el
+  // desmontaje "falso" de la simulación disparaba este mismo history.back() de arriba,
+  // cerrando el modal solo instantáneamente sin que nadie tocara nada (nunca pasaba en
+  // producción, donde React no duplica efectos, pero rompía cualquier prueba en el servidor
+  // de desarrollo). Dos cambios lo resuelven: (1) un id propio por montaje en vez de un booleano
+  // compartido, para poder distinguir "la entrada que YO empujé" de una empujada por un
+  // remontaje posterior; (2) diferir el back() un tick con setTimeout -- si StrictMode nos
+  // vuelve a montar de inmediato (siempre sucede en el mismo tick, antes de que corra
+  // cualquier setTimeout), el remontaje ya empujó su propia entrada con su propio id antes de
+  // que el chequeo se ejecute, así que el id ya no coincide y el back() de la simulación se
+  // salta solo. Deja, como mucho, una entrada de historial de más sin usar en desarrollo tras
+  // un montaje duplicado -- inofensivo (nunca se lee ese id salvo por esta misma comparación) y
+  // no ocurre en producción, donde este efecto corre una sola vez.
   const closedByPopRef = useRef(false);
   useEffect(() => {
-    window.history.pushState({ pickleModal: true }, "");
+    const modalId = Math.random().toString(36).slice(2);
+    window.history.pushState({ pickleModal: modalId }, "");
     const onPopState = () => { closedByPopRef.current = true; onCloseRef.current(); };
     window.addEventListener("popstate", onPopState);
     return () => {
       window.removeEventListener("popstate", onPopState);
-      if (!closedByPopRef.current && window.history.state?.pickleModal) window.history.back();
+      setTimeout(() => {
+        if (!closedByPopRef.current && window.history.state?.pickleModal === modalId) window.history.back();
+      }, 0);
     };
   }, []);
 
@@ -4652,7 +4912,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, setTeamPaymentStatus,
+    addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -4724,7 +4984,8 @@ function TorneosSection(props) {
       {subTab === "participantes" && role === "admin" && (
         <ParticipantesTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus} />
+          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
+          setPlayerPaymentStatus={setPlayerPaymentStatus} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -4863,7 +5124,7 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 // vivía dentro de Categorías (TeamRegistration) como al formulario admin de la vieja pestaña
 // Inscripción (InscripcionAdminForm, ahora retirado): TeamRegistration ya cubre todo lo que
 // hacía aquel formulario y además muestra los equipos/lista de espera ya inscritos.
-function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus }) {
+function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -4871,7 +5132,8 @@ function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, remo
       <div>
         {activeCat ? (
           <TeamRegistration cat={activeCat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus} />
+            suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
+            setPlayerPaymentStatus={setPlayerPaymentStatus} />
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus participantes.</p></Card>
         )}
@@ -5011,7 +5273,7 @@ function PlayerField({ label, name, setName, suggestedRanking }) {
   );
 }
 
-function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus }) {
+function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -5052,25 +5314,55 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
           // paymentMethod -- solo hay detalle de pago que mostrar si el equipo vino de un
           // checkout real (InscripcionTab). El estado sí siempre existe (ver addTeam).
           const hasCheckout = !!t.paymentMethod;
+          // "Esperando pareja" (v2.44.2) -- un equipo de dobles creado con "Invitar después"
+          // (ver PartnerPicker/InscripcionTab) arranca con un solo jugador; el segundo llega
+          // más tarde por su propio link, pagando su propia inscripción por separado -- ese
+          // pago vive en `players[1].paymentStatus`, NUNCA en `t.paymentStatus` (eso sigue
+          // siendo solo lo que pagó quien creó el equipo). Mientras falte, se muestra un aviso
+          // en vez de fingir que hay un segundo jugador con nombre "—".
+          const isDoublesTeam = cat.modality !== "individual";
+          const waitingPartner = isDoublesTeam && (t.players || []).length < 2;
+          const partner = t.players?.[1];
+          const partnerHasOwnPayment = isDoublesTeam && partner && partner.paymentStatus !== undefined;
           return (
             <div key={t.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm flex-wrap" style={{ background: "#EEF1F7" }}>
               <div className="min-w-0">
                 <span className="font-semibold">{t.name}</span>
                 <span className="text-gray-500 ml-2 text-xs">{(t.players || []).map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
+                {waitingPartner && (
+                  <span className="text-[10px] font-bold ml-2 px-1.5 py-0.5 rounded-full inline-flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+                    <Hourglass size={9} /> Esperando pareja
+                  </span>
+                )}
                 <span className="text-xs text-gray-500 block mt-0.5">
                   {hasCheckout ? (
                     <>
-                      {t.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(t.createdAt).toISOString().slice(0, 10))}
+                      {partnerHasOwnPayment && `${t.players[0].name}: `}{t.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(t.createdAt).toISOString().slice(0, 10))}
                       {t.priceUsd != null && ` · ${formatMoney(t.priceUsd)}`}
                       {t.paymentMethod === "movil" && t.reference && ` · ref. ${t.reference}`}
                       {t.paymentMethod === "movil" && (t.proofName ? " · comprobante" : " · sin comprobante")}
                     </>
                   ) : "Anotado por el organizador, sin checkout"}
+                  {partnerHasOwnPayment && (
+                    <>
+                      {" · "}{partner.name}: {partner.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(partner.joinedAt).toISOString().slice(0, 10))}
+                      {partner.priceUsd != null && ` · ${formatMoney(partner.priceUsd)}`}
+                      {partner.paymentMethod === "movil" && partner.reference && ` · ref. ${partner.reference}`}
+                      {partner.paymentMethod === "movil" && (partner.proofName ? " · comprobante" : " · sin comprobante")}
+                    </>
+                  )}
                 </span>
               </div>
               <div className="flex items-center gap-2.5 shrink-0 ml-auto">
                 <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
-                {setTeamPaymentStatus ? <PaymentStatusSelect status={t.paymentStatus} onChange={(v) => setTeamPaymentStatus(cat.id, t.id, v)} /> : <PaymentStatusBadge status={t.paymentStatus} />}
+                <div className="flex flex-col gap-1 items-end">
+                  {setTeamPaymentStatus ? <PaymentStatusSelect status={t.paymentStatus} onChange={(v) => setTeamPaymentStatus(cat.id, t.id, v)} /> : <PaymentStatusBadge status={t.paymentStatus} />}
+                  {partnerHasOwnPayment && (
+                    setPlayerPaymentStatus
+                      ? <PaymentStatusSelect status={partner.paymentStatus} onChange={(v) => setPlayerPaymentStatus(cat.id, t.id, 1, v)} />
+                      : <PaymentStatusBadge status={partner.paymentStatus} />
+                  )}
+                </div>
                 <button onClick={() => removeTeam(cat.id, t.id)} className="text-gray-300 hover:text-red-500"><X size={14} /></button>
               </div>
             </div>
@@ -5766,21 +6058,22 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
    TAB: INSCRIPCIÓN (autoservicio de jugadores)
    ========================================================================= */
 // Type-ahead partner picker — searches the app's user directory ("Instagram-style") by name
-// or email, or falls back to inviting someone not registered yet by name + email. Emits the
-// resolved player object ({userId, name, ranking} or {name, email, ranking}) via onChange,
-// or null while no valid partner is resolved yet.
-function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange, tournament, categoryName }) {
+// or email, o deja seguir sin pareja todavía y compartir un link para que se una después (ver
+// InscripcionTab -- ese botón de compartir vive DESPUÉS del checkout, no acá, para no ser un
+// punto de fuga en medio de la inscripción). Emits the resolved player object
+// ({userId, name, ranking} o {pending: true}) via onChange, or null while nothing es válido
+// todavía.
+//
+// v2.44.2 quita los modos "Invitar por correo"/"Invitar por WhatsApp" (v2.17.0/v2.44.0): esos
+// anotaban a la pareja de una, sin cuenta ni pago propio, cobrándole TODO a quien creaba el
+// equipo -- y el texto que lo acompañaba ("tu pareja ya queda inscrita y pagada") era falso en
+// el sentido que de verdad importa: la pareja no había pagado nada, solo alguien más pagó por
+// ella. Ahora "Invitar después" dice la verdad: crea tu cupo sin pareja, y ella paga el suyo
+// propio cuando se una con el link.
+function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
   const [mode, setMode] = useState("search");
   const [query, setQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState(null);
-  const [inviteName, setInviteName] = useState("");
-  const [inviteEmail, setInviteEmail] = useState("");
-  // Invitar por WhatsApp (v2.44.0) -- misma idea que "Invitar por correo" (nadie necesita
-  // tener cuenta todavía: el equipo se crea y se paga completo ya mismo, la pareja se entera
-  // después) pero sin pedir un dato que casi nadie usa para esto -- WhatsApp no necesita el
-  // número de la otra persona para compartir algo, `wa.me/?text=` abre el selector de
-  // contactos de la propia WhatsApp. Solo el nombre, más un botón que arma el mensaje.
-  const [waName, setWaName] = useState("");
   const [ranking, setRanking] = useState("");
 
   const results = mode === "search" && !selectedUser && query.trim().length > 0
@@ -5792,41 +6085,27 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange, tourn
   useEffect(() => {
     if (mode === "search" && selectedUser) {
       onChange({ userId: selectedUser.id, name: selectedUser.name, ranking: Number(ranking) || 0 });
-    } else if (mode === "invite" && inviteName.trim() && inviteEmail.trim()) {
-      onChange({ name: inviteName.trim(), email: inviteEmail.trim(), ranking: Number(ranking) || 0 });
-    } else if (mode === "whatsapp" && waName.trim()) {
-      onChange({ name: waName.trim(), ranking: Number(ranking) || 0 });
+    } else if (mode === "later") {
+      onChange({ pending: true });
     } else {
       onChange(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, selectedUser, inviteName, inviteEmail, waName, ranking]);
+  }, [mode, selectedUser, ranking]);
 
   const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); setRanking(suggestedRanking(u.name) || ""); };
   const clearUser = () => { setSelectedUser(null); setQuery(""); setRanking(""); };
-  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setInviteName(""); setInviteEmail(""); setWaName(""); setRanking(""); };
+  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setRanking(""); };
 
-  const hasPartner = (mode === "search" && selectedUser) || (mode === "invite" && inviteName.trim() && inviteEmail.trim()) || (mode === "whatsapp" && waName.trim());
-
-  // Link a la ficha pública del torneo (ver ShareButton/shareActivityUrl, v2.43.0) -- así la
-  // pareja invitada ve de qué torneo se trata sin necesidad de cuenta todavía, aunque su
-  // inscripción ya haya quedado paga.
-  const waMessage = tournament
-    ? `Te inscribí como mi pareja en ${categoryName || "una categoría"} de ${tournament.name}. ¡Nos vemos en la cancha!\n${shareActivityUrl("torneo", tournament.id)}`
-    : "";
-  const waHref = `https://wa.me/?text=${encodeURIComponent(waMessage)}`;
+  const hasPartner = (mode === "search" && selectedUser) || mode === "later";
 
   return (
     <div>
       <div className="flex gap-1.5 mb-2 flex-wrap">
         <button type="button" onClick={() => switchMode("search")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
           style={{ background: mode === "search" ? COLORS.court : "#EAEEF5", color: mode === "search" ? "#fff" : COLORS.ink }}>Buscar jugador</button>
-        <button type="button" onClick={() => switchMode("invite")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
-          style={{ background: mode === "invite" ? COLORS.court : "#EAEEF5", color: mode === "invite" ? "#fff" : COLORS.ink }}>Invitar por correo</button>
-        <button type="button" onClick={() => switchMode("whatsapp")} className="px-3 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1"
-          style={{ background: mode === "whatsapp" ? COLORS.court : "#EAEEF5", color: mode === "whatsapp" ? "#fff" : COLORS.ink }}>
-          <Share2 size={11} /> Invitar por WhatsApp
-        </button>
+        <button type="button" onClick={() => switchMode("later")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
+          style={{ background: mode === "later" ? COLORS.court : "#EAEEF5", color: mode === "later" ? "#fff" : COLORS.ink }}>Invitar después</button>
       </div>
 
       {mode === "search" ? (
@@ -5852,38 +6131,20 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange, tourn
               </div>
             )}
             {query.trim().length > 0 && results.length === 0 && (
-              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Nadie coincide — usa "Invitar por correo" si tu pareja aún no está registrada en la app.</p>
+              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Nadie coincide — usa "Invitar después" si tu pareja aún no está registrada en la app.</p>
             )}
           </div>
         )
-      ) : mode === "invite" ? (
-        <div className="grid sm:grid-cols-2 gap-2 mb-2">
-          <input style={inputStyle} value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Nombre de tu pareja" />
-          <input type="email" style={inputStyle} value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="Correo de invitación" />
-        </div>
       ) : (
-        <div className="mb-2">
-          <input style={inputStyle} value={waName} onChange={(e) => setWaName(e.target.value)} placeholder="Nombre de tu pareja" />
-        </div>
+        <p className="text-[11px] px-3 py-2.5 rounded-xl mb-2" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+          Tu cupo queda registrado sin pareja todavía. Al terminar tu inscripción te va a aparecer un botón para compartirle el link -- ella se une y paga su propia inscripción cuando entre.
+        </p>
       )}
 
-      {hasPartner && (
+      {mode === "search" && hasPartner && (
         <div>
           <Label>Nivel / ranking de tu pareja (opcional)</Label>
           <input type="number" style={inputStyle} value={ranking} onChange={(e) => setRanking(e.target.value)} placeholder="Ej. 3.5" />
-        </div>
-      )}
-      {mode === "invite" && hasPartner && (
-        <p className="text-[11px] mt-1.5 flex items-center gap-1" style={{ color: "#6B7688" }}><Mail size={11} /> Le llegará una invitación a {inviteEmail} para crear su cuenta.</p>
-      )}
-      {mode === "whatsapp" && hasPartner && (
-        <div className="mt-2">
-          <p className="text-[11px] mb-1.5" style={{ color: "#6B7688" }}>Tu pareja ya queda inscrita y pagada -- comparte esto para que se entere.</p>
-          <a href={waHref} target="_blank" rel="noopener noreferrer"
-            className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold"
-            style={{ background: "#25D366", color: "#fff" }}>
-            <Share2 size={14} /> Compartir por WhatsApp
-          </a>
         </div>
       )}
     </div>
@@ -5916,7 +6177,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const [partners, setPartners] = useState({}); // catId -> partner ({userId,name,ranking} o {name,email,ranking})
   const [myRanking, setMyRanking] = useState(suggestedRanking(currentUser.name) || "");
   const [showCheckout, setShowCheckout] = useState(false);
-  const [done, setDone] = useState(null); // nombres de las categorías recién confirmadas
+  const [done, setDone] = useState(null); // { names, pendingTeams: [{catId, catName, teamId}] } de la última confirmación
 
   const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
   // Precio TOTAL del carrito según cuántas categorías se eligieron de una -- cada una suma su
@@ -5928,7 +6189,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   // carrito por la cantidad de categorías elegidas).
   const total = selectedCats.length > 0 ? tournamentRegPrice(tournament, selectedCats.length) : 0;
   const pricePerTeam = selectedCats.length > 0 ? total / selectedCats.length : 0;
-  const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]?.name);
+  // Cualquier partner no-nulo alcanza para "elegido" -- ya sea un socio real ({userId,name,
+  // ranking}) o el sentinel {pending:true} de "Invitar después" (v2.44.2, ver PartnerPicker).
+  const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]);
   const canProceed = selectedCats.length > 0 && !missingPartner;
 
   const toggleCat = (id) => {
@@ -5938,14 +6201,21 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const setPartner = (catId, p) => setPartners((prev) => ({ ...prev, [catId]: p }));
 
   const confirm = (checkout) => {
+    // Categorías que quedan "esperando pareja" (v2.44.2) -- se les ofrece compartir un link
+    // DESPUÉS de esta pantalla (ver el bloque `done` más abajo), nunca antes: mostrarlo en
+    // medio del checkout era un punto de fuga (algo más en qué pensar antes de pagar) y
+    // además hacía creer que la pareja ya había pagado, cuando en realidad todavía no existía.
+    const pendingTeams = [];
     selectedCats.forEach((c) => {
       const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
-      if (c.modality !== "individual") players.push(partners[c.id]);
+      const partner = c.modality !== "individual" ? partners[c.id] : null;
+      if (partner && !partner.pending) players.push(partner);
       // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito
       // (para mostrarlo), pero cada equipo debe quedar con su parte proporcional.
-      addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+      const teamId = addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId });
     });
-    setDone(selectedCats.map((c) => c.name));
+    setDone({ names: selectedCats.map((c) => c.name), pendingTeams });
     setSelectedIds([]);
     setPartners({});
     setShowCheckout(false);
@@ -5992,9 +6262,26 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       )}
 
       {done && (
-        <div className="mb-4 text-sm px-4 py-3 rounded-xl flex items-start gap-2" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
-          <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
-          <span>¡Listo! Quedaste inscrito en: <strong>{done.join(", ")}</strong>.</span>
+        <div className="mb-4 rounded-xl overflow-hidden" style={{ background: "#DCEBD5" }}>
+          <div className="text-sm px-4 py-3 flex items-start gap-2" style={{ color: COLORS.courtDark }}>
+            <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
+            <span>¡Listo! Quedaste inscrito en: <strong>{done.names.join(", ")}</strong>.</span>
+          </div>
+          {/* Compartir con la pareja (v2.44.2) -- recién ACÁ, después de que el checkout ya
+             terminó, nunca antes: la persona ya pagó lo suyo y este es un paso opcional de
+             remate, no algo que pueda hacerla dudar a mitad de pago. Un botón por cada
+             categoría que quedó "esperando pareja". */}
+          {done.pendingTeams.length > 0 && (
+            <div className="px-4 pb-3 pt-1 space-y-2">
+              {done.pendingTeams.map((pt) => (
+                <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(`Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`)}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
+                  <Share2 size={14} /> Invitar a tu pareja en {pt.catName}
+                </a>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -6026,8 +6313,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               {isSelected && isDoubles && (
                 <div className="px-4 pb-4 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <Label>Tu pareja en esta categoría</Label>
-                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)}
-                    tournament={tournament} categoryName={c.name} />
+                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
                 </div>
               )}
             </div>
