@@ -1201,7 +1201,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.43.0";
+const APP_VERSION = "2.43.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2846,14 +2846,14 @@ function GlobalStyles() {
 // isAdmin). wa.me es el link universal de WhatsApp: abre la app si está instalada o WhatsApp
 // Web si no -- no hace falta ninguna API ni backend propio, el usuario elige a quién
 // mandárselo dentro de la propia WhatsApp.
-function ShareButton({ kind, id, text, className }) {
+function ShareButton({ kind, id, text, className, style, iconSize = 16 }) {
   const url = shareActivityUrl(kind, id);
   const waHref = `https://wa.me/?text=${encodeURIComponent(`${text}\n${url}`)}`;
   return (
     <a href={waHref} target="_blank" rel="noopener noreferrer" title="Compartir por WhatsApp"
       onClick={(e) => e.stopPropagation()}
-      className={className || "text-gray-300 hover:text-green-600"}>
-      <Share2 size={16} />
+      className={className || "text-gray-300 hover:text-green-600"} style={style}>
+      <Share2 size={iconSize} />
     </a>
   );
 }
@@ -7005,7 +7005,7 @@ const WEEKDAY_LETTERS = [
   { value: 5, label: "V" }, { value: 6, label: "S" }, { value: 0, label: "D" },
 ];
 
-function EventListItem({ kind, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit }) {
+function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit }) {
   const kindMeta = {
     open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
     torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
@@ -7047,6 +7047,16 @@ function EventListItem({ kind, title, description, date, startTime, endTime, pri
              del precio, en vez de flotar encima con position:absolute (chocaba visualmente
              con el precio, que también vive en esta misma esquina). */}
           <div className="flex items-center gap-1.5 shrink-0">
+            {/* Compartir directo desde la card (v2.43.1) -- antes solo vivía adentro del
+               detalle (EventDetail/ClassDetail/TorneosSection), un paso más para llegar. Va
+               primero, antes de "Editar", porque es lo único de este grupo que también ve un
+               cliente -- shareId puede faltar por una fracción de segundo mientras carga (no
+               debería, pero mejor no reventar si algún día un item llega sin él). */}
+            {shareId && (
+              <ShareButton kind={kind} id={shareId} iconSize={11}
+                text={kind === "torneo" ? `Mira este torneo: ${title}` : kind === "clase" ? `Mira esta clase: ${title}` : `Mira este Open Play: ${title}`}
+                className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }} />
+            )}
             {onEdit && (
               <button onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Editar"
                 className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
@@ -7676,7 +7686,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       const isSeries = list.length > 1;
       const slotsLeft = rep.capacity ? Math.max(0, rep.capacity - rep.registrations.length) : null;
       items.push({
-        key: `op-${key}`, kind: "open_play", title: rep.name,
+        key: `op-${key}`, shareId: key, kind: "open_play", title: rep.name,
         description: rep.description || `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
         price: displayPrice(rep, "open_play"), image: rep.image, recurring: isSeries,
@@ -7696,7 +7706,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       const rep = list.find((c) => c.date >= todayIso) || list[list.length - 1];
       const isSeries = list.length > 1;
       items.push({
-        key: `cl-${key}`, kind: "clase", title: rep.academyName, description: `Nivel ${rep.level}`,
+        key: `cl-${key}`, shareId: key, kind: "clase", title: rep.academyName, description: `Nivel ${rep.level}`,
         date: rep.date, startTime: rep.startTime, endTime: rep.endTime,
         price: displayPrice(rep, "clase"), image: null, recurring: isSeries,
         meta: { text: `${rep.registrations.length} inscrito(s)` },
@@ -7723,7 +7733,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       // tournamentRegPrice/InscripcionTab).
       const entryPrice = tournamentRegPrice(t, 1);
       items.push({
-        key: `t-${t.id}`, kind: "torneo", title: t.name || "Torneo del club",
+        key: `t-${t.id}`, shareId: t.id, kind: "torneo", title: t.name || "Torneo del club",
         description: noCatsYet ? "Sin categorías aún." : `${tCats.length} categoría(s) abiertas.`,
         // endDate (v2.31.0): un torneo dura varios días -- clasificarlo "próxima/en curso/
         // pasada" o filtrarlo por día de la semana necesita el rango completo, no solo el
@@ -7854,7 +7864,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
           {filteredItems.map((it) => (
-            <EventListItem key={it.key} kind={it.kind} title={it.title} description={it.description}
+            <EventListItem key={it.key} kind={it.kind} shareId={it.shareId} title={it.title} description={it.description}
               date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
               recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} />
           ))}
