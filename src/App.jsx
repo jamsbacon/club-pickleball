@@ -323,21 +323,22 @@ function tournamentTierPrice(tournament, tier) {
   return Number(tournament[`regularPrice${tier}`]) || 0;
 }
 
-// Precio TOTAL por inscribirse en `catCount` categorías de una, en el mismo carrito. Cada
-// nivel es el precio MARGINAL de agregar esa categoría (ya no un precio de "bundle" fijo por
-// nivel, que fue como funcionó hasta v2.32.0): price1 = precio de la 1ra categoría, price2 =
-// precio de agregar la 2da, price3 = precio de agregar la 3ra -- y cualquier categoría
-// adicional después de la 3ra se cobra también a ese mismo precio marginal. El total se suma:
-// 1 categoría = price1, 2 = price1+price2, 3 o más = price1+price2+price3*(catCount-2).
-// Ejemplo pedido por el club: price1=$20, price2=$10, price3=$5 -> 3 categorías = 20+10+5 =
-// $35. No lleva cuenta acumulada entre inscripciones separadas en momentos distintos -- si el
+// Precio TOTAL por inscribirse en `catCount` categorías de una, en el mismo carrito (v2.44.1):
+// solo dos niveles -- price1 = precio de la 1ra categoría, price2 = "categoría adicional",
+// el mismo monto se suma por CADA categoría después de la 1ra (2da, 3ra, 4ta... todas al mismo
+// precio marginal, sin un tercer nivel que las cubra distinto). El total se arma:
+// 1 categoría = price1, n categorías = price1 + price2*(n-1).
+// Ejemplo pedido por el club: price1=$30, price2=$15 -> 3 categorías = 30+15+15 = $60.
+// No lleva cuenta acumulada entre inscripciones separadas en momentos distintos -- si el
 // jugador vuelve más tarde a anotarse en una categoría más, ese carrito nuevo arranca su propio
 // nivel 1, no se suma a lo que ya pagó antes.
+// (v2.32.0-v2.44.0 tuvieron un 3er nivel, "price3", que cubría la 3ra categoría en adelante a un
+// precio propio -- se colapsó en uno solo porque en la práctica nunca hacía falta un precio
+// DISTINTO para la 3ra vs. la 2da adicional; las columnas presale_price_3/regular_price_3
+// siguen en la base por compatibilidad pero ya no se leen ni se muestran.)
 function tournamentRegPrice(tournament, catCount) {
   const n = Math.max(1, Number(catCount) || 1);
-  if (n === 1) return tournamentTierPrice(tournament, 1);
-  if (n === 2) return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2);
-  return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2) + tournamentTierPrice(tournament, 3) * (n - 2);
+  return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2) * (n - 1);
 }
 
 // Resolves a court's BASE price for a given time-of-day, honoring an optional list of
@@ -1201,7 +1202,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.44.0";
+const APP_VERSION = "2.44.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3557,19 +3558,17 @@ const inputStyle = { border: `1.5px solid ${COLORS.line}`, borderRadius: 12, pad
 /* =========================================================================
    TAB: TORNEO
    ========================================================================= */
-// Precio escalonado por cantidad de categorías (v2.17.0): reemplaza el precio único que
-// tenía Preventa/Inscripciones generales por tres campos -- 1 categoría, 2 categorías, 3 o
-// más -- para que inscribirse en varias de una salga más barato por categoría que hacerlo
-// una por una. `field` es el prefijo del patch ("presalePrice" o "regularPrice"); los tres
-// niveles son field+"1"/"2"/"3".
-// Cada campo es el precio MARGINAL de esa categoría, no un total de bundle (v2.33.0) -- 1ra
-// categoría, 2da categoría (lo que se SUMA por agregar una segunda), 3ra en adelante (lo que se
-// suma por cada categoría después de la 2da). Ver tournamentRegPrice para cómo se suman.
+// Precio por cantidad de categorías (v2.17.0, simplificado a 2 niveles en v2.44.1):
+// "1ra categoría" + "Categoría adicional" -- el segundo campo se suma UNA vez por cada
+// categoría después de la 1ra (2da, 3ra, 4ta... todas al mismo precio), para que inscribirse en
+// varias de una salga más barato por categoría que hacerlo una por una sin tener que definir un
+// precio propio para la 3ra en adelante. `field` es el prefijo del patch ("presalePrice" o
+// "regularPrice"); los dos niveles son field+"1"/"2". Ver tournamentRegPrice para cómo se suman.
 function TieredPriceFields({ tournament, set, field }) {
-  const tierLabel = { 1: "1ra cat.", 2: "+2da cat.", 3: "+3ra cat. c/u" };
+  const tierLabel = { 1: "1ra categoría", 2: "Categoría adicional" };
   return (
-    <div className="grid grid-cols-3 gap-2">
-      {[1, 2, 3].map((n) => (
+    <div className="grid grid-cols-2 gap-2">
+      {[1, 2].map((n) => (
         <div key={n}>
           <p className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#6B7688" }}>{tierLabel[n]}</p>
           <div className="relative">
@@ -3767,7 +3766,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
             <div>
               <Label>Precio de preventa (por categoría inscrita)</Label>
               <TieredPriceFields tournament={tournament} set={set} field="presalePrice" />
-              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se suman: "1ra cat." es el precio de inscribirse en una sola categoría, "+2da cat." es lo que se AGREGA por anotarse en una segunda, y "+3ra cat. c/u" es lo que se agrega por cada categoría después de esa. Ej: 20 + 10 + 5 → inscribirse en 3 categorías junto cuesta €35.</p>
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se suman: "1ra categoría" es el precio de inscribirse en una sola, y "Categoría adicional" se AGREGA una vez por cada categoría más (2da, 3ra, 4ta... todas al mismo precio). Ej: 30 + 15 + 15 → inscribirse en 3 categorías junto cuesta €60.</p>
             </div>
           </div>
         </Card>
@@ -3787,7 +3786,7 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
           <div className="mt-3">
             <Label>Precio regular, fuera de preventa (por categoría inscrita)</Label>
             <TieredPriceFields tournament={tournament} set={set} field="regularPrice" />
-            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Mismo criterio que la preventa: se suman. "1ra cat." + "+2da cat." + "+3ra cat. c/u" por cada categoría adicional.</p>
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Mismo criterio que la preventa: "1ra categoría" + "Categoría adicional" una vez por cada categoría más.</p>
           </div>
         </Card>
       </div>
@@ -5980,8 +5979,8 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               );
             })}
           </div>
-          {tournamentTierPrice(tournament, 3) > 0 && (
-            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Cada categoría adicional después de la 3ra suma {formatMoney(tournamentTierPrice(tournament, 3))} más.</p>
+          {tournamentTierPrice(tournament, 2) > 0 && (
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Cada categoría adicional suma {formatMoney(tournamentTierPrice(tournament, 2))} más.</p>
           )}
         </div>
       )}
@@ -6069,13 +6068,13 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
             </div>
 
             <div className="space-y-1.5 mb-4">
-              {/* Precio marginal por línea (v2.33.0): la 1ra categoría marcada muestra el
-                 precio de tier 1, la 2da el de tier 2, y la 3ra en adelante el de tier 3 --
+              {/* Precio marginal por línea (v2.44.1): la 1ra categoría marcada muestra el
+                 precio de tier 1, cualquier otra el de tier 2 ("categoría adicional") --
                  mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo se
                  arma la suma antes de pagar. */}
               {selectedCats.map((c, i) => {
                 const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
-                const tierPrice = tournamentTierPrice(tournament, Math.min(3, i + 1));
+                const tierPrice = tournamentTierPrice(tournament, Math.min(2, i + 1));
                 return (
                   <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
                     <div className="min-w-0">
