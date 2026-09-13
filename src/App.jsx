@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.48.2";
+const APP_VERSION = "2.49.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3003,7 +3003,8 @@ export default function PickleballTournamentApp() {
          que se estaba viendo. */}
       {joinParam && !joinModalDismissed && (
         <JoinTeamModal info={resolveJoinInfo(joinParam, categories, tournaments)} currentUser={currentUser} club={club}
-          joinTeam={joinTeam} onClose={() => setJoinModalDismissed(true)} />
+          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking} users={users}
+          onClose={() => setJoinModalDismissed(true)} />
       )}
     </div>
   );
@@ -3218,10 +3219,21 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
 // (pudieron cambiar entre que se resolvió el link y que se abre el modal) y agrega dos casos
 // propios: es tu propio cupo (te compartiste el link a ti mismo sin querer), o ya estás
 // inscrito en esta misma categoría con otro equipo.
-function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
-  const [done, setDone] = useState(false);
+//
+// v2.49.0: además de unirse al cupo del link, deja agregar OTRAS categorías abiertas del
+// mismo torneo al mismo checkout -- antes unirse SIEMPRE cobraba tournamentRegPrice(tournament,
+// 1), el precio de una sola categoría, sin importar que la persona quisiera jugar más de una.
+// Eso la perjudicaba: si además quería, por ejemplo, Mixto, tenía que pagarlo aparte en un
+// segundo checkout, perdiendo el descuento de "categoría adicional" que sí tiene el carrito
+// normal de InscripcionTab. Ahora la categoría del link cuenta como una más del mismo carrito
+// -- mismo tournamentRegPrice(tournament, catCount) que usa InscripcionTab, split en partes
+// iguales entre el join y cada equipo nuevo (ver confirm más abajo).
+function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, users, onClose }) {
+  const [done, setDone] = useState(null); // { names, failedNames, pendingTeams } tras confirmar
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState(false);
+  const [extraIds, setExtraIds] = useState([]);
+  const [extraPartners, setExtraPartners] = useState({});
 
   if (!info) {
     return (
@@ -3239,25 +3251,78 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
   const isOwnTeam = creator.userId === currentUser.id;
   const alreadyInCat = [...cat.teams, ...cat.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
   const blocked = full || drawStarted || isOwnTeam || alreadyInCat;
-  const price = tournamentRegPrice(tournament, 1);
+
+  // Mismo criterio de elegibilidad que InscripcionTab.eligible -- otras categorías de ESTE
+  // torneo (nunca la del link, esa se une aparte con joinTeam) todavía abiertas y en las que
+  // este jugador no esté ya inscrito.
+  const extraEligible = blocked ? [] : categories.filter((c) => {
+    if (c.tournamentId !== tournament.id || c.id === cat.id) return false;
+    if ((c.matches || []).length > 0) return false;
+    const already = [...(c.teams || []), ...(c.waitlist || [])].some((t) => (t.players || []).some((p) => p.userId === currentUser.id));
+    if (already) return false;
+    if (currentUser.gender && c.gender !== "mixto" && c.gender !== currentUser.gender) return false;
+    return true;
+  });
+  const selectedExtras = extraEligible.filter((c) => extraIds.includes(c.id));
+  const catCount = 1 + selectedExtras.length;
+  const total = tournamentRegPrice(tournament, catCount);
+  const pricePerCat = total / catCount;
+  const missingExtraPartner = selectedExtras.some((c) => c.modality !== "individual" && !extraPartners[c.id]);
+
+  const toggleExtra = (id) => setExtraIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const setExtraPartner = (catId, p) => setExtraPartners((prev) => ({ ...prev, [catId]: p }));
 
   const confirm = async (checkout) => {
-    if (confirming) return;
+    if (confirming || missingExtraPartner) return;
     setConfirming(true); setError("");
-    const result = await joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id }, checkout);
+    const bsRate = Number(club.bsPerUsd) || 0;
+    const joinResult = await joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id },
+      { ...checkout, priceUsd: pricePerCat, priceBs: pricePerCat * bsRate });
+    if (joinResult?.error) { setConfirming(false); setError(joinResult.error); return; }
+    // La unión principal ya se guardó -- de acá para abajo son categorías EXTRA, opcionales.
+    // Si alguna falla, no se deshace la unión principal (ya está pagada y confirmada); se
+    // avisa cuál faltó para que la intente de nuevo desde Inscripción.
+    const pendingTeams = [];
+    const failedNames = [];
+    for (const c of selectedExtras) {
+      const players = [{ name: currentUser.name, ranking: suggestedRanking(currentUser.name) || 0, userId: currentUser.id }];
+      const partner = c.modality !== "individual" ? extraPartners[c.id] : null;
+      if (partner && !partner.pending) players.push(partner);
+      const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerCat, priceBs: pricePerCat * bsRate, userId: currentUser.id });
+      if (result.error) { failedNames.push(c.name); continue; }
+      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
+    }
     setConfirming(false);
-    if (result?.error) { setError(result.error); return; }
-    setDone(true);
+    setDone({ names: [cat.name, ...selectedExtras.filter((c) => !failedNames.includes(c.name)).map((c) => c.name)], failedNames, pendingTeams });
   };
 
   return (
-    <Modal onClose={onClose} maxWidth={420}>
+    <Modal onClose={onClose} maxWidth={480}>
       <div className="p-5">
         {done ? (
           <>
             <div className="flex items-center gap-2 mb-3"><CheckCircle2 size={20} color={COLORS.court} /><p className="disp text-lg" style={{ color: COLORS.courtDark }}>¡Listo!</p></div>
-            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>Quedaste inscrito con {creator.name} en {cat.name}.</p>
-            <button onClick={onClose} className="w-full py-2.5 rounded-xl text-sm font-bold" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
+            <p className="text-sm mb-1" style={{ color: "#6B7688" }}>
+              Quedaste inscrito con {creator.name} en {cat.name}
+              {done.names.length > 1 && <>, y también en <strong>{done.names.slice(1).join(", ")}</strong></>}.
+            </p>
+            {done.failedNames.length > 0 && (
+              <p className="text-xs font-semibold mt-2 mb-1" style={{ color: "#B23A1B" }}>
+                No se pudo agregar: {done.failedNames.join(", ")} -- revisa tu conexión e inténtalo de nuevo desde Torneos → Inscripción.
+              </p>
+            )}
+            {done.pendingTeams.length > 0 && (
+              <div className="space-y-2 mt-3 mb-1">
+                {done.pendingTeams.map((pt) => (
+                  <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(`Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
+                    <Share2 size={14} /> Invitar a tu pareja en {pt.catName}
+                  </a>
+                ))}
+              </div>
+            )}
+            <button onClick={onClose} className="w-full py-2.5 rounded-xl text-sm font-bold mt-3" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
           </>
         ) : blocked ? (
           <>
@@ -3272,10 +3337,41 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, onClose }) {
         ) : (
           <>
             <p className="disp text-lg mb-1" style={{ color: COLORS.courtDark }}>Únete a {creator.name}</p>
-            <p className="text-sm mb-4" style={{ color: "#6B7688" }}>{cat.name} · {tournament.name}</p>
+            <p className="text-sm mb-4" style={{ color: "#6B7688" }}><CategoryLabel cat={cat} /> · {tournament.name}</p>
+
+            {extraEligible.length > 0 && (
+              <div className="mb-4">
+                <Label>¿Te inscribes en otra categoría también? (opcional)</Label>
+                <p className="text-[11px] mb-2" style={{ color: "#6B7688" }}>Súmala acá para pagar el precio de "categoría adicional" en vez de un checkout aparte.</p>
+                <div className="space-y-1.5">
+                  {extraEligible.map((c) => {
+                    const isSelected = extraIds.includes(c.id);
+                    const isDoubles = c.modality !== "individual";
+                    return (
+                      <div key={c.id} className="rounded-xl overflow-hidden" style={{ border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
+                        <button type="button" onClick={() => toggleExtra(c.id)} className="w-full text-left px-3 py-2.5 flex items-center gap-2.5" style={{ background: isSelected ? "#F3F8F1" : "transparent" }}>
+                          <div className="w-5 h-5 rounded-md flex items-center justify-center shrink-0" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
+                            {isSelected && <Check size={12} color="#fff" strokeWidth={3} />}
+                          </div>
+                          <span className="text-sm flex-1 min-w-0"><CategoryLabel cat={c} /></span>
+                        </button>
+                        {isSelected && isDoubles && (
+                          <div className="px-3 pb-3 pt-1" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                            <Label>Tu pareja en esta categoría</Label>
+                            <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setExtraPartner(c.id, p)} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {error && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>{error}</p>}
-            <CheckoutPanel title="Tu inscripción" baseUsd={price} club={club} defaultName={currentUser.name}
-              onConfirm={confirm} onCancel={onClose} confirmLabel={confirming ? "Confirmando…" : "Confirmar mi cupo"} />
+            {missingExtraPartner && <p className="text-xs font-semibold mb-3" style={{ color: "#8A5A16" }}>Falta elegir pareja en alguna categoría marcada arriba.</p>}
+            <CheckoutPanel title={`Pago de ${catCount} categoría${catCount === 1 ? "" : "s"}`} baseUsd={total} club={club} defaultName={currentUser.name}
+              onConfirm={confirm} onCancel={onClose} confirmLabel={confirming ? "Confirmando…" : "Confirmar mi inscripción"} />
           </>
         )}
       </div>
@@ -6797,11 +6893,16 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       setConfirmError(`No se pudo confirmar ${isSelf ? "tu" : "la"} inscripción en: ${failedCatNames.join(", ")}. Revisa tu conexión e intenta de nuevo -- no se guardó nada para esas categorías.`);
       return;
     }
+    // El popup se queda abierto mostrando el éxito (v2.49.1) -- antes se cerraba de una y el
+    // aviso "¡Listo!" + el botón de invitar pareja aparecían en la página, debajo de la lista
+    // de categorías, lo que era fácil perderse de vista al cerrarse el modal encima. Ahora
+    // `done` decide qué muestra el modal (ver más abajo): el formulario de checkout, o el
+    // éxito -- se cierra de verdad recién cuando el jugador toca "Cerrar".
     setDone({ names: selectedCats.map((c) => c.name), pendingTeams, registrantName: registrant.name, isSelf });
     setSelectedIds([]);
     setPartners({});
-    setShowCheckout(false);
   };
+  const closeCheckout = () => { setShowCheckout(false); setDone(null); setConfirmError(""); };
 
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Todavía no hay categorías abiertas para inscripción.</p></Card>;
@@ -6843,40 +6944,6 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
         <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2.5 rounded-xl mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
           <AlertTriangle size={12} className="shrink-0" /> Completa tu género en Perfil para ver solo tus categorías — por ahora se muestran todas.
         </button>
-      )}
-
-      {done && (
-        <div className="mb-4 rounded-xl overflow-hidden" style={{ background: "#DCEBD5" }}>
-          <div className="text-sm px-4 py-3 flex items-start gap-2" style={{ color: COLORS.courtDark }}>
-            <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
-            <span>
-              {done.isSelf
-                ? <>¡Listo! Quedaste inscrito en: <strong>{done.names.join(", ")}</strong>.</>
-                : <>¡Listo! Se registró a <strong>{done.registrantName}</strong> en: <strong>{done.names.join(", ")}</strong>.</>}
-            </span>
-          </div>
-          {/* Compartir con la pareja (v2.44.2) -- recién ACÁ, después de que el checkout ya
-             terminó, nunca antes: la persona ya pagó lo suyo y este es un paso opcional de
-             remate, no algo que pueda hacerla dudar a mitad de pago. Un botón por cada
-             categoría que quedó "esperando pareja". Texto distinto si fue el admin quien
-             inscribió a otra persona (v2.46.0) -- "te invité...conmigo" no tendría sentido ahí. */}
-          {done.pendingTeams.length > 0 && (
-            <div className="px-4 pb-3 pt-1 space-y-2">
-              {done.pendingTeams.map((pt) => {
-                const waMessage = done.isSelf
-                  ? `Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`
-                  : `${done.registrantName} te invitó a jugar ${pt.catName} en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`;
-                return (
-                  <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(waMessage)}`}
-                    target="_blank" rel="noopener noreferrer"
-                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
-                    <Share2 size={14} /> {done.isSelf ? `Invitar a tu pareja en ${pt.catName}` : `Compartir invitación a pareja en ${pt.catName}`}
-                  </a>
-                );
-              })}
-            </div>
-          )}
-        </div>
       )}
 
       <div className="space-y-3" style={{ paddingBottom: selectedIds.length > 0 ? 96 : 0 }}>
@@ -6946,54 +7013,94 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       )}
 
       {showCheckout && (
-        <Modal onClose={() => setShowCheckout(false)}>
+        <Modal onClose={closeCheckout}>
           <Card>
-            <div className="flex items-start justify-between gap-3 mb-4">
-              <div>
-                <p className="disp text-lg" style={{ color: COLORS.courtDark }}>Confirmar inscripción</p>
-                <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"}</p>
-              </div>
-              <button onClick={() => setShowCheckout(false)} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
-            </div>
-
-            <div className="space-y-1.5 mb-4">
-              {/* Precio marginal por línea (v2.44.1): la 1ra categoría marcada muestra el
-                 precio de tier 1, cualquier otra el de tier 2 ("categoría adicional") --
-                 mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo se
-                 arma la suma antes de pagar. */}
-              {selectedCats.map((c, i) => {
-                const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
-                const tierPrice = tournamentTierPrice(tournament, Math.min(2, i + 1));
-                return (
-                  <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
-                    <div className="min-w-0">
-                      <p className="font-semibold truncate" style={{ color: COLORS.ink }}>
-                        <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
-                      </p>
-                      {c.modality !== "individual" && (
-                        <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
-                      )}
-                    </div>
-                    <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
+            {done ? (
+              // Éxito (v2.49.1) -- se queda DENTRO del mismo popup en vez de cerrarlo y avisar
+              // en la página de atrás; el botón de invitar pareja vive acá mismo, justo donde
+              // el jugador ya está mirando, en vez de un paso más allá que se puede perder de
+              // vista. Ver comentario en confirm() para el porqué del cambio.
+              <>
+                <div className="flex items-center gap-2 mb-3"><CheckCircle2 size={20} color={COLORS.court} /><p className="disp text-lg" style={{ color: COLORS.courtDark }}>¡Listo!</p></div>
+                <p className="text-sm mb-1" style={{ color: "#6B7688" }}>
+                  {done.isSelf
+                    ? <>Quedaste inscrito en: <strong>{done.names.join(", ")}</strong>.</>
+                    : <>Se registró a <strong>{done.registrantName}</strong> en: <strong>{done.names.join(", ")}</strong>.</>}
+                </p>
+                {/* Compartir con la pareja (v2.44.2) -- recién ACÁ, después de que el checkout
+                   ya terminó, nunca antes: la persona ya pagó lo suyo y este es un paso
+                   opcional de remate, no algo que pueda hacerla dudar a mitad de pago. Un botón
+                   por cada categoría que quedó "esperando pareja". Texto distinto si fue el
+                   admin quien inscribió a otra persona (v2.46.0) -- "te invité...conmigo" no
+                   tendría sentido ahí. */}
+                {done.pendingTeams.length > 0 && (
+                  <div className="space-y-2 mt-3 mb-1">
+                    {done.pendingTeams.map((pt) => {
+                      const waMessage = done.isSelf
+                        ? `Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`
+                        : `${done.registrantName} te invitó a jugar ${pt.catName} en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`;
+                      return (
+                        <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(waMessage)}`}
+                          target="_blank" rel="noopener noreferrer"
+                          className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
+                          <Share2 size={14} /> {done.isSelf ? `Invitar a tu pareja en ${pt.catName}` : `Compartir invitación a pareja en ${pt.catName}`}
+                        </a>
+                      );
+                    })}
                   </div>
-                );
-              })}
-              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm font-bold" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
-                <span>Total ({selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"})</span>
-                <span className="mono">{formatMoney(total)}</span>
-              </div>
-            </div>
+                )}
+                <button onClick={closeCheckout} className="w-full py-2.5 rounded-xl text-sm font-bold mt-3" style={{ background: COLORS.court, color: "#fff" }}>Cerrar</button>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  <div>
+                    <p className="disp text-lg" style={{ color: COLORS.courtDark }}>Confirmar inscripción</p>
+                    <p className="text-xs mt-1" style={{ color: "#6B7688" }}>{selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"}</p>
+                  </div>
+                  <button onClick={closeCheckout} className="text-gray-300 hover:text-gray-600"><X size={18} /></button>
+                </div>
 
-            {confirmError && (
-              <p className="text-xs font-semibold mb-3 px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
-                <AlertTriangle size={13} className="shrink-0" /> {confirmError}
-              </p>
+                <div className="space-y-1.5 mb-4">
+                  {/* Precio marginal por línea (v2.44.1): la 1ra categoría marcada muestra el
+                     precio de tier 1, cualquier otra el de tier 2 ("categoría adicional") --
+                     mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo
+                     se arma la suma antes de pagar. */}
+                  {selectedCats.map((c, i) => {
+                    const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
+                    const tierPrice = tournamentTierPrice(tournament, Math.min(2, i + 1));
+                    return (
+                      <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
+                        <div className="min-w-0">
+                          <p className="font-semibold truncate" style={{ color: COLORS.ink }}>
+                            <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                          </p>
+                          {c.modality !== "individual" && (
+                            <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
+                          )}
+                        </div>
+                        <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm font-bold" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+                    <span>Total ({selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"})</span>
+                    <span className="mono">{formatMoney(total)}</span>
+                  </div>
+                </div>
+
+                {confirmError && (
+                  <p className="text-xs font-semibold mb-3 px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FBE3D6", color: COLORS.clay }}>
+                    <AlertTriangle size={13} className="shrink-0" /> {confirmError}
+                  </p>
+                )}
+                {confirming && (
+                  <p className="text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>Confirmando la inscripción…</p>
+                )}
+                <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={registrant.name} requireName={false}
+                  onConfirm={confirm} onCancel={closeCheckout} confirmLabel={confirming ? "Confirmando…" : "Confirmar inscripción"} />
+              </>
             )}
-            {confirming && (
-              <p className="text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>Confirmando la inscripción…</p>
-            )}
-            <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={registrant.name} requireName={false}
-              onConfirm={confirm} onCancel={() => setShowCheckout(false)} confirmLabel={confirming ? "Confirmando…" : "Confirmar inscripción"} />
           </Card>
         </Modal>
       )}
