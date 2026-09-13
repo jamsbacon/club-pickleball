@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.53.1";
+const APP_VERSION = "2.54.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4378,8 +4378,25 @@ function AnnouncementCard() {
   );
 }
 
+// v2.54.0: Mi Club pasó de ser una sola página larga (horario, tasa de cambio, canchas,
+// anuncio, membresías, todo apilado con scroll) a sub-pestañas, mismo patrón visual y de
+// persistencia (loadCache/saveCache) que ya usan Torneos (TORNEO_SUB_ITEMS) y TorneosSection --
+// actualizar la página ya no debe sacar de la sub-sección en la que estaba el admin.
+const CLUB_SUB_ITEMS = [
+  { id: "horarios", label: "Horarios" },
+  { id: "canchas", label: "Canchas" },
+  { id: "anuncios", label: "Anuncios" },
+  { id: "planes", label: "Planes" },
+  { id: "moneda", label: "Moneda y Tasa de cambio" },
+];
+
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
   membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions }) {
+  const [subTab, setSubTab] = useState(() => {
+    const cached = loadCache("clubSubTab", null);
+    return cached && CLUB_SUB_ITEMS.some((it) => it.id === cached) ? cached : CLUB_SUB_ITEMS[0].id;
+  });
+  useEffect(() => { saveCache("clubSubTab", subTab); }, [subTab]);
   const [name, setName] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [price, setPrice] = useState(8);
@@ -4403,8 +4420,19 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
 
   return (
     <div className="mt-2 space-y-5">
-      <AnnouncementCard />
+      <div className="flex gap-2 mb-1 overflow-x-auto pb-1">
+        {CLUB_SUB_ITEMS.map((it) => (
+          <button key={it.id} onClick={() => setSubTab(it.id)}
+            className="px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap"
+            style={{ background: subTab === it.id ? COLORS.court : "#EAEEF5", color: subTab === it.id ? "#fff" : COLORS.ink }}>
+            {it.label}
+          </button>
+        ))}
+      </div>
 
+      {subTab === "anuncios" && <AnnouncementCard />}
+
+      {subTab === "horarios" && (
       <Card>
         <SectionTitle sub="Define el horario general del club. Estos bloques son la base de Reservas, Actividades y Torneos.">Horario en bloques</SectionTitle>
         <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -4435,7 +4463,9 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
           {blocksPerDay} bloques reservables por cancha, por día ({club.openTime}–{club.closeTime}).
         </div>
       </Card>
+      )}
 
+      {subTab === "moneda" && (
       <Card>
         <SectionTitle sub="El monto en Bs del checkout se calcula con la tasa EUR oficial del BCV, sincronizada automáticamente.">Tasa de cambio y cobro</SectionTitle>
 
@@ -4483,7 +4513,9 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
           <div><Label>Cédula / RIF</Label><input style={inputStyle} value={club.pagoMovil.cedula} onChange={(e) => setPagoMovil("cedula", e.target.value)} /></div>
         </div>
       </Card>
+      )}
 
+      {subTab === "canchas" && (
       <Card>
         <SectionTitle sub="Cada cancha puede ser pública (cualquiera reserva) o privada (prioridad para miembros). El precio con membresía sale solo del % de descuento en canchas que definas por plan, en Membresías.">Canchas</SectionTitle>
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 mb-2">
@@ -4519,15 +4551,18 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
           {courts.length === 0 && <p className="text-sm text-gray-400 italic">Aún no hay canchas registradas.</p>}
         </div>
       </Card>
+      )}
 
       {/* Configuración de membresías (v2.18.0): antes vivía en su propia pestaña de nivel
          superior para el admin; ahora se administra desde acá, dentro de Mi Club. MembresiasTab
          ya sabe renderizar el modo admin (crear/editar/borrar planes) vs. cliente (comparar y
          suscribirse) según `role` -- acá siempre es "admin", así que actúa como panel de
          configuración con la misma tabla comparativa como vista previa en vivo. */}
-      <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
-        addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-        subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
+      {subTab === "planes" && (
+        <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
+          addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
+          subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
+      )}
     </div>
   );
 }
@@ -9309,7 +9344,7 @@ function ComparisonRow({ label, plans, render, isBool, highlight }) {
 // teléfono). Debajo de `md` se cambia a esto: una card completa por plan, apiladas, sin
 // scroll horizontal -- mismos datos que la tabla (mismo `rateLabels`, mismo `planState`),
 // simplemente reformateados como lista vertical de beneficio→valor en vez de columnas.
-function PlanCard({ plan, idx, rateLabels, basePlan, courts, state, isAdmin, onCheckout, onEdit, onDelete }) {
+function PlanCard({ plan, idx, rateLabels, basePlan, courts, blockLabel, state, isAdmin, onCheckout, onEdit, onDelete }) {
   const { badge, isCurrent, isExpired, pending, locked, isFull, slotsLeft } = state;
   const accent = idx === 0 ? COLORS.ball : idx === 1 ? "#F2B84B" : "#E4E7DE";
   const blockedForNew = isFull && !isCurrent;
@@ -9369,12 +9404,15 @@ function PlanCard({ plan, idx, rateLabels, basePlan, courts, state, isAdmin, onC
           <span style={{ color: "#93A8C9" }}>Bloque de reserva gratis*</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{plan.freeBlocksPerMonth > 0 ? `${plan.freeBlocksPerMonth}/mes` : "Ninguno"}</span>
         </div>
-        {courts.map((c) => (
-          <div key={c.id} className="flex items-center justify-between gap-3 text-xs">
-            <span style={{ color: "#93A8C9" }}>Precio {c.name}</span>
-            <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{courtRowDisplay(plan, c)}</span>
+        {/* Una sola fila para todas las canchas (v2.54.0) -- antes había una por cancha, pero
+           todas cobran el mismo precio de bloque hoy, así que repetirlo por cancha era ruido
+           sin información nueva. Toma la primera como representativa. */}
+        {courts[0] && (
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span style={{ color: "#93A8C9" }}>Precio de Alquiler de Bloque ({blockLabel})</span>
+            <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{courtRowDisplay(plan, courts[0])}</span>
           </div>
-        ))}
+        )}
         <div className="flex items-center justify-between gap-3 text-xs">
           <span style={{ color: "#93A8C9" }}>Precio Open Play</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>
@@ -9384,10 +9422,6 @@ function PlanCard({ plan, idx, rateLabels, basePlan, courts, state, isAdmin, onC
         <div className="flex items-center justify-between gap-3 text-xs">
           <span style={{ color: "#93A8C9" }}>Ventana de reserva</span>
           <span className="font-bold text-right shrink-0" style={{ color: COLORS.chalk }}>{formatBookingWindow(plan.bookingWindowHours)}</span>
-        </div>
-        <div className="flex items-center justify-between gap-3 text-xs pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-          <span style={{ color: "#93A8C9" }}>Canchas privadas</span>
-          {plan.privateCourtAccess ? <Check size={14} color={COLORS.ball} strokeWidth={3} /> : <span style={{ color: "#3F5062" }}>—</span>}
         </div>
       </div>
     </div>
@@ -9401,12 +9435,22 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
   const isAdmin = role === "admin";
   const todayIso = new Date().toISOString().slice(0, 10);
 
-  const paidPlans = [...membershipPlans].filter((p) => p.monthlyPrice > 0).sort((a, b) => b.monthlyPrice - a.monthlyPrice);
+  // Ascendente por precio (v2.54.0, antes descendente) -- el plan más barato primero, el más
+  // caro/premium al final: PRO ($50) antes que VIP ($100), como pidió el club. Sigue siendo
+  // genérico por precio, no por nombre, así que un futuro plan nuevo cae en su lugar solo.
+  const paidPlans = [...membershipPlans].filter((p) => p.monthlyPrice > 0).sort((a, b) => a.monthlyPrice - b.monthlyPrice);
   const freePlans = membershipPlans.filter((p) => p.monthlyPrice === 0);
   const orderedPlans = [...paidPlans, ...freePlans];
   // "Sin plan" -- de acá sale el precio real de cada concepto del tarifario; los planes pagos
   // solo guardan un % de descuento sobre esto (v2.38.0, ver rateItemDisplay).
   const basePlan = freePlans[0] || null;
+  // Etiqueta de la duración del bloque para la fila unificada de precio de cancha (v2.54.0,
+  // reemplaza una fila POR cancha -- todas cobran lo mismo hoy, tener una fila por cancha era
+  // ruido). Mismo formato "1h:30" que pidió el club, calculado de club.blockMinutes en vez de
+  // hardcodeado -- si el club cambia la duración del bloque, la etiqueta se actualiza sola.
+  const blockLabel = club.blockMinutes % 60 === 0 ? `${club.blockMinutes / 60}h`
+    : club.blockMinutes < 60 ? `${club.blockMinutes} min`
+    : `${Math.floor(club.blockMinutes / 60)}h:${String(club.blockMinutes % 60).padStart(2, "0")}`;
 
   // Union every distinct rate-card label across plans, in first-seen order, so the
   // comparison table stays correct even if plans don't share the exact same line items.
@@ -9546,10 +9590,10 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
                 render={(p) => (p.monthlyPrice > 0 ? formatMoney(p.monthlyPrice) : "Pago por uso")} highlight />
               <ComparisonRow label="Bloque de reserva gratis*" plans={orderedPlans}
                 render={(p) => (p.freeBlocksPerMonth > 0 ? `${p.freeBlocksPerMonth}/mes` : "Ninguno")} />
-              {courts.map((c) => (
-                <ComparisonRow key={c.id} label={`Precio ${c.name}`} plans={orderedPlans}
-                  render={(p) => courtRowDisplay(p, c)} />
-              ))}
+              {courts[0] && (
+                <ComparisonRow label={`Precio de Alquiler de Bloque (${blockLabel})`} plans={orderedPlans}
+                  render={(p) => courtRowDisplay(p, courts[0])} />
+              )}
               <ComparisonRow label="Precio Open Play" plans={orderedPlans}
                 render={(p) => (p.openPlayDiscountPct >= 100 ? "100% (Gratis)" : p.openPlayDiscountPct > 0 ? `${p.openPlayDiscountPct}% off` : "Sin descuento")} />
               {rateLabels.map((lbl) => (
@@ -9557,7 +9601,6 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
                   render={(p) => rateItemDisplay(p, lbl, basePlan)} />
               ))}
               <ComparisonRow label="Ventana de reserva" plans={orderedPlans} render={(p) => formatBookingWindow(p.bookingWindowHours)} />
-              <ComparisonRow label="Canchas privadas" plans={orderedPlans} render={(p) => p.privateCourtAccess} isBool />
             </tbody>
           </table>
           {hasFootnote && (
@@ -9571,7 +9614,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
            información que la tabla de arriba (mismo rateLabels/planState). */}
         <div className="md:hidden px-4 pb-6 space-y-4">
           {orderedPlans.map((plan, idx) => (
-            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} basePlan={basePlan} courts={courts} state={planState(plan, idx)} isAdmin={isAdmin}
+            <PlanCard key={plan.id} plan={plan} idx={idx} rateLabels={rateLabels} basePlan={basePlan} courts={courts} blockLabel={blockLabel} state={planState(plan, idx)} isAdmin={isAdmin}
               onCheckout={() => setCheckoutPlanId((id) => (id === plan.id ? null : plan.id))}
               onEdit={() => { setEditingPlanId((id) => (id === plan.id ? null : plan.id)); setShowForm(false); }}
               onDelete={() => removeMembershipPlan(plan.id)} />
