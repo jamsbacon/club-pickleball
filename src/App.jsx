@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.49.0";
+const APP_VERSION = "2.50.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1897,8 +1897,8 @@ export default function PickleballTournamentApp() {
     return set;
   }, [bookings, openPlays, classes, categories]);
 
-  // Punto único por el que pasan setCategoryFormat/addTeam/removeTeam/removeFromWaitlist/
-  // generateDraw/closeGroupsAndSeedBracket/submitScore -- persistir acá cubre los siete de una vez.
+  // Punto único por el que pasan setCategoryFormat/addTeam/removePersonFromCategory/
+  // generateDraw/closeGroupsAndSeedBracket/submitScore -- persistir acá cubre los seis de una vez.
   // NOTA: no se puede leer una variable asignada *dentro* del updater de setCategories
   // justo después de llamarlo -- en React 18 ese updater no corre síncronamente, corre
   // en el siguiente render. Por eso `updated` se calcula ACÁ AFUERA, a partir del
@@ -2118,23 +2118,39 @@ export default function PickleballTournamentApp() {
       return c;
     });
   };
-  // Removing a confirmed team automatically promotes the next team in line from the waitlist.
-  const removeTeam = (catId, teamId) => {
-    updateCategory(catId, (c) => {
-      c.teams = c.teams.filter((t) => t.id !== teamId);
-      if (c.waitlist.length > 0) {
-        const [promoted, ...restWaitlist] = c.waitlist;
-        c.teams = [...c.teams, promoted];
-        c.waitlist = restWaitlist;
+  // Borra a UNA persona de una categoría puntual (v2.50.0) -- reemplaza a los removeTeam/
+  // removeFromWaitlist de antes, que borraban el EQUIPO entero sin distinguir cuál de los dos
+  // jugadores era el que en realidad se quería sacar. Ahora: si es el titular (players[0]), el
+  // equipo entero desaparece de esta categoría -- nadie más queda con ese cupo. Si es quien se
+  // unió después por su cuenta (players[1], ver joinTeam), sale SOLO ella -- el titular
+  // conserva su propio cupo ya pagado, el equipo vuelve a "esperando pareja" en vez de
+  // desaparecer entero. AWAIT real (mismo criterio que addTeam/joinTeam desde v2.44.4): el
+  // único lugar que llama a esto es Inscritos (ver removePersonFromTournament ahí mismo, que
+  // puede llamarlo varias veces seguidas para borrar a la misma persona de TODAS sus
+  // categorías de una) -- el borrado ya no vive en Duplas/TeamRegistration.
+  const removePersonFromCategory = async (catId, teamId, playerIdx, inWaitlist) => {
+    const result = await updateCategory(catId, (c) => {
+      if (inWaitlist) {
+        c.waitlist = playerIdx === 0
+          ? c.waitlist.filter((t) => t.id !== teamId)
+          : c.waitlist.map((t) => (t.id === teamId ? { ...t, players: t.players.filter((_, i) => i !== playerIdx) } : t));
+        return c;
+      }
+      if (playerIdx === 0) {
+        c.teams = c.teams.filter((t) => t.id !== teamId);
+        // Mismo criterio que el removeTeam de antes: si se vació un cupo de verdad (no solo
+        // se achicó un equipo de dobles a 1 jugador), promover de la lista de espera.
+        if (c.waitlist.length > 0) {
+          const [promoted, ...restWaitlist] = c.waitlist;
+          c.teams = [...c.teams, promoted];
+          c.waitlist = restWaitlist;
+        }
+      } else {
+        c.teams = c.teams.map((t) => (t.id === teamId ? { ...t, players: t.players.filter((_, i) => i !== playerIdx) } : t));
       }
       return c;
     });
-  };
-  const removeFromWaitlist = (catId, teamId) => {
-    updateCategory(catId, (c) => {
-      c.waitlist = c.waitlist.filter((t) => t.id !== teamId);
-      return c;
-    });
+    return { error: result?.error };
   };
   // Estado de pago de un equipo (v2.21.0) -- vive en el propio JSONB de `teams` (igual que el
   // resto de sus campos), así que basta con un patch normal via updateCategory, sin migración.
@@ -2946,7 +2962,7 @@ export default function PickleballTournamentApp() {
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
-              openTournamentPagos={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("pagos"); }}
+              openTournamentInscritos={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("inscritos"); }}
               openTournamentInscripcion={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("inscripcion"); }}
               onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }}
               autoOpen={publicAct?.kind === "open_play" || publicAct?.kind === "clase" ? publicAct : null} />
@@ -2960,7 +2976,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory}
-                addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -5165,21 +5181,26 @@ function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membersh
 /* =========================================================================
    TAB: CATEGORIAS
    ========================================================================= */
-// El admin (quien crea/edita el torneo) ve 6 pestañas: Generalidades, Categorías,
-// Participantes, Formatos, Calendario, Resultados. El cliente solo ve su autoservicio
-// (Inscripción, con el carrito de checkout) más Calendario/Resultados -- Participantes es
-// el equivalente admin de "agregar/ver inscritos por categoría", así que no se duplica.
+// El admin (quien crea/edita el torneo) ve 6 pestañas: Generalidades, Categorías, Inscritos,
+// Duplas, Formatos, Calendario, Resultados. El cliente solo ve su autoservicio (Inscripción,
+// con el carrito de checkout) más Calendario/Resultados.
+//
+// v2.50.0: "Participantes" se renombra "Duplas" y "Pagos" se renombra "Inscritos" y pasa a ir
+// ANTES que Duplas -- ahora Duplas es de solo lectura (arma equipos y ve quién está inscrito,
+// pero ya no borra a nadie) e Inscritos es el ÚNICO lugar para borrar a alguien del torneo (ver
+// InscritosTab/removePersonFromTournament). Antes se podía borrar desde Duplas (entonces
+// Participantes) un equipo A LA VEZ, categoría por categoría -- si esa persona estaba anotada
+// en más de una categoría, borrarla de una no la borraba de las demás, y seguía apareciendo en
+// Pagos como si nada. Centralizar el borrado en un solo lugar, por PERSONA (no por equipo),
+// resuelve eso de raíz.
 const TORNEO_SUB_ITEMS = [
   { id: "config", label: "Generalidades", roles: ["admin"] },
   { id: "categorias", label: "Categorías", roles: ["admin"] },
-  { id: "participantes", label: "Participantes", roles: ["admin"] },
-  // v2.45.1: acceso directo a "quién pagó y cuánto" para ESTE torneo -- Participantes ya
-  // muestra el pago por equipo, pero acá es una fila por PERSONA con lo que un admin necesita
-  // para verificar un pago suelto sin tener que sumar categorías a mano.
-  { id: "pagos", label: "Pagos", roles: ["admin"] },
+  { id: "inscritos", label: "Inscritos", roles: ["admin"] },
+  { id: "duplas", label: "Duplas", roles: ["admin"] },
   { id: "formatos", label: "Formatos", roles: ["admin"] },
   // v2.44.3: el admin también puede auto-inscribirse (con checkout real, no el roster manual
-  // de Participantes) -- antes esta pestaña ni le aparecía.
+  // de Duplas) -- antes esta pestaña ni le aparecía.
   { id: "inscripcion", label: "Inscripción", roles: ["admin", "cliente"] },
   { id: "calendario", label: "Calendario", roles: ["admin", "cliente"] },
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
@@ -5314,7 +5335,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, addTeam, removeTeam, removeFromWaitlist, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, addTeam, removePersonFromCategory, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -5323,7 +5344,7 @@ function TorneosSection(props) {
   } = props;
   const isAdmin = role === "admin";
 
-  // Botón "Pagos" en la card de Actividades (v2.45.1, ver openTournamentPagos en
+  // Botón "Inscritos" en la card de Actividades (v2.45.1, ver openTournamentInscritos en
   // PickleballTournamentApp) -- aterriza directo en esta sub-pestaña en vez de "Generalidades"
   // como cualquier otro clic en la card. `initialSubTab` es un valor de un solo uso: se
   // consume apenas se aplica para no pisar un cambio de pestaña posterior del propio usuario.
@@ -5395,15 +5416,15 @@ function TorneosSection(props) {
           addCategory={addCategory} removeCategory={removeCategory} setSubTab={setSubTab} />
       )}
 
-      {subTab === "participantes" && role === "admin" && (
-        <ParticipantesTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
-          addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
-          suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
-          setPlayerPaymentStatus={setPlayerPaymentStatus} />
+      {subTab === "inscritos" && role === "admin" && (
+        <InscritosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+          removePersonFromCategory={removePersonFromCategory} />
       )}
 
-      {subTab === "pagos" && role === "admin" && (
-        <TournamentPagosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} />
+      {subTab === "duplas" && role === "admin" && (
+        <DuplasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
+          addTeam={addTeam} suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
+          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -5520,9 +5541,9 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
             </div>
 
             <div className="grid sm:grid-cols-2 gap-3 mt-6">
-              <button onClick={() => setSubTab?.("participantes")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF3E6" }}>
-                <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Participantes →</p>
-                <p className="text-xs mt-0.5" style={{ color: "#6B7688" }}>Agrega o revisa los equipos inscritos.</p>
+              <button onClick={() => setSubTab?.("duplas")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF3E6" }}>
+                <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Duplas →</p>
+                <p className="text-xs mt-0.5" style={{ color: "#6B7688" }}>Arma equipos y revisa quién está inscrito.</p>
               </button>
               <button onClick={() => setSubTab?.("formatos")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF0F8" }}>
                 <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Formatos →</p>
@@ -5538,14 +5559,15 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
   );
 }
 
-// Ver/agregar participantes por categoría -- reemplaza tanto al editor de roster que antes
-// vivía dentro de Categorías (TeamRegistration) como al formulario admin de la vieja pestaña
-// Inscripción (InscripcionAdminForm, ahora retirado): TeamRegistration ya cubre todo lo que
-// hacía aquel formulario y además muestra los equipos/lista de espera ya inscritos.
 // Junta las inscripciones de TODAS las categorías de este torneo en una fila POR PERSONA
-// (v2.45.1) -- Participantes ya muestra el pago por equipo/categoría; esto responde
-// "cuánto debe Fulano en total, en TODO este torneo, y ya pagó todo o falta algo" sin que el
-// admin tenga que sumarlo a mano categoría por categoría.
+// (v2.45.1) -- Duplas ya muestra el pago por equipo/categoría; esto responde "cuánto debe
+// Fulano en total, en TODO este torneo, y ya pagó todo o falta algo" sin que el admin tenga
+// que sumarlo a mano categoría por categoría. También arma `removalTargets` (v2.50.0): TODAS
+// las categorías en las que aparece esta persona (pagadas o no, en equipo o en lista de
+// espera), para que InscritosTab pueda borrarla de todas de una -- antes el borrado vivía en
+// Duplas, UN equipo/categoría a la vez, así que borrar a alguien de una categoría la dejaba
+// intacta en las demás (y seguía apareciendo acá, en Pagos, como si nada -- justo el bug que
+// esto resuelve).
 //
 // Dos estados nada más (Por verificar / Verificado), a pedido del club -- ya no los tres de
 // siempre (Por pagar / Pago por verificar / Verificado). "Por pagar" y "Pago por verificar"
@@ -5556,7 +5578,7 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 function buildTournamentParticipants(categories) {
   const byPerson = new Map();
   categories.forEach((cat) => {
-    [...(cat.teams || []), ...(cat.waitlist || [])].forEach((team) => {
+    const addFrom = (list, inWaitlist) => list.forEach((team) => {
       (team.players || []).forEach((p, idx) => {
         // Mismo criterio que buildPaymentRows/TeamRegistration: el jugador #0 usa los campos
         // de nivel de equipo; el #2 solo tiene los suyos propios si se unió por su cuenta con
@@ -5569,24 +5591,27 @@ function buildTournamentParticipants(categories) {
         const key = p.userId || `name:${p.name.trim().toLowerCase()}`;
         const entry = byPerson.get(key) || {
           key, name: p.name, categories: [], totalUsd: 0, paidUsd: 0,
-          methods: new Set(), lastAt: 0, verifyTargets: [],
+          methods: new Set(), lastAt: 0, verifyTargets: [], removalTargets: [],
         };
         entry.categories.push(cat.name);
         entry.totalUsd += priceUsd;
         if (paymentStatus === "confirmada") entry.paidUsd += priceUsd;
         else entry.verifyTargets.push(ownPayment ? { kind: "player", catId: cat.id, teamId: team.id, playerIdx: idx } : { kind: "team", catId: cat.id, teamId: team.id });
+        entry.removalTargets.push({ catId: cat.id, catName: cat.name, teamId: team.id, playerIdx: idx, inWaitlist });
         if (paymentMethod) entry.methods.add(paymentMethod);
         if (createdAt > entry.lastAt) entry.lastAt = createdAt;
         byPerson.set(key, entry);
       });
     });
+    addFrom(cat.teams || [], false);
+    addFrom(cat.waitlist || [], true);
   });
   return [...byPerson.values()].sort((a, b) => b.lastAt - a.lastAt);
 }
 
 const METHOD_LABELS = { movil: "Pago Móvil", efectivo: "Efectivo" };
 
-function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
 
@@ -5597,6 +5622,26 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
       if (t.kind === "team") setTeamPaymentStatus(t.catId, t.teamId, "confirmada");
       else setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, "confirmada");
     });
+  };
+
+  // Borrar a una persona de TODO el torneo (v2.50.0) -- único lugar del admin para hacerlo,
+  // ver TORNEO_SUB_ITEMS. Recorre `removalTargets` (armado en buildTournamentParticipants: una
+  // entrada por cada categoría/equipo/lista de espera en la que aparece esta persona, pagada o
+  // no) y borra uno por uno, esperando cada resultado antes de seguir -- si alguno falla, se
+  // avisa cuál para reintentar sin perder lo que sí se borró.
+  const [removeTarget, setRemoveTarget] = useState(null); // entry de la tabla, o null si el diálogo está cerrado
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+
+  const confirmRemove = async () => {
+    if (!removeTarget || removing) return;
+    setRemoving(true); setRemoveError("");
+    for (const t of removeTarget.removalTargets) {
+      const result = await removePersonFromCategory(t.catId, t.teamId, t.playerIdx, t.inWaitlist);
+      if (result?.error) { setRemoving(false); setRemoveError(`No se pudo borrar de "${t.catName}" -- revisa tu conexión e intenta de nuevo (lo que ya se borró queda borrado).`); return; }
+    }
+    setRemoving(false);
+    setRemoveTarget(null);
   };
 
   const filtered = participants.filter((e) => {
@@ -5611,8 +5656,8 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
 
   return (
     <div className="mt-2 space-y-3">
-      <SectionTitle sub="Una fila por persona -- suma todas sus categorías en este torneo. 'Por verificar' cubre tanto efectivo sin cobrar todavía como Pago Móvil sin confirmar -- la columna Medio de pago distingue cuál es cuál.">
-        Pagos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
+      <SectionTitle sub="Una fila por persona -- suma todas sus categorías en este torneo. 'Por verificar' cubre tanto efectivo sin cobrar todavía como Pago Móvil sin confirmar -- la columna Medio de pago distingue cuál es cuál. El icono de basurero borra a la persona de TODAS sus categorías de una.">
+        Inscritos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
       </SectionTitle>
 
       <div className="flex flex-wrap gap-2">
@@ -5629,7 +5674,7 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
       </div>
 
       <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${COLORS.line}` }}>
-        <table className="w-full text-sm" style={{ minWidth: 720 }}>
+        <table className="w-full text-sm" style={{ minWidth: 760 }}>
           <thead>
             <tr className="text-left text-[11px] text-gray-400 uppercase" style={{ background: "#F4F6FA" }}>
               <th className="py-2.5 px-3">Nombre y apellido</th>
@@ -5639,6 +5684,7 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
               <th className="py-2.5 px-3">Fecha</th>
               <th className="py-2.5 px-3">Medio de pago</th>
               <th className="py-2.5 px-3">Estatus</th>
+              <th className="py-2.5 px-3"></th>
               <th className="py-2.5 px-3"></th>
             </tr>
           </thead>
@@ -5666,6 +5712,9 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
                       </button>
                     )}
                   </td>
+                  <td className="py-2.5 px-3">
+                    <button onClick={() => setRemoveTarget(e)} title="Eliminar de todo el torneo" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
+                  </td>
                 </tr>
               );
             })}
@@ -5673,22 +5722,32 @@ function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPayment
         </table>
         {filtered.length === 0 && <p className="text-sm text-gray-400 italic py-6 text-center">Nadie coincide con este filtro.</p>}
       </div>
+
+      {removeTarget && (
+        <ConfirmDeleteModal
+          title={`¿Eliminar a ${removeTarget.name} de este torneo?`}
+          message={removeError || `Se le borra de ${removeTarget.categories.length === 1 ? "su única categoría" : "sus " + removeTarget.categories.length + " categorías"}: ${removeTarget.categories.join(", ")}. Esta acción no se puede deshacer.`}
+          options={[{ label: removing ? "Eliminando…" : "Eliminar", variant: "danger", onClick: confirmRemove }]}
+          onCancel={() => { setRemoveTarget(null); setRemoveError(""); }} />
+      )}
     </div>
   );
 }
 
-function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+// Arma equipos y revisa quién está inscrito -- de solo lectura desde v2.50.0 (ya no borra, ver
+// comentario en TORNEO_SUB_ITEMS): el borrado vive únicamente en Inscritos.
+function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
         emptyHint="Crea una categoría primero en la pestaña Categorías." />
       <div>
         {activeCat ? (
-          <TeamRegistration cat={activeCat} addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
+          <TeamRegistration cat={activeCat} addTeam={addTeam}
             suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
             setPlayerPaymentStatus={setPlayerPaymentStatus} />
         ) : (
-          <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus participantes.</p></Card>
+          <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus duplas.</p></Card>
         )}
       </div>
     </div>
@@ -5826,7 +5885,11 @@ function PlayerField({ label, name, setName, suggestedRanking }) {
   );
 }
 
-function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+// Sigue creando equipos (walk-ins anotados a mano) y mostrando el estado de pago, pero ya NO
+// borra a nadie (v2.50.0) -- ni equipo ni lista de espera; el borrado se centralizó en
+// Inscritos (InscritosTab), por PERSONA y de una vez en todas sus categorías, no por equipo
+// suelto acá. Ver el comentario en TORNEO_SUB_ITEMS para el porqué.
+function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -5927,7 +5990,6 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
                       : <PaymentStatusBadge status={partner.paymentStatus} />
                   )}
                 </div>
-                <button onClick={() => removeTeam(cat.id, t.id)} className="text-gray-300 hover:text-red-500"><X size={14} /></button>
               </div>
             </div>
           );
@@ -5944,7 +6006,6 @@ function TeamRegistration({ cat, addTeam, removeTeam, removeFromWaitlist, sugges
             {(cat.waitlist || []).map((t, i) => (
               <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg text-sm" style={{ background: "#FBF3E4" }}>
                 <span><span className="mono text-xs mr-2" style={{ color: "#8A5A16" }}>#{i + 1}</span>{t.name}</span>
-                <button onClick={() => removeFromWaitlist(cat.id, t.id)} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
               </div>
             ))}
           </div>
@@ -8094,11 +8155,11 @@ function EventListItem({ kind, shareId, title, description, date, startTime, end
                 text={kind === "torneo" ? `Mira este torneo: ${title}` : kind === "clase" ? `Mira esta clase: ${title}` : `Mira este Open Play: ${title}`}
                 className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }} />
             )}
-            {/* Atajo a "quién pagó" (v2.45.1) -- solo torneos por ahora, ver openTournamentPagos.
+            {/* Atajo a "quién pagó" (v2.45.1) -- solo torneos por ahora, ver openTournamentInscritos.
                Open Play/Clase ya tienen su propia pestaña "Inscritos" con lo mismo adentro del
                detalle, así que no hace falta duplicar el atajo acá para esos dos. */}
             {onPagos && (
-              <button onClick={(e) => { e.stopPropagation(); onPagos(); }} title="Pagos e inscritos"
+              <button onClick={(e) => { e.stopPropagation(); onPagos(); }} title="Inscritos y pagos"
                 className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
                 <Wallet size={11} />
               </button>
@@ -8632,7 +8693,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, openTournamentPagos, openTournamentInscripcion, onCreateTournament, role, autoOpen }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, openTournamentInscritos, openTournamentInscripcion, onCreateTournament, role, autoOpen }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -8806,9 +8867,10 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
         // admin, no hace falta un modo edición aparte como Open Play/Clase.
         onEdit: isAdmin ? () => openTournament(t.id) : null,
-        // Atajo directo a "quién pagó" (v2.45.1) -- sin esto, verificar un pago suelto de
-        // torneo significaba abrir el torneo y buscar la sub-pestaña Pagos a mano.
-        onPagos: isAdmin ? () => openTournamentPagos(t.id) : null,
+        // Atajo directo a "quién pagó" (v2.45.1, renombrada "Inscritos" en v2.50.0) -- sin
+        // esto, verificar un pago suelto de torneo significaba abrir el torneo y buscar la
+        // sub-pestaña a mano.
+        onPagos: isAdmin ? () => openTournamentInscritos(t.id) : null,
         // Atajo directo a "inscribir a alguien" (v2.47.0) -- mismo criterio que onPagos, pero
         // aterriza en la sub-pestaña Inscripción en vez de Pagos.
         onInscribir: isAdmin ? () => openTournamentInscripcion(t.id) : null,
