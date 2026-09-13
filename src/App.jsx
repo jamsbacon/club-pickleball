@@ -8,7 +8,7 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.47.3";
+const APP_VERSION = "2.48.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1719,6 +1719,23 @@ export default function PickleballTournamentApp() {
   // que le dice a TorneosSection en qué sub-pestaña aterrizar apenas se abre; se limpia solo
   // apenas se consume (ver TorneosSection) para no pisar un cambio de pestaña posterior.
   const [pendingTorneoSubTab, setPendingTorneoSubTab] = useState(null);
+
+  // "Ver como cliente" (v2.48.0) -- el admin previsualiza la app tal como la ve un socio, SIN
+  // cerrar sesión ni cambiar su role real en Supabase: solo pisa la variable `role` de más
+  // abajo (el único lugar donde se calcula, de ahí cuelga toda la app -- nav, pestañas
+  // admin-only, controles admin dentro de cada tab). `currentUser.role` real queda intacto --
+  // Sidebar/TopBar/Perfil lo siguen leyendo directo para el badge "Administrador", así nunca se
+  // pierde de vista que sigue siendo admin de verdad. Las reglas de seguridad reales (RLS)
+  // también lo siguen tratando como admin -- esto es solo para revisar la interfaz, no
+  // reemplaza probar con una cuenta cliente real cuando lo que hace falta confirmar es qué
+  // permite o bloquea la base de datos. Persiste en localStorage para sobrevivir un refresh
+  // mientras se prueba (sin esto, cada F5 volvería a vista admin a mitad de una prueba).
+  const [viewAsClient, setViewAsClient] = useState(() => {
+    try { return localStorage.getItem("pickleHub_viewAsClient") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("pickleHub_viewAsClient", viewAsClient ? "1" : "0"); } catch {}
+  }, [viewAsClient]);
 
   // Crea un torneo nuevo y lo deja abierto para editar de inmediato (antes no existía ESTA
   // función -- el único torneo que había se sembró directo en la base de datos, nunca se creó
@@ -2859,7 +2876,7 @@ export default function PickleballTournamentApp() {
     );
   }
 
-  const role = currentUser.role;
+  const role = currentUser.role === "admin" && viewAsClient ? "cliente" : currentUser.role;
   const visibleNav = NAV_ITEMS.filter((it) => it.roles.includes(role));
   const effectiveTab = visibleNav.some((it) => it.id === tab) ? tab : visibleNav[0].id;
 
@@ -2873,6 +2890,20 @@ export default function PickleballTournamentApp() {
         <TopBar tab={effectiveTab} stats={stats} currentUser={currentUser} currentPlan={currentPlan} logoutUser={logoutUser} visibleNav={visibleNav} />
 
         <main className="max-w-7xl w-full mx-auto px-4 md:px-10 pt-6 pb-28 md:pb-16 flex-1">
+          {/* Banner de "Ver como cliente" (v2.48.0) -- visible en CUALQUIER pestaña y viewport
+             (a diferencia del switch de Perfil, que solo vive ahí) para que apagarlo nunca
+             requiera navegar de vuelta a Perfil primero. Ver el useState en el componente
+             principal para el resto del mecanismo. */}
+          {viewAsClient && (
+            <div className="mb-4 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap" style={{ background: "#FBF3E4", border: "1px solid #F2D9A6" }}>
+              <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: "#8A5A16" }}>
+                <Eye size={13} className="shrink-0" /> Viendo la app como la vería un cliente -- seguís siendo admin de verdad.
+              </span>
+              <button onClick={() => setViewAsClient(false)} className="text-xs font-bold px-3 py-1.5 rounded-full shrink-0" style={{ background: "#8A5A16", color: "#fff" }}>
+                Volver a admin
+              </button>
+            </div>
+          )}
           {effectiveTab === "club" && role === "admin" && (
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
@@ -2958,7 +2989,8 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "perfil" && (
-            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} subscriptions={subscriptions} courts={courts} updateProfile={updateProfile} setTab={setTab} />
+            <ProfileTab currentUser={currentUser} membershipPlans={membershipPlans} subscriptions={subscriptions} courts={courts} updateProfile={updateProfile} setTab={setTab}
+              viewAsClient={viewAsClient} setViewAsClient={setViewAsClient} />
           )}
         </main>
       </div>
@@ -9454,7 +9486,32 @@ function NotificationsCard({ currentUser }) {
   );
 }
 
-function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updateProfile, setTab }) {
+// Switch de "Ver como cliente" (v2.48.0) -- vive en Perfil porque esa pestaña sigue visible
+// incluso en modo cliente (Perfil está en NAV_ITEMS para ambos roles), así el admin siempre
+// tiene dónde volver a apagarlo sin perder el hilo. El banner de arriba de <main> es el atajo
+// rápido para apagarlo desde cualquier pestaña; este switch es la única forma de ENCENDERLO.
+function ViewAsClientCard({ viewAsClient, setViewAsClient }) {
+  return (
+    <Card>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <p className="font-bold text-sm flex items-center gap-1.5" style={{ color: COLORS.courtDark }}><Eye size={15} /> Ver como cliente</p>
+          <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
+            {viewAsClient
+              ? "Estás viendo la app como la vería un socio -- seguís siendo admin de verdad, esto es solo la interfaz."
+              : "Previsualiza la app sin las pestañas ni controles de admin, sin cerrar tu sesión."}
+          </p>
+        </div>
+        <button onClick={() => setViewAsClient((v) => !v)} className="shrink-0 px-4 py-2.5 rounded-xl font-bold text-sm"
+          style={{ background: viewAsClient ? COLORS.clay : COLORS.court, color: "#fff" }}>
+          {viewAsClient ? "Volver a admin" : "Activar"}
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updateProfile, setTab, viewAsClient, setViewAsClient }) {
   const [name, setName] = useState(currentUser.name);
   const [phone, setPhone] = useState(currentUser.phone || "");
   const [zone, setZone] = useState(currentUser.zone || "");
@@ -9566,6 +9623,8 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updat
           </button>
         </div>
       </Card>
+
+      {currentUser.role === "admin" && <ViewAsClientCard viewAsClient={viewAsClient} setViewAsClient={setViewAsClient} />}
 
       <NotificationsCard currentUser={currentUser} />
 
