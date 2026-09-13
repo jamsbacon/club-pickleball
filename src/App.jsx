@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.52.0";
+const APP_VERSION = "2.52.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -9604,6 +9604,13 @@ function NotificationsCard({ currentUser }) {
   const enable = async () => {
     setBusy(true); setError("");
     try {
+      // Sin esta env var (VITE_ -- se hornea en el bundle al momento del build, agregarla en
+      // Vercel sin volver a desplegar no alcanza) urlBase64ToUint8Array revienta con un
+      // "Cannot read properties of undefined" críptico -- v2.52.1 lo cambia por un mensaje
+      // que de verdad dice qué falta y a quién avisarle, en vez de un error de JS pelado.
+      if (!import.meta.env.VITE_VAPID_PUBLIC_KEY) {
+        throw new Error("Las notificaciones push todavía no están configuradas del lado del servidor (falta la llave VAPID en Vercel) -- avísale al admin del proyecto.");
+      }
       if (Notification.permission !== "granted") {
         const perm = await Notification.requestPermission();
         if (perm !== "granted") { setStatus("denied"); setBusy(false); return; }
