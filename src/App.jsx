@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.44.4";
+const APP_VERSION = "2.45.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2872,6 +2872,12 @@ export default function PickleballTournamentApp() {
               setOpenPlayPaymentStatus={setOpenPlayPaymentStatus} setClassPaymentStatus={setClassPaymentStatus} />
           )}
 
+          {effectiveTab === "pagos" && role === "admin" && (
+            <PagosTab tournaments={tournaments} categories={categories} openPlays={openPlays} classes={classes}
+              setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+              setOpenPlayPaymentStatus={setOpenPlayPaymentStatus} setClassPaymentStatus={setClassPaymentStatus} />
+          )}
+
           {effectiveTab === "reservas" && (
             <ReservasTab club={club} courts={courts} occupiedKeys={occupiedKeys} bookings={bookings}
               createBooking={createBooking} cancelBooking={cancelBooking} currentUser={currentUser} currentPlan={currentPlan}
@@ -3555,6 +3561,10 @@ function Onboarding({ currentUser, club, updateProfile, logoutUser }) {
 const NAV_ITEMS = [
   { id: "estadisticas", label: "Estadísticas", short: "Stats", icon: BarChart3, sub: "Ingresos, horarios pico, membresías y zonas", roles: ["admin"] },
   { id: "usuarios", label: "Usuarios", short: "Usuarios", icon: Users, sub: "Directorio de jugadores y sus membresías", roles: ["admin"] },
+  // v2.44.5: antes había que entrar torneo por torneo/categoría por categoría (o actividad
+  // por actividad) para verificar cada pago -- esto junta TODAS las inscripciones de
+  // torneos, Open Plays y clases en una sola lista, una fila por PERSONA (no por equipo).
+  { id: "pagos", label: "Pagos", short: "Pagos", icon: Wallet, sub: "Verifica los pagos de torneos, Open Plays y clases, todos juntos", roles: ["admin"] },
   // "eventos" (id interno sin cambios) va primero para el cliente -- es su sección de aterrizaje.
   { id: "eventos", label: "Actividades", short: "Actividades", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
   { id: "reservas", label: "Reservas", short: "Reservas", icon: CalendarClock, sub: "Reserva un bloque de cancha disponible", roles: ["admin", "cliente"] },
@@ -4590,6 +4600,150 @@ function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegist
         </div>
       )}
     </Card>
+  );
+}
+
+/* =========================================================================
+   TAB: PAGOS (admin) -- v2.44.5
+   Antes verificar un pago suelto significaba entrar torneo por torneo,
+   categoría por categoría (Participantes) o actividad por actividad
+   (Inscritos de cada Open Play/Clase) -- no había una sola pantalla para
+   auditar todo. Esto junta las tres fuentes en una lista plana, UNA FILA
+   POR PERSONA (no por equipo): un equipo de dobles se "desarma" en sus dos
+   jugadores, cada uno con su propio estado de pago si pagó por separado
+   (ver joinTeam, v2.44.2) o compartiendo el de quien creó el equipo si no
+   (Buscar jugador / roster del organizador).
+   ========================================================================= */
+function buildPaymentRows(tournaments, categories, openPlays, classes, setTeamPaymentStatus, setPlayerPaymentStatus, setOpenPlayPaymentStatus, setClassPaymentStatus) {
+  const rows = [];
+  categories.forEach((cat) => {
+    const tournament = tournaments.find((t) => t.id === cat.tournamentId);
+    [...(cat.teams || []), ...(cat.waitlist || [])].forEach((team) => {
+      (team.players || []).forEach((p, idx) => {
+        // "Pago propio" solo existe para el jugador #2 que se unió por su cuenta con el link
+        // (players[idx].paymentStatus queda seteado ahí, ver joinTeam) -- el jugador #0
+        // siempre usa los campos de nivel de equipo, sea cual sea el modo de inscripción.
+        const ownPayment = idx > 0 && p.paymentStatus !== undefined;
+        const partner = (team.players || []).find((_, i) => i !== idx);
+        rows.push({
+          id: `t-${cat.id}-${team.id}-${idx}`, kind: "torneo", kindLabel: "Torneo",
+          name: p.name, contextName: cat.name, subContext: tournament?.name || "",
+          partnerName: partner?.name || null,
+          priceUsd: ownPayment ? p.priceUsd : team.priceUsd,
+          paymentMethod: ownPayment ? p.paymentMethod : team.paymentMethod,
+          reference: ownPayment ? p.reference : team.reference,
+          proofName: ownPayment ? p.proofName : team.proofName,
+          paymentStatus: ownPayment ? p.paymentStatus : team.paymentStatus,
+          createdAt: ownPayment ? p.joinedAt : team.createdAt,
+          onSetStatus: ownPayment
+            ? (v) => setPlayerPaymentStatus(cat.id, team.id, idx, v)
+            : (v) => setTeamPaymentStatus(cat.id, team.id, v),
+        });
+      });
+    });
+  });
+  openPlays.forEach((e) => (e.registrations || []).forEach((r) => {
+    rows.push({
+      id: `op-${e.id}-${r.id}`, kind: "open_play", kindLabel: "Open Play",
+      name: r.userName, contextName: e.name, subContext: formatDateHuman(e.date), partnerName: null,
+      priceUsd: r.priceUsd, paymentMethod: r.paymentMethod, reference: r.reference, proofName: r.proofName,
+      paymentStatus: r.paymentStatus, createdAt: r.createdAt,
+      onSetStatus: (v) => setOpenPlayPaymentStatus(e.id, r.id, v),
+    });
+  }));
+  classes.forEach((e) => (e.registrations || []).forEach((r) => {
+    rows.push({
+      id: `cl-${e.id}-${r.id}`, kind: "clase", kindLabel: "Clase",
+      name: r.userName, contextName: e.academyName, subContext: formatDateHuman(e.date), partnerName: null,
+      priceUsd: r.priceUsd, paymentMethod: r.paymentMethod, reference: r.reference, proofName: r.proofName,
+      paymentStatus: r.paymentStatus, createdAt: r.createdAt,
+      onSetStatus: (v) => setClassPaymentStatus(e.id, r.id, v),
+    });
+  }));
+  return rows.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+const PAGOS_KIND_CHIPS = [
+  { value: "all", label: "Todas" },
+  { value: "torneo", label: "Torneos" },
+  { value: "open_play", label: "Open Plays" },
+  { value: "clase", label: "Clases" },
+];
+
+function PagosTab({ tournaments, categories, openPlays, classes, setTeamPaymentStatus, setPlayerPaymentStatus, setOpenPlayPaymentStatus, setClassPaymentStatus }) {
+  const [kindFilter, setKindFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  const rows = useMemo(
+    () => buildPaymentRows(tournaments, categories, openPlays, classes, setTeamPaymentStatus, setPlayerPaymentStatus, setOpenPlayPaymentStatus, setClassPaymentStatus),
+    [tournaments, categories, openPlays, classes, setTeamPaymentStatus, setPlayerPaymentStatus, setOpenPlayPaymentStatus, setClassPaymentStatus]
+  );
+
+  const filtered = rows.filter((r) => {
+    if (kindFilter !== "all" && r.kind !== kindFilter) return false;
+    if (statusFilter !== "all" && r.paymentStatus !== statusFilter) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return r.name.toLowerCase().includes(q) || r.contextName.toLowerCase().includes(q);
+  });
+
+  const pendingCount = rows.filter((r) => r.paymentStatus !== "confirmada").length;
+
+  return (
+    <div className="mt-2 space-y-4">
+      <SectionTitle sub="Todas las inscripciones pagas del club -- torneos, Open Plays y clases juntos, una fila por persona.">
+        Pagos{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
+      </SectionTitle>
+
+      <div className="flex flex-wrap gap-2">
+        {PAGOS_KIND_CHIPS.map((c) => (
+          <button key={c.value} onClick={() => setKindFilter(c.value)} className="px-3 py-1.5 rounded-full text-xs font-bold"
+            style={{ background: kindFilter === c.value ? COLORS.court : "#EAEEF5", color: kindFilter === c.value ? "#fff" : COLORS.ink }}>
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setStatusFilter("all")} className="px-3 py-1.5 rounded-full text-xs font-bold"
+          style={{ background: statusFilter === "all" ? COLORS.courtDark : "#EAEEF5", color: statusFilter === "all" ? "#fff" : COLORS.ink }}>
+          Todos los estados
+        </button>
+        {Object.entries(PAYMENT_STATUS_META).map(([val, meta]) => (
+          <button key={val} onClick={() => setStatusFilter(val)} className="px-3 py-1.5 rounded-full text-xs font-bold"
+            style={{ background: statusFilter === val ? meta.fg : meta.bg, color: statusFilter === val ? "#fff" : meta.fg }}>
+            {meta.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="relative">
+        <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre o actividad…" style={{ ...inputStyle, paddingLeft: 38 }} />
+      </div>
+
+      <div className="space-y-1.5">
+        {filtered.map((r) => (
+          <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-sm flex-wrap" style={{ background: "#EEF1F7" }}>
+            <div className="min-w-0">
+              <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide mr-1.5" style={{ background: "#EAEEF5", color: "#6B7688" }}>{r.kindLabel}</span>
+              <span className="font-semibold">{r.name}</span>
+              {r.partnerName && <span className="text-xs text-gray-500"> · con {r.partnerName}</span>}
+              <span className="text-xs text-gray-500 block mt-0.5 truncate">
+                {r.contextName}{r.subContext && ` · ${r.subContext}`}
+                {r.paymentMethod && ` · ${r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"}`}
+                {r.reference && ` · ref. ${r.reference}`}
+              </span>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0 ml-auto">
+              {r.priceUsd != null && <span className="mono text-xs font-bold" style={{ color: COLORS.court }}>{formatMoney(r.priceUsd)}</span>}
+              <PaymentStatusSelect status={r.paymentStatus} onChange={r.onSetStatus} />
+            </div>
+          </div>
+        ))}
+        {filtered.length === 0 && <p className="text-sm text-gray-400 italic py-4 text-center">Nadie coincide con este filtro.</p>}
+      </div>
+    </div>
   );
 }
 
