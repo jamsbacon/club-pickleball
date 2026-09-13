@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.53.0";
+const APP_VERSION = "2.53.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1319,7 +1319,14 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
    MAIN APP
    ========================================================================= */
 export default function PickleballTournamentApp() {
-  const [tab, setTab] = useState("club");
+  // Recordar en qué pestaña quedó el admin/cliente (v2.53.1) -- antes SIEMPRE arrancaba en
+  // "club" (admin) o "eventos" (cliente) sin importar de dónde venía, así que actualizar la
+  // página a mitad de revisar, por ejemplo, Inscritos de un torneo lo mandaba de vuelta a Mi
+  // Club de una. `loginUser`/`registerUser` SÍ siguen fijando un tab de arranque a propósito
+  // (ver más abajo) -- eso es explícito y deliberado, no lo toca esta persistencia; solo
+  // reemplaza el valor inicial fijo de este useState por lo último guardado.
+  const [tab, setTab] = useState(() => loadCache("tab", "club"));
+  useEffect(() => { saveCache("tab", tab); }, [tab]);
 
   // Link compartido de una actividad (v2.43.0) -- `?act=<kind>:<id>`, parseado UNA sola vez al
   // montar (no reactivo a cambios de URL después: esta app no tiene router, un solo destino
@@ -1634,7 +1641,7 @@ export default function PickleballTournamentApp() {
       setSession(newSession);
       if (event === "SIGNED_IN") fetchAllProfiles(); // trae el perfil recién creado/logueado
       if (event === "PASSWORD_RECOVERY") setPasswordRecovery(true); // vino del link del correo de reset
-      if (event === "SIGNED_OUT") { setTab("club"); setPasswordRecovery(false); }
+      if (event === "SIGNED_OUT") { setTab("club"); setActiveTournamentId(null); setPasswordRecovery(false); }
     });
     return () => sub.subscription.unsubscribe();
   }, []);
@@ -1713,7 +1720,13 @@ export default function PickleballTournamentApp() {
     });
   }, []);
   useEffect(() => { saveCache("tournaments", tournaments); }, [tournaments]);
-  const [activeTournamentId, setActiveTournamentId] = useState(null);
+  // Mismo criterio que `tab` arriba (v2.53.1) -- si al actualizar la página estaba DENTRO de
+  // un torneo puntual (viendo Inscritos, Calendario, etc.), que la recargue vuelva a abrir ESE
+  // torneo en vez de mandarlo a la lista de Torneos. Se valida contra `tournaments` recién
+  // cargado más abajo (si ese id ya no existe -- se borró el torneo -- `tournament` da null y
+  // TorneosSection ni se monta, mismo comportamiento que si el admin lo hubiera cerrado a mano).
+  const [activeTournamentId, setActiveTournamentId] = useState(() => loadCache("activeTournamentId", null));
+  useEffect(() => { saveCache("activeTournamentId", activeTournamentId); }, [activeTournamentId]);
   const tournament = tournaments.find((t) => t.id === activeTournamentId) || null;
   // Botón "Pagos" en la card de un torneo en Actividades (v2.45.1) -- valor de un solo uso
   // que le dice a TorneosSection en qué sub-pestaña aterrizar apenas se abre; se limpia solo
@@ -5382,7 +5395,15 @@ function TournamentsListTab({ tournaments, categories, role, currentUser, onSele
 function TorneosSection(props) {
   const { role } = props;
   const visibleSubItems = TORNEO_SUB_ITEMS.filter((it) => it.roles.includes(role));
-  const [subTab, setSubTab] = useState(visibleSubItems[0]?.id);
+  // Recordar la sub-pestaña (v2.53.1) -- mismo motivo que `tab`/`activeTournamentId` en el
+  // componente principal: actualizar la página a mitad de revisar Inscritos ya no debe
+  // mandar de vuelta a Generalidades. `loadCache` es la misma función de nivel de módulo que
+  // usa el resto de la app (club/tournaments/tab), no hace falta pasarla por props.
+  const [subTab, setSubTab] = useState(() => {
+    const cached = loadCache("torneoSubTab", null);
+    return cached && visibleSubItems.some((it) => it.id === cached) ? cached : visibleSubItems[0]?.id;
+  });
+  useEffect(() => { saveCache("torneoSubTab", subTab); }, [subTab]);
   useEffect(() => {
     if (!visibleSubItems.some((it) => it.id === subTab)) setSubTab(visibleSubItems[0]?.id);
   }, [role]);
