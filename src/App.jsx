@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.45.0";
+const APP_VERSION = "2.45.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1715,6 +1715,10 @@ export default function PickleballTournamentApp() {
   useEffect(() => { saveCache("tournaments", tournaments); }, [tournaments]);
   const [activeTournamentId, setActiveTournamentId] = useState(null);
   const tournament = tournaments.find((t) => t.id === activeTournamentId) || null;
+  // Botón "Pagos" en la card de un torneo en Actividades (v2.45.1) -- valor de un solo uso
+  // que le dice a TorneosSection en qué sub-pestaña aterrizar apenas se abre; se limpia solo
+  // apenas se consume (ver TorneosSection) para no pisar un cambio de pestaña posterior.
+  const [pendingTorneoSubTab, setPendingTorneoSubTab] = useState(null);
 
   // Crea un torneo nuevo y lo deja abierto para editar de inmediato (antes no existía ESTA
   // función -- el único torneo que había se sembró directo en la base de datos, nunca se creó
@@ -2896,6 +2900,7 @@ export default function PickleballTournamentApp() {
               currentUser={currentUser} currentPlan={currentPlan} membershipPlans={membershipPlans} role={role}
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
+              openTournamentPagos={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("pagos"); }}
               onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }}
               autoOpen={publicAct?.kind === "open_play" || publicAct?.kind === "clase" ? publicAct : null} />
           )}
@@ -2918,6 +2923,7 @@ export default function PickleballTournamentApp() {
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
+                initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
                 onBackToList={() => { setActiveTournamentId(null); setActiveCatId(null); }}
                 onRemoveTournament={() => { removeTournament(tournament.id); setActiveTournamentId(null); setActiveCatId(null); }}
               />
@@ -4978,6 +4984,10 @@ const TORNEO_SUB_ITEMS = [
   { id: "config", label: "Generalidades", roles: ["admin"] },
   { id: "categorias", label: "Categorías", roles: ["admin"] },
   { id: "participantes", label: "Participantes", roles: ["admin"] },
+  // v2.45.1: acceso directo a "quién pagó y cuánto" para ESTE torneo -- Participantes ya
+  // muestra el pago por equipo, pero acá es una fila por PERSONA con lo que un admin necesita
+  // para verificar un pago suelto sin tener que sumar categorías a mano.
+  { id: "pagos", label: "Pagos", roles: ["admin"] },
   { id: "formatos", label: "Formatos", roles: ["admin"] },
   // v2.44.3: el admin también puede auto-inscribirse (con checkout real, no el roster manual
   // de Participantes) -- antes esta pestaña ni le aparecía.
@@ -5095,9 +5105,21 @@ function TorneosSection(props) {
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
-    pendingCategoryCount, flushPendingCategoryWrites,
+    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab,
   } = props;
   const isAdmin = role === "admin";
+
+  // Botón "Pagos" en la card de Actividades (v2.45.1, ver openTournamentPagos en
+  // PickleballTournamentApp) -- aterriza directo en esta sub-pestaña en vez de "Generalidades"
+  // como cualquier otro clic en la card. `initialSubTab` es un valor de un solo uso: se
+  // consume apenas se aplica para no pisar un cambio de pestaña posterior del propio usuario.
+  useEffect(() => {
+    if (initialSubTab && visibleSubItems.some((it) => it.id === initialSubTab)) {
+      setSubTab(initialSubTab);
+      onConsumeInitialSubTab?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSubTab]);
 
   return (
     <div>
@@ -5164,6 +5186,10 @@ function TorneosSection(props) {
           addTeam={addTeam} removeTeam={removeTeam} removeFromWaitlist={removeFromWaitlist}
           suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
           setPlayerPaymentStatus={setPlayerPaymentStatus} />
+      )}
+
+      {subTab === "pagos" && role === "admin" && (
+        <TournamentPagosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -5302,6 +5328,141 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 // vivía dentro de Categorías (TeamRegistration) como al formulario admin de la vieja pestaña
 // Inscripción (InscripcionAdminForm, ahora retirado): TeamRegistration ya cubre todo lo que
 // hacía aquel formulario y además muestra los equipos/lista de espera ya inscritos.
+// Junta las inscripciones de TODAS las categorías de este torneo en una fila POR PERSONA
+// (v2.45.1) -- Participantes ya muestra el pago por equipo/categoría; esto responde
+// "cuánto debe Fulano en total, en TODO este torneo, y ya pagó todo o falta algo" sin que el
+// admin tenga que sumarlo a mano categoría por categoría.
+//
+// Dos estados nada más (Por verificar / Verificado), a pedido del club -- ya no los tres de
+// siempre (Por pagar / Pago por verificar / Verificado). "Por pagar" y "Pago por verificar"
+// se ven acá como el mismo "Por verificar": la columna "Medio de pago" ya distingue si es
+// efectivo (nada que verificar todavía, se cobra en la cancha) o Pago Móvil (verificar que
+// llegó) -- MANTENER el estado en 3 valores por debajo evita una migración de los 4 checks de
+// Postgres que ya existen (bookings/open_play/class/subscriptions) solo para esta pantalla.
+function buildTournamentParticipants(categories) {
+  const byPerson = new Map();
+  categories.forEach((cat) => {
+    [...(cat.teams || []), ...(cat.waitlist || [])].forEach((team) => {
+      (team.players || []).forEach((p, idx) => {
+        // Mismo criterio que buildPaymentRows/TeamRegistration: el jugador #0 usa los campos
+        // de nivel de equipo; el #2 solo tiene los suyos propios si se unió por su cuenta con
+        // el link (joinTeam, v2.44.2) -- si no, comparte el pago de quien creó el equipo.
+        const ownPayment = idx > 0 && p.paymentStatus !== undefined;
+        const priceUsd = Number(ownPayment ? p.priceUsd : team.priceUsd) || 0;
+        const paymentMethod = ownPayment ? p.paymentMethod : team.paymentMethod;
+        const paymentStatus = ownPayment ? p.paymentStatus : team.paymentStatus;
+        const createdAt = (ownPayment ? p.joinedAt : team.createdAt) || 0;
+        const key = p.userId || `name:${p.name.trim().toLowerCase()}`;
+        const entry = byPerson.get(key) || {
+          key, name: p.name, categories: [], totalUsd: 0, paidUsd: 0,
+          methods: new Set(), lastAt: 0, verifyTargets: [],
+        };
+        entry.categories.push(cat.name);
+        entry.totalUsd += priceUsd;
+        if (paymentStatus === "confirmada") entry.paidUsd += priceUsd;
+        else entry.verifyTargets.push(ownPayment ? { kind: "player", catId: cat.id, teamId: team.id, playerIdx: idx } : { kind: "team", catId: cat.id, teamId: team.id });
+        if (paymentMethod) entry.methods.add(paymentMethod);
+        if (createdAt > entry.lastAt) entry.lastAt = createdAt;
+        byPerson.set(key, entry);
+      });
+    });
+  });
+  return [...byPerson.values()].sort((a, b) => b.lastAt - a.lastAt);
+}
+
+const METHOD_LABELS = { movil: "Pago Móvil", efectivo: "Efectivo" };
+
+function TournamentPagosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
+
+  const participants = useMemo(() => buildTournamentParticipants(categories), [categories]);
+
+  const verifyAll = (entry) => {
+    entry.verifyTargets.forEach((t) => {
+      if (t.kind === "team") setTeamPaymentStatus(t.catId, t.teamId, "confirmada");
+      else setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, "confirmada");
+    });
+  };
+
+  const filtered = participants.filter((e) => {
+    if (statusFilter === "pending" && e.verifyTargets.length === 0) return false;
+    if (statusFilter === "verificado" && e.verifyTargets.length > 0) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return e.name.toLowerCase().includes(q) || e.categories.some((c) => c.toLowerCase().includes(q));
+  });
+
+  const pendingCount = participants.filter((e) => e.verifyTargets.length > 0).length;
+
+  return (
+    <div className="mt-2 space-y-3">
+      <SectionTitle sub="Una fila por persona -- suma todas sus categorías en este torneo. 'Por verificar' cubre tanto efectivo sin cobrar todavía como Pago Móvil sin confirmar -- la columna Medio de pago distingue cuál es cuál.">
+        Pagos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
+      </SectionTitle>
+
+      <div className="flex flex-wrap gap-2">
+        {[{ v: "all", l: "Todos" }, { v: "pending", l: "Por verificar" }, { v: "verificado", l: "Verificado" }].map((o) => (
+          <button key={o.v} onClick={() => setStatusFilter(o.v)} className="px-3 py-1.5 rounded-full text-xs font-bold"
+            style={{ background: statusFilter === o.v ? COLORS.court : "#EAEEF5", color: statusFilter === o.v ? "#fff" : COLORS.ink }}>
+            {o.l}
+          </button>
+        ))}
+      </div>
+      <div className="relative">
+        <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre o categoría…" style={{ ...inputStyle, paddingLeft: 38 }} />
+      </div>
+
+      <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="w-full text-sm" style={{ minWidth: 720 }}>
+          <thead>
+            <tr className="text-left text-[11px] text-gray-400 uppercase" style={{ background: "#F4F6FA" }}>
+              <th className="py-2.5 px-3">Nombre y apellido</th>
+              <th className="py-2.5 px-3">Categorías</th>
+              <th className="py-2.5 px-3">Monto a pagar</th>
+              <th className="py-2.5 px-3">Monto pagado</th>
+              <th className="py-2.5 px-3">Fecha</th>
+              <th className="py-2.5 px-3">Medio de pago</th>
+              <th className="py-2.5 px-3">Estatus</th>
+              <th className="py-2.5 px-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((e) => {
+              const pending = e.verifyTargets.length > 0;
+              const methodLabel = e.methods.size === 0 ? "—" : [...e.methods].map((m) => METHOD_LABELS[m] || m).join(" / ");
+              return (
+                <tr key={e.key} className="border-t" style={{ borderColor: COLORS.line }}>
+                  <td className="py-2.5 px-3 font-semibold whitespace-nowrap">{e.name}</td>
+                  <td className="py-2.5 px-3 text-center">{e.categories.length}</td>
+                  <td className="py-2.5 px-3 mono">{formatMoney(e.totalUsd)}</td>
+                  <td className="py-2.5 px-3 mono">{formatMoney(e.paidUsd)}</td>
+                  <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{e.lastAt ? formatDateHuman(new Date(e.lastAt).toISOString().slice(0, 10)) : "—"}</td>
+                  <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{methodLabel}</td>
+                  <td className="py-2.5 px-3">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold whitespace-nowrap" style={{ background: pending ? "#FBF3E4" : "#DCEBD5", color: pending ? "#8A5A16" : COLORS.courtDark }}>
+                      {pending ? "Por verificar" : "Verificado"}
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-3">
+                    {pending && (
+                      <button onClick={() => verifyAll(e)} className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap" style={{ background: COLORS.court, color: "#fff" }}>
+                        Verificar
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {filtered.length === 0 && <p className="text-sm text-gray-400 italic py-6 text-center">Nadie coincide con este filtro.</p>}
+      </div>
+    </div>
+  );
+}
+
 function ParticipantesTab({ categories, activeCat, setActiveCatId, addTeam, removeTeam, removeFromWaitlist, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
@@ -7543,7 +7704,7 @@ const WEEKDAY_LETTERS = [
   { value: 5, label: "V" }, { value: 6, label: "S" }, { value: 0, label: "D" },
 ];
 
-function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit }) {
+function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit, onPagos }) {
   const kindMeta = {
     open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
     torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
@@ -7594,6 +7755,15 @@ function EventListItem({ kind, shareId, title, description, date, startTime, end
               <ShareButton kind={kind} id={shareId} iconSize={11}
                 text={kind === "torneo" ? `Mira este torneo: ${title}` : kind === "clase" ? `Mira esta clase: ${title}` : `Mira este Open Play: ${title}`}
                 className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }} />
+            )}
+            {/* Atajo a "quién pagó" (v2.45.1) -- solo torneos por ahora, ver openTournamentPagos.
+               Open Play/Clase ya tienen su propia pestaña "Inscritos" con lo mismo adentro del
+               detalle, así que no hace falta duplicar el atajo acá para esos dos. */}
+            {onPagos && (
+              <button onClick={(e) => { e.stopPropagation(); onPagos(); }} title="Pagos e inscritos"
+                className="w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#EAEEF5", color: COLORS.court }}>
+                <Wallet size={11} />
+              </button>
             )}
             {onEdit && (
               <button onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Editar"
@@ -8109,7 +8279,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, onCreateTournament, role, autoOpen }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, openTournamentPagos, onCreateTournament, role, autoOpen }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -8283,6 +8453,9 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
         // admin, no hace falta un modo edición aparte como Open Play/Clase.
         onEdit: isAdmin ? () => openTournament(t.id) : null,
+        // Atajo directo a "quién pagó" (v2.45.1) -- sin esto, verificar un pago suelto de
+        // torneo significaba abrir el torneo y buscar la sub-pestaña Pagos a mano.
+        onPagos: isAdmin ? () => openTournamentPagos(t.id) : null,
       });
     });
     return items;
@@ -8404,7 +8577,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           {filteredItems.map((it) => (
             <EventListItem key={it.key} kind={it.kind} shareId={it.shareId} title={it.title} description={it.description}
               date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
-              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} />
+              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} onPagos={it.onPagos} />
           ))}
         </div>
 
