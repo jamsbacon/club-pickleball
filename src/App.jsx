@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.52.1";
+const APP_VERSION = "2.53.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5708,11 +5708,25 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 
   const pendingCount = participants.filter((e) => e.verifyTargets.length > 0).length;
 
+  // Totales del torneo completo (v2.53.0) -- siempre sobre TODOS los inscritos, sin importar
+  // el filtro de estatus/búsqueda activo, para que sean un resumen estable arriba de la tabla
+  // en vez de moverse cada vez que alguien busca o filtra.
+  const totalProjected = participants.reduce((s, e) => s + e.totalUsd, 0);
+  const totalPaid = participants.reduce((s, e) => s + e.paidUsd, 0);
+  const totalPendingAmount = participants.reduce((s, e) => s + (e.totalUsd - e.paidUsd), 0);
+
   return (
     <div className="mt-2 space-y-3">
-      <SectionTitle sub="Una fila por persona -- suma todas sus categorías en este torneo. 'Por verificar' cubre tanto efectivo sin cobrar todavía como Pago Móvil sin confirmar -- la columna Medio de pago distingue cuál es cuál. El icono de basurero borra a la persona de TODAS sus categorías de una.">
+      <SectionTitle>
         Inscritos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
       </SectionTitle>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard label="Jugadores inscritos" value={participants.length} icon={Users} />
+        <StatCard label="Monto proyectado" value={formatMoney(totalProjected)} icon={Euro} />
+        <StatCard label="Monto verificado" value={formatMoney(totalPaid)} icon={CheckCircle2} />
+        <StatCard label="Por verificar" value={formatMoney(totalPendingAmount)} icon={Hourglass} />
+      </div>
 
       <div className="flex flex-wrap gap-2">
         {[{ v: "all", l: "Todos" }, { v: "pending", l: "Por verificar" }, { v: "verificado", l: "Verificado" }].map((o) => (
@@ -5731,6 +5745,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
         <table className="w-full text-sm" style={{ minWidth: 760 }}>
           <thead>
             <tr className="text-left text-[11px] text-gray-400 uppercase" style={{ background: "#F4F6FA" }}>
+              <th className="py-2.5 px-3">#</th>
               <th className="py-2.5 px-3">Nombre y apellido</th>
               <th className="py-2.5 px-3">Categorías</th>
               <th className="py-2.5 px-3">Monto a pagar</th>
@@ -5743,11 +5758,12 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
             </tr>
           </thead>
           <tbody>
-            {filtered.map((e) => {
+            {filtered.map((e, i) => {
               const pending = e.verifyTargets.length > 0;
               const methodLabel = e.methods.size === 0 ? "—" : [...e.methods].map((m) => METHOD_LABELS[m] || m).join(" / ");
               return (
                 <tr key={e.key} className="border-t" style={{ borderColor: COLORS.line }}>
+                  <td className="py-2.5 px-3 mono text-gray-400">{i + 1}</td>
                   <td className="py-2.5 px-3 font-semibold whitespace-nowrap">{e.name}</td>
                   <td className="py-2.5 px-3 text-center">{e.categories.length}</td>
                   <td className="py-2.5 px-3 mono">{formatMoney(e.totalUsd)}</td>
