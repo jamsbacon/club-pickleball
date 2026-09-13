@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.51.1";
+const APP_VERSION = "2.52.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2069,6 +2069,18 @@ export default function PickleballTournamentApp() {
       }
       return c;
     });
+    // Push a los admins con cada inscripción real (v2.52.0) -- "admins_except_caller" en
+    // api/send-push.js decide el destino: si quien llama es admin (auto-registro, o un
+    // walk-in anotado a mano en Duplas), no se manda a sí mismo un aviso de su propia acción.
+    if (!result?.error) {
+      const cat = categories.find((c) => c.id === catId);
+      const tournament = tournaments.find((t) => t.id === cat?.tournamentId);
+      sendPush("new_registration", {
+        title: "Nueva inscripción",
+        body: `${name} se inscribió en ${cat?.name || "una categoría"}${tournament ? ` -- ${tournament.name}` : ""}.`,
+        url: "/",
+      });
+    }
     return { teamId, error: result?.error };
   };
   // Une un segundo jugador a un equipo de DOBLES que quedó "esperando pareja" -- a diferencia
@@ -2104,6 +2116,15 @@ export default function PickleballTournamentApp() {
       c.waitlist = c.waitlist.map(patch);
       return c;
     });
+    // Push a los admins (v2.52.0) -- mismo criterio que addTeam, ver ese comentario.
+    if (!result?.error) {
+      const tournament = tournaments.find((t) => t.id === cat.tournamentId);
+      sendPush("new_registration", {
+        title: "Nueva inscripción",
+        body: `${player.name} se unió al equipo de ${team.players[0]?.name || "alguien"} en ${cat.name}${tournament ? ` -- ${tournament.name}` : ""}.`,
+        url: "/",
+      });
+    }
     return { error: result?.error };
   };
   // Estado de pago del SEGUNDO jugador de un equipo, cuando pagó su propia inscripción por
@@ -2589,6 +2610,9 @@ export default function PickleballTournamentApp() {
     // Push "cupo casi lleno" (v2.42.0) -- el servidor vuelve a chequear la capacidad real
     // antes de mandar nada (ver api/send-push.js); esta llamada es solo un "avisa si aplica".
     sendPush("capacity_alert", { activityKind: "open_play", occurrenceId: id, title: "¡Últimos cupos!", body: "Un Open Play se está llenando -- inscríbete antes de que se agote.", url: "/" });
+    // Push a los admins con cada inscripción real (v2.52.0) -- ver mismo criterio en addTeam.
+    const openPlay = openPlays.find((e) => e.id === id);
+    sendPush("new_registration", { title: "Nueva inscripción", body: `${reg.userName} se inscribió en el Open Play "${openPlay?.name || ""}".`, url: "/" });
   };
   const registerForClass = async (id, reg) => {
     const { data: row, error } = await supabase.from("class_registrations").insert({
@@ -2600,6 +2624,9 @@ export default function PickleballTournamentApp() {
     setClasses((p) => p.map((e) => (e.id === id ? { ...e, registrations: [...e.registrations, mapRegistrationRow(row)] } : e)));
     // Push "cupo casi lleno" -- ver mismo comentario en registerForOpenPlay.
     sendPush("capacity_alert", { activityKind: "clase", occurrenceId: id, title: "¡Últimos cupos!", body: "Una clase se está llenando -- inscríbete antes de que se agote.", url: "/" });
+    // Push a los admins con cada inscripción real (v2.52.0) -- ver mismo criterio en addTeam.
+    const clase = classes.find((e) => e.id === id);
+    sendPush("new_registration", { title: "Nueva inscripción", body: `${reg.userName} se inscribió en la clase con ${clase?.academyName || ""}.`, url: "/" });
   };
 
   // Gestión de inscritos por el admin (v2.19.0) -- quitar una inscripción (canceló, error de

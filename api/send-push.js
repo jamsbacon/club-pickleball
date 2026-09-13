@@ -10,11 +10,13 @@
 // TODA llamada exige un access_token real de Supabase (el de la sesión ya logueada en la
 // app) -- lo primero que hace este handler es validarlo contra Supabase antes de mandar
 // nada. Los tipos que de verdad importan mantener privados (pago verificado, anuncios,
-// nueva actividad) además exigen que ese usuario sea admin. "capacity_alert" es la única
-// excepción -- la dispara el propio checkout de cualquier socio cuando su inscripción deja
-// una actividad casi llena -- pero en vez de confiar en lo que dice el cliente, este handler
-// vuelve a consultar la base de datos con la service role key para confirmar que de verdad
-// está casi llena antes de mandar nada.
+// nueva actividad) además exigen que ese usuario sea admin. "capacity_alert" y
+// "new_registration" (v2.52.0) son la excepción -- las dispara el propio checkout de
+// cualquier socio (cuando su inscripción deja una actividad casi llena, o simplemente al
+// completarla) -- pero ninguna de las dos confía en lo que dice el cliente sobre A QUIÉN
+// mandarle: "capacity_alert" vuelve a consultar la base de datos con la service role key
+// para confirmar que de verdad está casi llena, y "new_registration" ignora cualquier
+// destino que mande el cliente y siempre manda solo a los admins (nunca "a todos").
 import { createClient } from "@supabase/supabase-js";
 import webpush from "web-push";
 
@@ -65,6 +67,14 @@ export default async function handler(req, res) {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ error: "Falta userId." });
     userIds = [userId];
+  } else if (type === "new_registration") {
+    // Cualquier socio autenticado lo dispara solo, al completar su propio checkout de
+    // torneo/Open Play/clase -- por eso NO entra en ADMIN_ONLY_TYPES (ese set exige que quien
+    // MANDA sea admin, y acá casi siempre manda el socio recién inscrito). El destino sí está
+    // fijo: siempre los admins, nunca "todos", y nunca el propio admin si fue él quien anotó
+    // la inscripción (auto-registro, o un walk-in a mano en Duplas) -- no hace falta avisarle
+    // de su propia acción.
+    userIds = "admins_except_caller";
   } else if (type === "capacity_alert") {
     const { activityKind, occurrenceId } = req.body;
     const cfg = ACTIVITY_TABLES[activityKind];
@@ -80,7 +90,14 @@ export default async function handler(req, res) {
   // "announcement" y "activity_published" quedan en userIds = null -> broadcast a todos.
 
   let query = admin.from("push_subscriptions").select("id, user_id, endpoint, p256dh, auth");
-  if (Array.isArray(userIds)) query = query.in("user_id", userIds);
+  if (Array.isArray(userIds)) {
+    query = query.in("user_id", userIds);
+  } else if (userIds === "admins_except_caller") {
+    const { data: adminProfiles } = await admin.from("profiles").select("id").eq("role", "admin");
+    const adminIds = (adminProfiles || []).map((p) => p.id).filter((id) => id !== callerId);
+    if (adminIds.length === 0) return res.status(200).json({ sent: 0 });
+    query = query.in("user_id", adminIds);
+  }
   const { data: subs, error: subsErr } = await query;
   if (subsErr) { console.error("send-push subs:", subsErr.message); return res.status(500).json({ error: subsErr.message }); }
 
