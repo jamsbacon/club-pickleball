@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.45.1";
+const APP_VERSION = "2.47.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2704,6 +2704,21 @@ export default function PickleballTournamentApp() {
     }
   };
 
+  // El admin promueve/degrada el rol de OTRO socio (v2.47.0, pestaña Usuarios) -- optimista en
+  // el estado local, luego el UPDATE real. Esto SÍ pasa el trigger profiles_prevent_role_self_
+  // escalation (a diferencia de un UPDATE hecho por fuera de la app -- SQL directo, Table
+  // Editor del dashboard -- que no lleva sesión de Auth y el trigger revierte en silencio):
+  // acá corre con la sesión real del admin logueado, así que is_admin() sí puede confirmar
+  // quién hace el cambio. UsuariosTab bloquea intentar esto sobre la propia fila (además el
+  // trigger tampoco dejaría auto-promoverse, pero un admin real SÍ podría auto-degradarse por
+  // accidente si se lo permitiéramos -- mejor ni ofrecer el botón en esa fila).
+  const setUserRole = async (userId, role) => {
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
+    const { error } = await supabase.from("profiles").update({ role }).eq("id", userId);
+    if (error) { console.error("setUserRole:", error.message); return { error: error.message }; }
+    return {};
+  };
+
   // Auto-edición de perfil (nombre, WhatsApp, zona, DUPR) desde el tab Perfil -- nunca manda
   // role/plan_id, esos solo cambian vía subscribeToPlan o el admin (además, el trigger
   // profiles_prevent_role_self_escalation revierte cualquier intento de cambiar el role propio).
@@ -2865,7 +2880,7 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
-            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} />
+            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} setUserRole={setUserRole} currentUser={currentUser} />
           )}
 
           {effectiveTab === "estadisticas" && role === "admin" && (
@@ -2901,6 +2916,7 @@ export default function PickleballTournamentApp() {
               tournaments={tournaments} categories={categories} occupiedKeys={occupiedKeys} setTab={setTab}
               openTournament={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); }}
               openTournamentPagos={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("pagos"); }}
+              openTournamentInscripcion={(id) => { setActiveTournamentId(id); setActiveCatId(null); setTab("torneos"); setPendingTorneoSubTab("inscripcion"); }}
               onCreateTournament={() => { setActiveTournamentId(null); setActiveCatId(null); setTournamentFormOpen(true); setTab("torneos"); }}
               autoOpen={publicAct?.kind === "open_play" || publicAct?.kind === "clase" ? publicAct : null} />
           )}
@@ -4759,9 +4775,28 @@ function PagosTab({ tournaments, categories, openPlays, classes, setTeamPaymentS
    verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
    es el historial de altas, no se usa aquí más que para el contador de arriba.
    ========================================================================= */
-function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus }) {
+function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, setUserRole, currentUser }) {
   const [query, setQuery] = useState("");
   const todayIso = new Date().toISOString().slice(0, 10);
+
+  // Promover/degradar el rol de otro socio (v2.47.0) -- confirmación explícita antes de
+  // aplicar, mismo componente ConfirmDeleteModal que usa el resto de la app para acciones
+  // delicadas. `roleTarget` es el usuario sobre el que se está por actuar (o null si el
+  // diálogo está cerrado); nunca se ofrece este botón sobre la propia fila del admin (ver
+  // más abajo), así que acá no hace falta chequear self otra vez.
+  const [roleTarget, setRoleTarget] = useState(null);
+  const [changingRole, setChangingRole] = useState(false);
+  const [roleError, setRoleError] = useState("");
+
+  const confirmRoleChange = async () => {
+    if (changingRole || !roleTarget) return;
+    setChangingRole(true); setRoleError("");
+    const newRole = roleTarget.role === "admin" ? "cliente" : "admin";
+    const result = await setUserRole(roleTarget.id, newRole);
+    setChangingRole(false);
+    if (result?.error) { setRoleError("No se pudo cambiar el rol -- revisa tu conexión e intenta de nuevo."); return; }
+    setRoleTarget(null);
+  };
 
   const planFor = (u) => (membershipPlans.find((p) => p.id === u.planId) || membershipPlans[0] || null);
 
@@ -4850,9 +4885,15 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                     <td className="py-2 pr-3 text-gray-500">{u.zone || "—"}</td>
                     <td className="py-2 pr-3 mono">{u.duprRating != null ? Number(u.duprRating).toFixed(2) : "—"}</td>
                     <td className="py-2 pr-3">
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: u.role === "admin" ? "#FBEAE3" : "#EAF0F8", color: u.role === "admin" ? COLORS.clay : COLORS.court }}>
-                        {u.role === "admin" ? "Admin" : "Cliente"}
-                      </span>
+                      {u.id === currentUser.id ? (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: "#FBEAE3", color: COLORS.clay }}>Admin (tú)</span>
+                      ) : (
+                        <button onClick={() => setRoleTarget(u)} title="Cambiar rol"
+                          className="px-2 py-0.5 rounded-full text-[11px] font-bold hover:opacity-80"
+                          style={{ background: u.role === "admin" ? "#FBEAE3" : "#EAF0F8", color: u.role === "admin" ? COLORS.clay : COLORS.court }}>
+                          {u.role === "admin" ? "Admin" : "Cliente"}
+                        </button>
+                      )}
                     </td>
                     <td className="py-2 pr-3">
                       <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
@@ -4868,6 +4909,19 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
           {filtered.length === 0 && <p className="text-sm text-gray-400 py-4">No hay usuarios que coincidan con la búsqueda.</p>}
         </div>
       </Card>
+
+      {roleTarget && (
+        <ConfirmDeleteModal
+          title={roleTarget.role === "admin" ? `¿Quitarle el rol de admin a ${roleTarget.name}?` : `¿Hacer admin a ${roleTarget.name}?`}
+          message={roleError || (roleTarget.role === "admin"
+            ? "Deja de poder entrar a Estadísticas, Usuarios, Pagos y de administrar Torneos/Actividades/Membresías. Se le puede volver a dar en cualquier momento."
+            : "Va a poder entrar a TODAS las pestañas de administración -- Estadísticas, Usuarios, Pagos, y crear/editar torneos, Open Plays, clases y membresías. Solo dáselo a alguien de confianza del club.")}
+          options={[{
+            label: changingRole ? "Cambiando…" : (roleTarget.role === "admin" ? "Quitar admin" : "Hacer admin"),
+            variant: "danger", onClick: confirmRoleChange,
+          }]}
+          onCancel={() => { setRoleTarget(null); setRoleError(""); }} />
+      )}
     </div>
   );
 }
@@ -6501,22 +6555,106 @@ function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
   );
 }
 
-// Solo cliente -- el equivalente admin ("agregar/ver participantes por categoría") vive en
-// su propia pestaña Participantes (ver TorneosSection), no aquí.
-function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, users, club, tournament, setTab }) {
-  // ---- Player self-registration: only categories still open to the current user (y que
-  // correspondan a su género -- una categoría 'mixto' es visible para cualquiera), no
-  // free-text name for themselves, a searched/invited partner for doubles, and a real
-  // checkout step. Si el jugador todavía no completó su género en el perfil, no se puede
-  // filtrar -- se le muestran todas y se le avisa que complete su perfil. ----
-  const eligible = categories.filter((c) => {
+// Selector de "¿para quién es esta inscripción?" -- solo lo ve el admin (v2.46.0). Deja elegir
+// entre inscribirse a sí mismo, buscar a un socio ya registrado en la app (mismo directorio que
+// PartnerPicker) o anotar a un invitado sin cuenta con solo su nombre -- las tres opciones
+// terminan pasando por el MISMO checkout real (categorías, pareja, método de pago) que usaría
+// esa persona si se inscribiera sola. El roster manual y sin cobro de Participantes
+// (TeamRegistration) sigue existiendo aparte para anotar rápido sin pasar por checkout.
+function RegistrantPicker({ users, currentUser, onChange }) {
+  const [mode, setMode] = useState("yo"); // yo | buscar | invitado
+  const [query, setQuery] = useState("");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [guestName, setGuestName] = useState("");
+
+  const results = mode === "buscar" && !selectedUser && query.trim().length > 0
+    ? users.filter((u) => u.id !== currentUser.id &&
+        (u.name.toLowerCase().includes(query.trim().toLowerCase()) || u.email.toLowerCase().includes(query.trim().toLowerCase())))
+        .slice(0, 6)
+    : [];
+
+  useEffect(() => {
+    if (mode === "yo") onChange({ userId: currentUser.id, name: currentUser.name, gender: currentUser.gender });
+    else if (mode === "buscar" && selectedUser) onChange({ userId: selectedUser.id, name: selectedUser.name, gender: selectedUser.gender });
+    else if (mode === "invitado" && guestName.trim()) onChange({ name: guestName.trim() });
+    else onChange(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selectedUser, guestName]);
+
+  const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); };
+  const clearUser = () => { setSelectedUser(null); setQuery(""); };
+  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setGuestName(""); };
+
+  return (
+    <Card className="mb-4">
+      <Label>¿Para quién es esta inscripción?</Label>
+      <div className="flex gap-1.5 mb-2 flex-wrap mt-1.5">
+        {[["yo", "Yo mismo"], ["buscar", "Buscar socio"], ["invitado", "Invitado sin cuenta"]].map(([m, l]) => (
+          <button key={m} type="button" onClick={() => switchMode(m)} className="px-3 py-1 rounded-lg text-[11px] font-bold"
+            style={{ background: mode === m ? COLORS.court : "#EAEEF5", color: mode === m ? "#fff" : COLORS.ink }}>{l}</button>
+        ))}
+      </div>
+      {mode === "buscar" && (
+        selectedUser ? (
+          <div className="flex items-center justify-between px-3 py-2.5 rounded-xl" style={{ background: "#DCEBD5" }}>
+            <span className="text-sm font-semibold flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{selectedUser.name.charAt(0).toUpperCase()}</span>
+              {selectedUser.name} <span className="text-xs font-normal text-gray-500">· {selectedUser.email}</span>
+            </span>
+            <button onClick={clearUser} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
+          </div>
+        ) : (
+          <div className="relative">
+            <input style={inputStyle} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Busca por nombre o correo…" autoFocus />
+            {results.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1 rounded-xl overflow-hidden shadow-lg" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                {results.map((u) => (
+                  <button key={u.id} type="button" onClick={() => pickUser(u)} className="w-full text-left px-3 py-2 text-sm flex items-center gap-2" style={{ background: "#fff" }}>
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{u.name.charAt(0).toUpperCase()}</span>
+                    <span className="truncate">{u.name}<span className="text-gray-400"> · {u.email}</span></span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {query.trim().length > 0 && results.length === 0 && (
+              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Nadie coincide -- usa "Invitado sin cuenta" si todavía no tiene cuenta en la app.</p>
+            )}
+          </div>
+        )
+      )}
+      {mode === "invitado" && (
+        <input style={inputStyle} value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Nombre del invitado" autoFocus />
+      )}
+    </Card>
+  );
+}
+
+// Inscripción real por checkout -- antes solo para que el cliente se inscribiera a sí mismo
+// (v2.44.3 le sumó al admin la misma pestaña, pero también solo para sí mismo); v2.46.0 le
+// agrega al admin el RegistrantPicker de arriba para inscribir a cualquier socio o invitado por
+// el mismo checkout real (categorías, pareja, método de pago) que usaría esa persona sola. El
+// editor de roster manual y sin cobro sigue viviendo aparte, en Participantes (TeamRegistration).
+function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, users, club, tournament, setTab, role }) {
+  const isAdmin = role === "admin";
+  // El cliente siempre se inscribe a sí mismo -- solo el admin ve el selector de arriba, así
+  // que solo para él arranca sin elegir (null) hasta que pique una opción.
+  const [registrant, setRegistrant] = useState(isAdmin ? null : { userId: currentUser.id, name: currentUser.name, gender: currentUser.gender });
+  const isSelf = !!registrant && registrant.userId === currentUser.id;
+
+  // ---- Player self-registration: only categories still open to the person being registered
+  // (y que correspondan a su género -- una categoría 'mixto' es visible para cualquiera), no
+  // free-text name for themselves, a searched/invited partner for doubles, and a real checkout
+  // step. Si no se conoce el género (perfil incompleto, o invitado sin cuenta) no se puede
+  // filtrar -- se muestran todas. ----
+  const eligible = registrant ? categories.filter((c) => {
     const drawStarted = c.matches && c.matches.length > 0;
     if (drawStarted) return false;
-    const alreadyIn = [...c.teams, ...c.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
+    const alreadyIn = [...c.teams, ...c.waitlist].some((t) => t.players.some((p) =>
+      registrant.userId ? p.userId === registrant.userId : p.name.trim().toLowerCase() === registrant.name.trim().toLowerCase()));
     if (alreadyIn) return false;
-    if (currentUser.gender && c.gender !== "mixto" && c.gender !== currentUser.gender) return false;
+    if (registrant.gender && c.gender !== "mixto" && c.gender !== registrant.gender) return false;
     return true;
-  });
+  }) : [];
 
   // ---- Carrito de inscripción: el jugador marca TODAS las categorías en las que quiere
   // participar (no una a la vez), elige pareja por cada categoría de dobles, y un solo pago
@@ -6525,9 +6663,16 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   // misma se registre; ver el checkout más abajo). ----
   const [selectedIds, setSelectedIds] = useState([]);
   const [partners, setPartners] = useState({}); // catId -> partner ({userId,name,ranking} o {name,email,ranking})
-  const [myRanking, setMyRanking] = useState(suggestedRanking(currentUser.name) || "");
+  const [myRanking, setMyRanking] = useState(registrant ? suggestedRanking(registrant.name) || "" : "");
   const [showCheckout, setShowCheckout] = useState(false);
-  const [done, setDone] = useState(null); // { names, pendingTeams: [{catId, catName, teamId}] } de la última confirmación
+  const [done, setDone] = useState(null); // { names, pendingTeams: [{catId, catName, teamId}], registrantName, isSelf } de la última confirmación
+
+  // Si el admin cambia a quién está inscribiendo, refresca el ranking sugerido -- si se
+  // quedara el de la persona anterior, se guardaría un ranking equivocado en el nuevo equipo.
+  useEffect(() => {
+    setMyRanking(registrant ? suggestedRanking(registrant.name) || "" : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registrant?.name]);
 
   const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
   // Precio TOTAL del carrito según cuántas categorías se eligieron de una -- cada una suma su
@@ -6570,12 +6715,14 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     const pendingTeams = [];
     const failedCatNames = [];
     for (const c of selectedCats) {
-      const players = [{ name: currentUser.name, ranking: Number(myRanking) || 0, userId: currentUser.id }];
+      const players = [{ name: registrant.name, ranking: Number(myRanking) || 0, ...(registrant.userId ? { userId: registrant.userId } : {}) }];
       const partner = c.modality !== "individual" ? partners[c.id] : null;
       if (partner && !partner.pending) players.push(partner);
-      // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito
-      // (para mostrarlo), pero cada equipo debe quedar con su parte proporcional.
-      const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), userId: currentUser.id });
+      // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito (para
+      // mostrarlo), pero cada equipo debe quedar con su parte proporcional. userId queda el de
+      // la persona registrada (registrant), NUNCA el del admin que hizo el checkout -- es lo
+      // que usa buildClientActivity() para atribuirle el pago a ella, no a quien lo cobró.
+      const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), ...(registrant.userId ? { userId: registrant.userId } : {}) });
       if (result.error) { failedCatNames.push(c.name); continue; }
       if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
     }
@@ -6583,10 +6730,10 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     if (failedCatNames.length > 0) {
       // No se cierra el checkout ni se limpia la selección -- así puede reintentar sin tener
       // que volver a elegir categorías/pareja/método de pago de cero.
-      setConfirmError(`No se pudo confirmar tu inscripción en: ${failedCatNames.join(", ")}. Revisa tu conexión e intenta de nuevo -- no se guardó nada para esas categorías.`);
+      setConfirmError(`No se pudo confirmar ${isSelf ? "tu" : "la"} inscripción en: ${failedCatNames.join(", ")}. Revisa tu conexión e intenta de nuevo -- no se guardó nada para esas categorías.`);
       return;
     }
-    setDone({ names: selectedCats.map((c) => c.name), pendingTeams });
+    setDone({ names: selectedCats.map((c) => c.name), pendingTeams, registrantName: registrant.name, isSelf });
     setSelectedIds([]);
     setPartners({});
     setShowCheckout(false);
@@ -6598,6 +6745,8 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
 
   return (
     <div className="mt-2 max-w-3xl">
+      {isAdmin && <RegistrantPicker users={users} currentUser={currentUser} onChange={setRegistrant} />}
+
       <SectionTitle sub="Elige todas las categorías en las que quieres participar -- se pagan juntas en un solo checkout.">
         Categorías abiertas
       </SectionTitle>
@@ -6626,7 +6775,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
         </div>
       )}
 
-      {!currentUser.gender && (
+      {isSelf && !currentUser.gender && (
         <button onClick={() => setTab?.("perfil")} className="w-full text-left text-[11px] font-semibold px-3 py-2.5 rounded-xl mb-4 flex items-center gap-1.5" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
           <AlertTriangle size={12} className="shrink-0" /> Completa tu género en Perfil para ver solo tus categorías — por ahora se muestran todas.
         </button>
@@ -6636,21 +6785,31 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
         <div className="mb-4 rounded-xl overflow-hidden" style={{ background: "#DCEBD5" }}>
           <div className="text-sm px-4 py-3 flex items-start gap-2" style={{ color: COLORS.courtDark }}>
             <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
-            <span>¡Listo! Quedaste inscrito en: <strong>{done.names.join(", ")}</strong>.</span>
+            <span>
+              {done.isSelf
+                ? <>¡Listo! Quedaste inscrito en: <strong>{done.names.join(", ")}</strong>.</>
+                : <>¡Listo! Se registró a <strong>{done.registrantName}</strong> en: <strong>{done.names.join(", ")}</strong>.</>}
+            </span>
           </div>
           {/* Compartir con la pareja (v2.44.2) -- recién ACÁ, después de que el checkout ya
              terminó, nunca antes: la persona ya pagó lo suyo y este es un paso opcional de
              remate, no algo que pueda hacerla dudar a mitad de pago. Un botón por cada
-             categoría que quedó "esperando pareja". */}
+             categoría que quedó "esperando pareja". Texto distinto si fue el admin quien
+             inscribió a otra persona (v2.46.0) -- "te invité...conmigo" no tendría sentido ahí. */}
           {done.pendingTeams.length > 0 && (
             <div className="px-4 pb-3 pt-1 space-y-2">
-              {done.pendingTeams.map((pt) => (
-                <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(`Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`)}`}
-                  target="_blank" rel="noopener noreferrer"
-                  className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
-                  <Share2 size={14} /> Invitar a tu pareja en {pt.catName}
-                </a>
-              ))}
+              {done.pendingTeams.map((pt) => {
+                const waMessage = done.isSelf
+                  ? `Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`
+                  : `${done.registrantName} te invitó a jugar ${pt.catName} en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`;
+                return (
+                  <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(waMessage)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
+                    <Share2 size={14} /> {done.isSelf ? `Invitar a tu pareja en ${pt.catName}` : `Compartir invitación a pareja en ${pt.catName}`}
+                  </a>
+                );
+              })}
             </div>
           )}
         </div>
@@ -6683,14 +6842,20 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               </button>
               {isSelected && isDoubles && (
                 <div className="px-4 pb-4 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <Label>Tu pareja en esta categoría</Label>
-                  <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
+                  <Label>{isSelf ? "Tu pareja en esta categoría" : `Pareja de ${registrant.name} en esta categoría`}</Label>
+                  <PartnerPicker users={users} excludeUserId={registrant?.userId} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
                 </div>
               )}
             </div>
           );
         })}
-        {eligible.length === 0 && <p className="text-xs text-gray-400 italic px-1">No hay categorías disponibles para ti en este momento — ya estás inscrito en todas las abiertas, o su calendario ya fue generado.</p>}
+        {eligible.length === 0 && (
+          <p className="text-xs text-gray-400 italic px-1">
+            {registrant
+              ? "No hay categorías disponibles en este momento -- ya está inscrito/a en todas las abiertas, o su calendario ya fue generado."
+              : "Elige arriba para quién es esta inscripción antes de ver las categorías disponibles."}
+          </p>
+        )}
       </div>
 
       {/* Barra de carrito, siempre visible mientras haya algo seleccionado -- fixed, no
@@ -6753,7 +6918,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
             </div>
 
             <div className="mb-4">
-              <Label>Tu nivel / ranking (opcional)</Label>
+              <Label>{isSelf ? "Tu nivel / ranking (opcional)" : `Nivel / ranking de ${registrant.name} (opcional)`}</Label>
               <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Ej. 3.5" />
             </div>
 
@@ -6763,9 +6928,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               </p>
             )}
             {confirming && (
-              <p className="text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>Confirmando tu inscripción…</p>
+              <p className="text-xs font-semibold mb-3" style={{ color: "#6B7688" }}>Confirmando la inscripción…</p>
             )}
-            <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={currentUser.name} requireName={false}
+            <CheckoutPanel title={`Pago de ${selectedCats.length} categoría${selectedCats.length === 1 ? "" : "s"}`} baseUsd={total} discountPct={0} club={club} defaultName={registrant.name} requireName={false}
               onConfirm={confirm} onCancel={() => setShowCheckout(false)} confirmLabel={confirming ? "Confirmando…" : "Confirmar inscripción"} />
           </Card>
         </Modal>
@@ -7704,7 +7869,7 @@ const WEEKDAY_LETTERS = [
   { value: 5, label: "V" }, { value: 6, label: "S" }, { value: 0, label: "D" },
 ];
 
-function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit, onPagos }) {
+function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit, onPagos, onInscribir }) {
   const kindMeta = {
     open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
     torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
@@ -7781,7 +7946,22 @@ function EventListItem({ kind, shareId, title, description, date, startTime, end
         </div>
         <div className="flex items-center justify-between gap-2 mt-auto pt-2">
           {meta && <span className="text-[11px] font-bold" style={{ color: meta.full ? COLORS.clay : COLORS.court }}>{meta.text}</span>}
-          <span className="text-[11px] font-bold px-3 py-1 rounded-full shrink-0 ml-auto" style={{ background: COLORS.ball, color: "#fff" }}>{kindMeta.cta}</span>
+          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+            {/* Botón real "Inscribir" (v2.47.1) -- antes era un icono chiquito entre Compartir/
+               Pagos/Editar; ahora es un botón de verdad, mismo estilo pill que el CTA de la
+               card ("Ver torneo"), para que se note igual de claro. Salta directo a la
+               sub-pestaña Inscripción del torneo, con el RegistrantPicker (yo mismo/socio/
+               invitado) listo para usar -- antes había que entrar a Torneos, elegir el torneo y
+               buscar la sub-pestaña a mano. Solo torneos: Open Play/Clase ya inscriben desde su
+               propia card ("Inscribirme", el CTA de siempre). */}
+            {onInscribir && (
+              <button onClick={(e) => { e.stopPropagation(); onInscribir(); }}
+                className="text-[11px] font-bold px-3 py-1 rounded-full" style={{ background: COLORS.court, color: "#fff" }}>
+                Inscribir
+              </button>
+            )}
+            <span className="text-[11px] font-bold px-3 py-1 rounded-full" style={{ background: COLORS.ball, color: "#fff" }}>{kindMeta.cta}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -8279,7 +8459,7 @@ const EVENT_FILTER_CHIPS = [
   { value: "torneo", label: "Torneos" },
 ];
 
-function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, openTournamentPagos, onCreateTournament, role, autoOpen }) {
+function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, updateOpenPlay, updateOpenPlaySeries, updateClass, updateClassSeries, removeOpenPlay, removeClass, removeOpenPlaySeries, removeClassSeries, registerForOpenPlay, registerForClass, removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus, users, currentUser, currentPlan, tournaments, categories, occupiedKeys, setTab, openTournament, openTournamentPagos, openTournamentInscripcion, onCreateTournament, role, autoOpen }) {
   const [showOpenPlayForm, setShowOpenPlayForm] = useState(false);
   const [showClaseForm, setShowClaseForm] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -8456,6 +8636,9 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // Atajo directo a "quién pagó" (v2.45.1) -- sin esto, verificar un pago suelto de
         // torneo significaba abrir el torneo y buscar la sub-pestaña Pagos a mano.
         onPagos: isAdmin ? () => openTournamentPagos(t.id) : null,
+        // Atajo directo a "inscribir a alguien" (v2.47.0) -- mismo criterio que onPagos, pero
+        // aterriza en la sub-pestaña Inscripción en vez de Pagos.
+        onInscribir: isAdmin ? () => openTournamentInscripcion(t.id) : null,
       });
     });
     return items;
@@ -8577,7 +8760,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           {filteredItems.map((it) => (
             <EventListItem key={it.key} kind={it.kind} shareId={it.shareId} title={it.title} description={it.description}
               date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
-              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} onPagos={it.onPagos} />
+              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} onPagos={it.onPagos} onInscribir={it.onInscribir} />
           ))}
         </div>
 
