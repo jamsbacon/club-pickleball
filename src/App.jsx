@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.48.1";
+const APP_VERSION = "2.48.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6982,11 +6982,6 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                 <span>Total ({selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"})</span>
                 <span className="mono">{formatMoney(total)}</span>
               </div>
-            </div>
-
-            <div className="mb-4">
-              <Label>{isSelf ? "Tu nivel / ranking (opcional)" : `Nivel / ranking de ${registrant.name} (opcional)`}</Label>
-              <input type="number" style={inputStyle} value={myRanking} onChange={(e) => setMyRanking(e.target.value)} placeholder="Ej. 3.5" />
             </div>
 
             {confirmError && (
