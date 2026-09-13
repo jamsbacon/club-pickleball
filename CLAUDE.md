@@ -21,11 +21,12 @@ Every time you make a code change to the app (anything under `src/`), bump the v
 1. Update `APP_VERSION` in [src/App.jsx](src/App.jsx) (shown on the login screen).
 2. Update `"version"` in [package.json](package.json) to match.
 3. Use semver: patch (`1.0.x`) for fixes/tweaks, minor (`1.x.0`) for new features, major (`x.0.0`) for breaking changes to the data model or workflows.
-4. Tell the user the resulting version number in your reply.
+4. Commit and push it immediately (see below) — **before** moving on to the next change, not batched at the end of a multi-step task. Each version bump gets its own commit+push, right away.
+5. Tell the user the resulting version number **prominently** in your reply — its own bolded/heading line (e.g. `## v2.47.2`), not just mentioned in passing in a paragraph.
 
 ## Commit & push after every change
 
-After bumping the version (above), commit the change and push to `origin/main` — don't leave changes staged locally waiting for a separate request. This repo deploys from `main` (Vercel auto-deploys on push to `https://club-pickleball.vercel.app/`), so an unpushed change never reaches production. Write a commit message describing what changed and why, and include the resulting version number.
+After bumping the version (above), commit the change and push to `origin/main` right away — don't leave changes staged locally waiting for a separate request, and don't queue up several version bumps to commit together later. This repo deploys from `main` (Vercel auto-deploys on push to `https://club-pickleball.vercel.app/`), so an unpushed change never reaches production — the user has been caught checking production and finding it stale because a push was deferred. Write a commit message describing what changed and why, and include the resulting version number.
 
 This does not apply to changes that don't touch the app itself (e.g. editing this file, README, or git/deploy config).
 
