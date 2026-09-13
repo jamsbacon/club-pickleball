@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.47.2";
+const APP_VERSION = "2.47.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6828,7 +6828,10 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                   {isSelected && <Check size={14} color="#fff" strokeWidth={3} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="font-bold text-sm leading-snug">{c.name}</p>
+                  {/* Nivel primero y en negrita (v2.47.3), como en CategoryPicker/Participantes
+                     -- antes acá se imprimía c.name tal cual ("Dobles Masculino Open /
+                     Profesional"), inconsistente con el resto de la app. */}
+                  <p className="text-sm leading-snug"><CategoryLabel cat={c} /></p>
                   <div className="flex items-center gap-1.5 mt-1.5 flex-wrap text-[11px]" style={{ color: "#6B7688" }}>
                     <span className="px-1.5 py-0.5 rounded-full font-bold" style={{ background: "#EEF1F7" }}>{isDoubles ? "Dobles" : "Individual"}</span>
                     <span>{c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos</span>
@@ -6901,7 +6904,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                   <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
                     <div className="min-w-0">
                       <p className="font-semibold truncate" style={{ color: COLORS.ink }}>
-                        {c.name}{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                        <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
                       </p>
                       {c.modality !== "individual" && (
                         <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
