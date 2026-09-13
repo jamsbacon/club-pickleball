@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.48.0";
+const APP_VERSION = "2.48.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2975,7 +2975,7 @@ export default function PickleballTournamentApp() {
                 onRemoveTournament={() => { removeTournament(tournament.id); setActiveTournamentId(null); setActiveCatId(null); }}
               />
             ) : (
-              <TournamentsListTab tournaments={tournaments} categories={categories} role={role}
+              <TournamentsListTab tournaments={tournaments} categories={categories} role={role} currentUser={currentUser}
                 onSelect={(id) => { setActiveTournamentId(id); setActiveCatId(null); }}
                 onCreate={createTournament} onRemove={removeTournament}
                 showForm={tournamentFormOpen} setShowForm={setTournamentFormOpen} />
@@ -3622,7 +3622,14 @@ const NAV_ITEMS = [
   // "eventos" (id interno sin cambios) va primero para el cliente -- es su sección de aterrizaje.
   { id: "eventos", label: "Actividades", short: "Actividades", icon: PartyPopper, sub: "Open Plays, Torneos y Clases del club", roles: ["admin", "cliente"] },
   { id: "reservas", label: "Reservas", short: "Reservas", icon: CalendarClock, sub: "Reserva un bloque de cancha disponible", roles: ["admin", "cliente"] },
-  { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin", "cliente"] },
+  // "Torneos"/"Mis Torneos" (v2.48.1): mismo id (así visibleNav.find(tab) sigue resolviendo
+  // uno u otro sin tocar nada más), pero dos entradas separadas porque el nombre y el
+  // contenido de la lista difieren por rol -- el admin gestiona TODOS los torneos del club
+  // (TournamentsListTab se lo sigue mostrando así); el cliente solo debería ver en los que ya
+  // está inscrito, así que el nombre "Mis Torneos" lo deja claro de entrada (ver el filtro en
+  // TournamentsListTab).
+  { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin"] },
+  { id: "torneos", label: "Mis Torneos", short: "Mis Torneos", icon: Trophy, sub: "Los torneos en los que estás inscrito", roles: ["cliente"] },
   { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["cliente"] },
   { id: "club", label: "Mi Club", short: "Mi Club", icon: Building2, sub: "Horario, canchas, precios y membresías", roles: ["admin"] },
   { id: "perfil", label: "Perfil", short: "Perfil", icon: UserCircle, sub: "Tus datos y tu membresía", roles: ["admin", "cliente"] },
@@ -5082,22 +5089,32 @@ const TORNEO_SUB_ITEMS = [
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
 ];
 
-// Pantalla de aterrizaje de la pestaña Torneos: lista todos los torneos del club (el admin
-// puede crear tantos como quiera -- cada uno con sus propias categorías/participantes/
-// calendario/resultados, ver nota de `categories` en el componente principal). El cliente ve
-// la misma lista, sin el botón de crear, y "Ver torneo" en vez de "Editar".
+// Pantalla de aterrizaje de "Torneos"/"Mis Torneos" (ver NAV_ITEMS): el admin gestiona TODOS
+// los torneos del club (cada uno con sus propias categorías/participantes/calendario/
+// resultados, ver nota de `categories` en el componente principal); el cliente, desde v2.48.1,
+// solo ve los publicados en los que YA está inscrito -- antes veía todos los publicados del
+// club existieran o no inscripciones suyas, lo cual no calzaba con renombrar esto a "Mis
+// Torneos". Se entera de un torneo nuevo por Actividades (donde sí se listan todos, para
+// poder inscribirse) y recién aparece acá una vez que su inscripción se guardó de verdad.
 // `showForm`/`setShowForm` viven en el componente principal (no acá) para que el botón
 // "+ Torneo" de Actividades (EventosTab) pueda abrir este formulario desde afuera al navegar
 // -- mismo motivo por el que activeCatId vive arriba de CategoriasTab.
-function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate, onRemove, showForm, setShowForm }) {
+function TournamentsListTab({ tournaments, categories, role, currentUser, onSelect, onCreate, onRemove, showForm, setShowForm }) {
   const isAdmin = role === "admin";
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
+  // Mismo criterio que InscripcionTab (alreadyIn): busca al usuario actual por userId entre
+  // TODOS los jugadores (titulares y los que se unieron después por su cuenta, ver joinTeam)
+  // de cualquier categoría de este torneo, en equipos confirmados o en lista de espera --
+  // estar en lista de espera ya cuenta como "inscrito" para efectos de "Mis Torneos".
+  const isRegisteredIn = (t) => categories.some((c) => c.tournamentId === t.id &&
+    [...(c.teams || []), ...(c.waitlist || [])].some((team) => (team.players || []).some((p) => p.userId === currentUser?.id)));
+
   // Un torneo "draft" (recién creado, todavía sin completar) es invisible para clientes en
   // todos lados -- acá y en Actividades -- hasta que el admin lo publique explícitamente
   // desde Generalidades. El admin sigue viendo todos, con badge, para poder completarlos.
-  const visibleTournaments = isAdmin ? tournaments : tournaments.filter((t) => t.status === "published");
+  const visibleTournaments = isAdmin ? tournaments : tournaments.filter((t) => t.status === "published" && isRegisteredIn(t));
 
   const catCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).length;
   const teamCountFor = (tid) => categories.filter((c) => c.tournamentId === tid).reduce((s, c) => s + c.teams.length, 0);
@@ -5137,7 +5154,8 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate,
       {visibleTournaments.length === 0 && (
         <Card>
           <p className="text-sm text-gray-400">
-            {isAdmin ? 'Todavía no hay torneos creados -- pulsa "Crear nuevo torneo" para empezar.' : "Todavía no hay torneos publicados."}
+            {isAdmin ? 'Todavía no hay torneos creados -- pulsa "Crear nuevo torneo" para empezar.'
+              : "Todavía no estás inscrito en ningún torneo -- entra a Actividades para ver los que están abiertos."}
           </p>
         </Card>
       )}
@@ -5146,28 +5164,42 @@ function TournamentsListTab({ tournaments, categories, role, onSelect, onCreate,
         <div className="grid sm:grid-cols-2 gap-4">
           {visibleTournaments.map((t) => (
             <Card key={t.id}>
-              <div className="flex items-start justify-between gap-2 mb-1">
-                <h3 className="font-bold text-base flex items-center gap-2">
-                  {t.name}
-                  {isAdmin && t.status !== "published" && (
-                    <span className="text-[10px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-full shrink-0" style={{ background: "#EAEEF5", color: "#6B7688" }}>Borrador</span>
-                  )}
-                </h3>
-                {isAdmin && (
-                  <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
-                    className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={16} /></button>
-                )}
+              <div className="flex gap-3">
+                {/* Imagen del torneo (v2.48.1) -- mismo tratamiento visual que las cards de
+                   Actividades (EventListItem): thumbnail a la izquierda, degradado + raqueta
+                   si el torneo todavía no tiene imagen (se sube en Generalidades). Antes esta
+                   lista no mostraba ninguna imagen aunque el torneo sí la tuviera guardada. */}
+                <div className="relative w-16 sm:w-20 rounded-xl overflow-hidden shrink-0"
+                  style={!t.image ? { background: `linear-gradient(135deg, ${COLORS.clay}, ${COLORS.courtDark})` } : undefined}>
+                  {t.image
+                    ? <img src={t.image} alt={t.name} className="w-full h-full object-cover" />
+                    : <div className="absolute inset-0 flex items-center justify-center"><RacketIcon size={22} color="rgba(255,255,255,0.85)" /></div>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <h3 className="font-bold text-base flex items-center gap-2 flex-wrap">
+                      {t.name}
+                      {isAdmin && t.status !== "published" && (
+                        <span className="text-[10px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-full shrink-0" style={{ background: "#EAEEF5", color: "#6B7688" }}>Borrador</span>
+                      )}
+                    </h3>
+                    {isAdmin && (
+                      <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
+                        className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={16} /></button>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-400 mb-3">
+                    {t.startDate && t.endDate ? `${formatDateHuman(t.startDate)} → ${formatDateHuman(t.endDate)}` : "Fechas por definir"}
+                  </p>
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{catCountFor(t.id)} categoría(s)</span>
+                    <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{teamCountFor(t.id)} equipo(s) inscritos</span>
+                  </div>
+                  <button onClick={() => onSelect(t.id)} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-2 rounded-xl font-bold text-sm w-full">
+                    {isAdmin ? "Editar" : "Ver torneo"}
+                  </button>
+                </div>
               </div>
-              <p className="text-xs text-gray-400 mb-3">
-                {t.startDate && t.endDate ? `${formatDateHuman(t.startDate)} → ${formatDateHuman(t.endDate)}` : "Fechas por definir"}
-              </p>
-              <div className="flex flex-wrap gap-2 mb-4">
-                <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{catCountFor(t.id)} categoría(s)</span>
-                <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "#EAEEF5", color: COLORS.ink }}>{teamCountFor(t.id)} equipo(s) inscritos</span>
-              </div>
-              <button onClick={() => onSelect(t.id)} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-2 rounded-xl font-bold text-sm w-full">
-                {isAdmin ? "Editar" : "Ver torneo"}
-              </button>
             </Card>
           ))}
         </div>
@@ -7904,9 +7936,13 @@ const WEEKDAY_LETTERS = [
   { value: 5, label: "V" }, { value: 6, label: "S" }, { value: 0, label: "D" },
 ];
 
-function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit, onPagos, onInscribir }) {
+function EventListItem({ kind, shareId, title, description, date, startTime, endTime, price, image, recurring, meta, status, onClick, onEdit, onPagos, onInscribir, ctaLabel }) {
   const kindMeta = {
     open_play: { label: "Open Play", color: COLORS.court, cta: "Inscribirme" },
+    // "Ver torneo" es el default (admin: la card lo lleva a Generalidades, no a inscribirse) --
+    // EventosTab pisa esto con ctaLabel="Inscribirme" para el cliente (v2.48.1), que aterriza
+    // directo en la sub-pestaña Inscripción (ver TorneosSection: es la primera que ve, ya que
+    // Generalidades/Categorías/etc. son admin-only).
     torneo: { label: "Torneo", color: COLORS.clay, cta: "Ver torneo" },
     clase: { label: "Clase", color: COLORS.courtDark, cta: "Inscribirme" },
   }[kind];
@@ -7995,7 +8031,7 @@ function EventListItem({ kind, shareId, title, description, date, startTime, end
                 Inscribir
               </button>
             )}
-            <span className="text-[11px] font-bold px-3 py-1 rounded-full" style={{ background: COLORS.ball, color: "#fff" }}>{kindMeta.cta}</span>
+            <span className="text-[11px] font-bold px-3 py-1 rounded-full" style={{ background: COLORS.ball, color: "#fff" }}>{ctaLabel || kindMeta.cta}</span>
           </div>
         </div>
       </div>
@@ -8674,6 +8710,11 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // Atajo directo a "inscribir a alguien" (v2.47.0) -- mismo criterio que onPagos, pero
         // aterriza en la sub-pestaña Inscripción en vez de Pagos.
         onInscribir: isAdmin ? () => openTournamentInscripcion(t.id) : null,
+        // "Inscribirme" en vez de "Ver torneo" para el cliente (v2.48.1) -- clickear la card
+        // ya lo lleva directo a Inscripción (ver comentario en EventListItem), así que el CTA
+        // debe decir lo que de verdad va a pasar. El admin conserva "Ver torneo" -- para él
+        // clickear la card abre Generalidades, y ya tiene "Inscribir" aparte como botón real.
+        ctaLabel: isAdmin ? null : "Inscribirme",
       });
     });
     return items;
@@ -8795,7 +8836,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
           {filteredItems.map((it) => (
             <EventListItem key={it.key} kind={it.kind} shareId={it.shareId} title={it.title} description={it.description}
               date={it.date} startTime={it.startTime} endTime={it.endTime} price={it.price} image={it.image}
-              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} onPagos={it.onPagos} onInscribir={it.onInscribir} />
+              recurring={it.recurring} meta={it.meta} status={classifyItemStatus(it)} onClick={it.onClick} onEdit={it.onEdit} onPagos={it.onPagos} onInscribir={it.onInscribir} ctaLabel={it.ctaLabel} />
           ))}
         </div>
 
