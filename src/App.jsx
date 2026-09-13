@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.50.0";
+const APP_VERSION = "2.51.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1565,12 +1565,12 @@ export default function PickleballTournamentApp() {
   //
   // v2.35.0: `profiles` dejó de ser de lectura pública total -- ahora cada quien solo puede
   // leer su PROPIA fila completa (o cualquiera, si es admin). Lo que sí sigue siendo público
-  // (buscar pareja de dobles por nombre/correo en PartnerPicker, mostrar nombres en equipos)
+  // (buscar socio por nombre/correo en RegistrantPicker, mostrar nombres en equipos)
   // vive en la vista `profiles_directory`, que solo expone id/name/email/role -- nunca
   // teléfono, zona, DUPR, fecha de nacimiento ni plan de nadie más. `profiles` (estado local:
   // la propia fila siempre, y TODAS si sos admin, según RLS) y `directory` (todas, pero solo
   // esas 4 columnas) se combinan en el `users` derivado de abajo para que el resto de la app
-  // (EstadisticasTab, LoyalClientsCard, PartnerPicker, InscripcionTab...) siga viendo un solo
+  // (EstadisticasTab, LoyalClientsCard, RegistrantPicker, InscripcionTab...) siga viendo un solo
   // array, igual que antes -- solo que ahora los campos privados de OTRA persona vienen
   // ausentes en vez de expuestos.
   const [profiles, setProfiles] = useState([]);
@@ -3019,7 +3019,7 @@ export default function PickleballTournamentApp() {
          que se estaba viendo. */}
       {joinParam && !joinModalDismissed && (
         <JoinTeamModal info={resolveJoinInfo(joinParam, categories, tournaments)} currentUser={currentUser} club={club}
-          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking} users={users}
+          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking}
           onClose={() => setJoinModalDismissed(true)} />
       )}
     </div>
@@ -3244,12 +3244,12 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
 // normal de InscripcionTab. Ahora la categoría del link cuenta como una más del mismo carrito
 // -- mismo tournamentRegPrice(tournament, catCount) que usa InscripcionTab, split en partes
 // iguales entre el join y cada equipo nuevo (ver confirm más abajo).
-function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, users, onClose }) {
+function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, onClose }) {
   const [done, setDone] = useState(null); // { names, failedNames, pendingTeams } tras confirmar
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [extraIds, setExtraIds] = useState([]);
-  const [extraPartners, setExtraPartners] = useState({});
+  const [expandedLevels, setExpandedLevels] = useState([]);
 
   if (!info) {
     return (
@@ -3283,13 +3283,20 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
   const catCount = 1 + selectedExtras.length;
   const total = tournamentRegPrice(tournament, catCount);
   const pricePerCat = total / catCount;
-  const missingExtraPartner = selectedExtras.some((c) => c.modality !== "individual" && !extraPartners[c.id]);
 
   const toggleExtra = (id) => setExtraIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const setExtraPartner = (catId, p) => setExtraPartners((prev) => ({ ...prev, [catId]: p }));
+  // Agrupar las extra por nivel (v2.51.0), mismo patrón que InscripcionTab -- primero el nivel
+  // con un botón, debajo las modalidades disponibles en ese nivel.
+  const extraLevelGroups = [];
+  extraEligible.forEach((c) => {
+    let group = extraLevelGroups.find((g) => g[0] === c.level);
+    if (!group) { group = [c.level, []]; extraLevelGroups.push(group); }
+    group[1].push(c);
+  });
+  const toggleLevel = (level) => setExpandedLevels((prev) => (prev.includes(level) ? prev.filter((l) => l !== level) : [...prev, level]));
 
   const confirm = async (checkout) => {
-    if (confirming || missingExtraPartner) return;
+    if (confirming) return;
     setConfirming(true); setError("");
     const bsRate = Number(club.bsPerUsd) || 0;
     const joinResult = await joinTeam(cat.id, team.id, { name: currentUser.name, ranking: 0, userId: currentUser.id },
@@ -3297,16 +3304,16 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
     if (joinResult?.error) { setConfirming(false); setError(joinResult.error); return; }
     // La unión principal ya se guardó -- de acá para abajo son categorías EXTRA, opcionales.
     // Si alguna falla, no se deshace la unión principal (ya está pagada y confirmada); se
-    // avisa cuál faltó para que la intente de nuevo desde Inscripción.
+    // avisa cuál faltó para que la intente de nuevo desde Inscripción. Ya no se elige pareja
+    // acá (v2.51.0, mismo criterio que InscripcionTab): toda extra de dobles arranca
+    // "esperando pareja", el link para completarla sale en la pantalla de éxito de abajo.
     const pendingTeams = [];
     const failedNames = [];
     for (const c of selectedExtras) {
       const players = [{ name: currentUser.name, ranking: suggestedRanking(currentUser.name) || 0, userId: currentUser.id }];
-      const partner = c.modality !== "individual" ? extraPartners[c.id] : null;
-      if (partner && !partner.pending) players.push(partner);
       const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerCat, priceBs: pricePerCat * bsRate, userId: currentUser.id });
       if (result.error) { failedNames.push(c.name); continue; }
-      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
+      if (c.modality !== "individual") pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
     }
     setConfirming(false);
     setDone({ names: [cat.name, ...selectedExtras.filter((c) => !failedNames.includes(c.name)).map((c) => c.name)], failedNames, pendingTeams });
@@ -3355,26 +3362,38 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
             <p className="disp text-lg mb-1" style={{ color: COLORS.courtDark }}>Únete a {creator.name}</p>
             <p className="text-sm mb-4" style={{ color: "#6B7688" }}><CategoryLabel cat={cat} /> · {tournament.name}</p>
 
-            {extraEligible.length > 0 && (
+            {extraLevelGroups.length > 0 && (
               <div className="mb-4">
                 <Label>¿Te inscribes en otra categoría también? (opcional)</Label>
                 <p className="text-[11px] mb-2" style={{ color: "#6B7688" }}>Súmala acá para pagar el precio de "categoría adicional" en vez de un checkout aparte.</p>
                 <div className="space-y-1.5">
-                  {extraEligible.map((c) => {
-                    const isSelected = extraIds.includes(c.id);
-                    const isDoubles = c.modality !== "individual";
+                  {extraLevelGroups.map(([level, cats]) => {
+                    const isExpanded = expandedLevels.includes(level);
+                    const selectedCount = cats.filter((c) => extraIds.includes(c.id)).length;
                     return (
-                      <div key={c.id} className="rounded-xl overflow-hidden" style={{ border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
-                        <button type="button" onClick={() => toggleExtra(c.id)} className="w-full text-left px-3 py-2.5 flex items-center gap-2.5" style={{ background: isSelected ? "#F3F8F1" : "transparent" }}>
-                          <div className="w-5 h-5 rounded-md flex items-center justify-center shrink-0" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
-                            {isSelected && <Check size={12} color="#fff" strokeWidth={3} />}
-                          </div>
-                          <span className="text-sm flex-1 min-w-0"><CategoryLabel cat={c} /></span>
+                      <div key={level} className="rounded-xl overflow-hidden" style={{ border: `1.5px solid ${selectedCount > 0 ? COLORS.court : COLORS.line}` }}>
+                        <button type="button" onClick={() => toggleLevel(level)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left" style={{ background: selectedCount > 0 ? "#F3F8F1" : "transparent" }}>
+                          <span className="text-sm font-bold" style={{ color: COLORS.courtDark }}>{level}</span>
+                          <span className="flex items-center gap-2 shrink-0">
+                            {selectedCount > 0 && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: COLORS.court, color: "#fff" }}>{selectedCount}</span>}
+                            <ChevronDown size={14} color="#6B7688" style={{ transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                          </span>
                         </button>
-                        {isSelected && isDoubles && (
-                          <div className="px-3 pb-3 pt-1" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                            <Label>Tu pareja en esta categoría</Label>
-                            <PartnerPicker users={users} excludeUserId={currentUser.id} suggestedRanking={suggestedRanking} onChange={(p) => setExtraPartner(c.id, p)} />
+                        {isExpanded && (
+                          <div className="px-2.5 pb-2.5 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                            {cats.map((c) => {
+                              const isSelected = extraIds.includes(c.id);
+                              return (
+                                <button key={c.id} type="button" onClick={() => toggleExtra(c.id)}
+                                  className="w-full text-left px-3 py-2 mt-1.5 rounded-lg flex items-center gap-2.5"
+                                  style={{ background: isSelected ? "#EAF3E6" : "#F7F8FA", border: `1.5px solid ${isSelected ? COLORS.court : "transparent"}` }}>
+                                  <div className="w-4.5 h-4.5 rounded flex items-center justify-center shrink-0" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
+                                    {isSelected && <Check size={11} color="#fff" strokeWidth={3} />}
+                                  </div>
+                                  <span className="text-sm">{c.modality === "individual" ? "Individual" : "Dobles"} {GENDER_LABELS[c.gender]}</span>
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -3385,7 +3404,6 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
             )}
 
             {error && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>{error}</p>}
-            {missingExtraPartner && <p className="text-xs font-semibold mb-3" style={{ color: "#8A5A16" }}>Falta elegir pareja en alguna categoría marcada arriba.</p>}
             <CheckoutPanel title={`Pago de ${catCount} categoría${catCount === 1 ? "" : "s"}`} baseUsd={total} club={club} defaultName={currentUser.name}
               onConfirm={confirm} onCancel={onClose} confirmLabel={confirming ? "Confirmando…" : "Confirmar mi inscripción"} />
           </>
@@ -5941,8 +5959,9 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking,
           // paymentMethod -- solo hay detalle de pago que mostrar si el equipo vino de un
           // checkout real (InscripcionTab). El estado sí siempre existe (ver addTeam).
           const hasCheckout = !!t.paymentMethod;
-          // "Esperando pareja" (v2.44.2) -- un equipo de dobles creado con "Invitar después"
-          // (ver PartnerPicker/InscripcionTab) arranca con un solo jugador; el segundo llega
+          // "Esperando pareja" (v2.44.2) -- un equipo de dobles (ver InscripcionTab/
+          // JoinTeamModal, ya no se elige pareja al inscribirse desde v2.51.0) arranca siempre
+          // con un solo jugador; el segundo llega
           // más tarde por su propio link, pagando su propia inscripción por separado -- ese
           // pago vive en `players[1].paymentStatus`, NUNCA en `t.paymentStatus` (eso sigue
           // siendo solo lo que pagó quien creó el equipo). Mientras falte, se muestra un aviso
@@ -6682,103 +6701,9 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 /* =========================================================================
    TAB: INSCRIPCIÓN (autoservicio de jugadores)
    ========================================================================= */
-// Type-ahead partner picker — searches the app's user directory ("Instagram-style") by name
-// or email, o deja seguir sin pareja todavía y compartir un link para que se una después (ver
-// InscripcionTab -- ese botón de compartir vive DESPUÉS del checkout, no acá, para no ser un
-// punto de fuga en medio de la inscripción). Emits the resolved player object
-// ({userId, name, ranking} o {pending: true}) via onChange, or null while nothing es válido
-// todavía.
-//
-// v2.44.2 quita los modos "Invitar por correo"/"Invitar por WhatsApp" (v2.17.0/v2.44.0): esos
-// anotaban a la pareja de una, sin cuenta ni pago propio, cobrándole TODO a quien creaba el
-// equipo -- y el texto que lo acompañaba ("tu pareja ya queda inscrita y pagada") era falso en
-// el sentido que de verdad importa: la pareja no había pagado nada, solo alguien más pagó por
-// ella. Ahora "Invitar después" dice la verdad: crea tu cupo sin pareja, y ella paga el suyo
-// propio cuando se una con el link.
-function PartnerPicker({ users, excludeUserId, suggestedRanking, onChange }) {
-  const [mode, setMode] = useState("search");
-  const [query, setQuery] = useState("");
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [ranking, setRanking] = useState("");
-
-  const results = mode === "search" && !selectedUser && query.trim().length > 0
-    ? users.filter((u) => u.id !== excludeUserId && u.role !== "admin" &&
-        (u.name.toLowerCase().includes(query.trim().toLowerCase()) || u.email.toLowerCase().includes(query.trim().toLowerCase())))
-        .slice(0, 6)
-    : [];
-
-  useEffect(() => {
-    if (mode === "search" && selectedUser) {
-      onChange({ userId: selectedUser.id, name: selectedUser.name, ranking: Number(ranking) || 0 });
-    } else if (mode === "later") {
-      onChange({ pending: true });
-    } else {
-      onChange(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, selectedUser, ranking]);
-
-  const pickUser = (u) => { setSelectedUser(u); setQuery(u.name); setRanking(suggestedRanking(u.name) || ""); };
-  const clearUser = () => { setSelectedUser(null); setQuery(""); setRanking(""); };
-  const switchMode = (m) => { setMode(m); setSelectedUser(null); setQuery(""); setRanking(""); };
-
-  const hasPartner = (mode === "search" && selectedUser) || mode === "later";
-
-  return (
-    <div>
-      <div className="flex gap-1.5 mb-2 flex-wrap">
-        <button type="button" onClick={() => switchMode("search")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
-          style={{ background: mode === "search" ? COLORS.court : "#EAEEF5", color: mode === "search" ? "#fff" : COLORS.ink }}>Buscar jugador</button>
-        <button type="button" onClick={() => switchMode("later")} className="px-3 py-1 rounded-lg text-[11px] font-bold"
-          style={{ background: mode === "later" ? COLORS.court : "#EAEEF5", color: mode === "later" ? "#fff" : COLORS.ink }}>Invitar después</button>
-      </div>
-
-      {mode === "search" ? (
-        selectedUser ? (
-          <div className="flex items-center justify-between px-3 py-2.5 rounded-xl mb-2" style={{ background: "#DCEBD5" }}>
-            <span className="text-sm font-semibold flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{selectedUser.name.charAt(0).toUpperCase()}</span>
-              {selectedUser.name} <span className="text-xs font-normal text-gray-500">· {selectedUser.email}</span>
-            </span>
-            <button onClick={clearUser} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
-          </div>
-        ) : (
-          <div className="relative mb-2">
-            <input style={inputStyle} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Busca a tu pareja por nombre o correo…" />
-            {results.length > 0 && (
-              <div className="absolute z-10 left-0 right-0 mt-1 rounded-xl overflow-hidden shadow-lg" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
-                {results.map((u) => (
-                  <button key={u.id} type="button" onClick={() => pickUser(u)} className="w-full text-left px-3 py-2 text-sm flex items-center gap-2" style={{ background: "#fff" }}>
-                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: COLORS.court, color: "#fff" }}>{u.name.charAt(0).toUpperCase()}</span>
-                    <span className="truncate">{u.name}<span className="text-gray-400"> · {u.email}</span></span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {query.trim().length > 0 && results.length === 0 && (
-              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Nadie coincide — usa "Invitar después" si tu pareja aún no está registrada en la app.</p>
-            )}
-          </div>
-        )
-      ) : (
-        <p className="text-[11px] px-3 py-2.5 rounded-xl mb-2" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-          Tu cupo queda registrado sin pareja todavía. Al terminar tu inscripción te va a aparecer un botón para compartirle el link -- ella se une y paga su propia inscripción cuando entre.
-        </p>
-      )}
-
-      {mode === "search" && hasPartner && (
-        <div>
-          <Label>Nivel / ranking de tu pareja (opcional)</Label>
-          <input type="number" style={inputStyle} value={ranking} onChange={(e) => setRanking(e.target.value)} placeholder="Ej. 3.5" />
-        </div>
-      )}
-    </div>
-  );
-}
-
 // Selector de "¿para quién es esta inscripción?" -- solo lo ve el admin (v2.46.0). Deja elegir
-// entre inscribirse a sí mismo, buscar a un socio ya registrado en la app (mismo directorio que
-// PartnerPicker) o anotar a un invitado sin cuenta con solo su nombre -- las tres opciones
+// entre inscribirse a sí mismo, buscar a un socio ya registrado en la app, o anotar a un
+// invitado sin cuenta con solo su nombre -- las tres opciones
 // terminan pasando por el MISMO checkout real (categorías, pareja, método de pago) que usaría
 // esa persona si se inscribiera sola. El roster manual y sin cobro de Participantes
 // (TeamRegistration) sigue existiendo aparte para anotar rápido sin pasar por checkout.
@@ -6878,12 +6803,13 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   }) : [];
 
   // ---- Carrito de inscripción: el jugador marca TODAS las categorías en las que quiere
-  // participar (no una a la vez), elige pareja por cada categoría de dobles, y un solo pago
-  // cubre todo el carrito. El precio es SIEMPRE el de un solo inscrito por categoría --
-  // nunca se duplica por tener pareja (la pareja paga su propia inscripción cuando ella
-  // misma se registre; ver el checkout más abajo). ----
+  // participar (no una a la vez) y un solo pago cubre todo el carrito. Ya no se elige pareja
+  // acá (v2.51.0) -- toda categoría de dobles arranca "esperando pareja"; el botón de invitar
+  // por WhatsApp para completarla vive en el popup de éxito, después de pagar (ver el bloque
+  // `done` más abajo). Antes había un picker de pareja (buscar socio/invitar después) en cada
+  // card mientras se elegían categorías -- se sentía como un paso de más antes de llegar a
+  // pagar, y quitar ese paso deja el checkout más simple: elige, paga, comparte. ----
   const [selectedIds, setSelectedIds] = useState([]);
-  const [partners, setPartners] = useState({}); // catId -> partner ({userId,name,ranking} o {name,email,ranking})
   const [myRanking, setMyRanking] = useState(registrant ? suggestedRanking(registrant.name) || "" : "");
   const [showCheckout, setShowCheckout] = useState(false);
   const [done, setDone] = useState(null); // { names, pendingTeams: [{catId, catName, teamId}], registrantName, isSelf } de la última confirmación
@@ -6905,16 +6831,29 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   // carrito por la cantidad de categorías elegidas).
   const total = selectedCats.length > 0 ? tournamentRegPrice(tournament, selectedCats.length) : 0;
   const pricePerTeam = selectedCats.length > 0 ? total / selectedCats.length : 0;
-  // Cualquier partner no-nulo alcanza para "elegido" -- ya sea un socio real ({userId,name,
-  // ranking}) o el sentinel {pending:true} de "Invitar después" (v2.44.2, ver PartnerPicker).
-  const missingPartner = selectedCats.some((c) => c.modality !== "individual" && !partners[c.id]);
-  const canProceed = selectedCats.length > 0 && !missingPartner;
+  const canProceed = selectedCats.length > 0;
 
   const toggleCat = (id) => {
     setDone(null);
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
-  const setPartner = (catId, p) => setPartners((prev) => ({ ...prev, [catId]: p }));
+
+  // Agrupar por NIVEL (v2.51.0) -- antes una lista plana de cards, una por categoría (nivel +
+  // modalidad + género ya mezclados). Ahora primero se elige el nivel (ej. "Open /
+  // Profesional", "Master (+50)") con un botón, y debajo se despliegan las modalidades
+  // disponibles en ESE nivel (ej. "Dobles Mixto", "Dobles Masculino") -- inscribirse en varias
+  // categorías del mismo nivel ya no repite el paso de elegirlo, y de paso el checkout se
+  // siente guiado en vez de una lista larga de un tirón.
+  const levelGroups = useMemo(() => {
+    const byLevel = new Map();
+    eligible.forEach((c) => {
+      if (!byLevel.has(c.level)) byLevel.set(c.level, []);
+      byLevel.get(c.level).push(c);
+    });
+    return [...byLevel.entries()];
+  }, [eligible]);
+  const [expandedLevels, setExpandedLevels] = useState([]);
+  const toggleLevel = (level) => setExpandedLevels((prev) => (prev.includes(level) ? prev.filter((l) => l !== level) : [...prev, level]));
 
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState("");
@@ -6929,28 +6868,26 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const confirm = async (checkout) => {
     if (confirming) return;
     setConfirming(true); setConfirmError("");
-    // Categorías que quedan "esperando pareja" (v2.44.2) -- se les ofrece compartir un link
-    // DESPUÉS de esta pantalla (ver el bloque `done` más abajo), nunca antes: mostrarlo en
-    // medio del checkout era un punto de fuga (algo más en qué pensar antes de pagar) y
-    // además hacía creer que la pareja ya había pagado, cuando en realidad todavía no existía.
+    // Toda categoría de dobles arranca "esperando pareja" (v2.51.0 -- ya no se elige acá, ver
+    // comentario más arriba) -- se ofrece compartir el link DESPUÉS de esta pantalla (bloque
+    // `done` más abajo), nunca antes: mostrarlo en medio del checkout era un punto de fuga
+    // (algo más en qué pensar antes de pagar).
     const pendingTeams = [];
     const failedCatNames = [];
     for (const c of selectedCats) {
       const players = [{ name: registrant.name, ranking: Number(myRanking) || 0, ...(registrant.userId ? { userId: registrant.userId } : {}) }];
-      const partner = c.modality !== "individual" ? partners[c.id] : null;
-      if (partner && !partner.pending) players.push(partner);
       // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito (para
       // mostrarlo), pero cada equipo debe quedar con su parte proporcional. userId queda el de
       // la persona registrada (registrant), NUNCA el del admin que hizo el checkout -- es lo
       // que usa buildClientActivity() para atribuirle el pago a ella, no a quien lo cobró.
       const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), ...(registrant.userId ? { userId: registrant.userId } : {}) });
       if (result.error) { failedCatNames.push(c.name); continue; }
-      if (partner?.pending) pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
+      if (c.modality !== "individual") pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
     }
     setConfirming(false);
     if (failedCatNames.length > 0) {
       // No se cierra el checkout ni se limpia la selección -- así puede reintentar sin tener
-      // que volver a elegir categorías/pareja/método de pago de cero.
+      // que volver a elegir categorías/método de pago de cero.
       setConfirmError(`No se pudo confirmar ${isSelf ? "tu" : "la"} inscripción en: ${failedCatNames.join(", ")}. Revisa tu conexión e intenta de nuevo -- no se guardó nada para esas categorías.`);
       return;
     }
@@ -6961,7 +6898,6 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     // éxito -- se cierra de verdad recién cuando el jugador toca "Cerrar".
     setDone({ names: selectedCats.map((c) => c.name), pendingTeams, registrantName: registrant.name, isSelf });
     setSelectedIds([]);
-    setPartners({});
   };
   const closeCheckout = () => { setShowCheckout(false); setDone(null); setConfirmError(""); };
 
@@ -6973,7 +6909,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     <div className="mt-2 max-w-3xl">
       {isAdmin && <RegistrantPicker users={users} currentUser={currentUser} onChange={setRegistrant} />}
 
-      <SectionTitle sub="Elige todas las categorías en las que quieres participar -- se pagan juntas en un solo checkout.">
+      <SectionTitle sub="Elige el nivel y después la modalidad -- puedes marcar varias, se pagan juntas en un solo checkout.">
         Categorías abiertas
       </SectionTitle>
 
@@ -7008,43 +6944,50 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
       )}
 
       <div className="space-y-3" style={{ paddingBottom: selectedIds.length > 0 ? 96 : 0 }}>
-        {eligible.map((c) => {
-          const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
-          const isFull = spotsLeft === 0;
-          const isDoubles = c.modality !== "individual";
-          const isSelected = selectedIds.includes(c.id);
+        {levelGroups.map(([level, cats]) => {
+          const isExpanded = expandedLevels.includes(level);
+          const selectedCount = cats.filter((c) => selectedIds.includes(c.id)).length;
           return (
-            <div key={c.id} className="rounded-2xl overflow-hidden" style={{ border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}`, background: isSelected ? "#F3F8F1" : COLORS.card }}>
-              <button onClick={() => toggleCat(c.id)} className="w-full text-left p-4 flex items-start gap-3">
-                <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0 mt-0.5" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
-                  {isSelected && <Check size={14} color="#fff" strokeWidth={3} />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  {/* Nivel primero y en negrita (v2.47.3), como en CategoryPicker/Participantes
-                     -- antes acá se imprimía c.name tal cual ("Dobles Masculino Open /
-                     Profesional"), inconsistente con el resto de la app. */}
-                  <p className="text-sm leading-snug"><CategoryLabel cat={c} /></p>
-                  <div className="flex items-center gap-1.5 mt-1.5 flex-wrap text-[11px]" style={{ color: "#6B7688" }}>
-                    <span className="px-1.5 py-0.5 rounded-full font-bold" style={{ background: "#EEF1F7" }}>{isDoubles ? "Dobles" : "Individual"}</span>
-                    <span>{c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos</span>
-                    {isFull && (
-                      <span className="px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-                        <Hourglass size={9} /> Lista de espera
-                      </span>
-                    )}
-                  </div>
-                </div>
+            <div key={level} className="rounded-2xl overflow-hidden" style={{ border: `1.5px solid ${selectedCount > 0 ? COLORS.court : COLORS.line}` }}>
+              <button type="button" onClick={() => toggleLevel(level)} className="w-full flex items-center justify-between gap-3 p-4 text-left" style={{ background: selectedCount > 0 ? "#F3F8F1" : COLORS.card }}>
+                <span className="font-bold text-sm" style={{ color: COLORS.courtDark }}>{level}</span>
+                <span className="flex items-center gap-2 shrink-0">
+                  {selectedCount > 0 && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: COLORS.court, color: "#fff" }}>
+                      {selectedCount} elegida{selectedCount === 1 ? "" : "s"}
+                    </span>
+                  )}
+                  <ChevronDown size={16} color="#6B7688" style={{ transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                </span>
               </button>
-              {isSelected && isDoubles && (
-                <div className="px-4 pb-4 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <Label>{isSelf ? "Tu pareja en esta categoría" : `Pareja de ${registrant.name} en esta categoría`}</Label>
-                  <PartnerPicker users={users} excludeUserId={registrant?.userId} suggestedRanking={suggestedRanking} onChange={(p) => setPartner(c.id, p)} />
+              {isExpanded && (
+                <div className="px-3 pb-3 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  {cats.map((c) => {
+                    const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
+                    const isFull = spotsLeft === 0;
+                    const isSelected = selectedIds.includes(c.id);
+                    return (
+                      <button key={c.id} type="button" onClick={() => toggleCat(c.id)}
+                        className="w-full text-left px-3.5 py-3 mt-1.5 rounded-xl flex items-center gap-3"
+                        style={{ background: isSelected ? "#EAF3E6" : "#F7F8FA", border: `1.5px solid ${isSelected ? COLORS.court : "transparent"}` }}>
+                        <div className="w-5 h-5 rounded-md flex items-center justify-center shrink-0" style={{ background: isSelected ? COLORS.court : "#fff", border: `1.5px solid ${isSelected ? COLORS.court : COLORS.line}` }}>
+                          {isSelected && <Check size={12} color="#fff" strokeWidth={3} />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold" style={{ color: COLORS.ink }}>{c.modality === "individual" ? "Individual" : "Dobles"} {GENDER_LABELS[c.gender]}</p>
+                          <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
+                            {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{isFull ? " · Lista de espera" : ""}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
           );
         })}
-        {eligible.length === 0 && (
+        {levelGroups.length === 0 && (
           <p className="text-xs text-gray-400 italic px-1">
             {registrant
               ? "No hay categorías disponibles en este momento -- ya está inscrito/a en todas las abiertas, o su calendario ya fue generado."
@@ -7062,7 +7005,6 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
             <div className="min-w-0">
               <p className="text-[11px]" style={{ color: "#93A8C9" }}>{selectedCats.length} categoría{selectedCats.length === 1 ? "" : "s"} seleccionada{selectedCats.length === 1 ? "" : "s"}</p>
               <p className="disp text-xl leading-tight" style={{ color: COLORS.ball }}>{formatMoney(total)}</p>
-              {missingPartner && <p className="text-[10px] mt-0.5 font-semibold" style={{ color: "#F2B84B" }}>Falta elegir pareja en alguna categoría</p>}
             </div>
             <button disabled={!canProceed} onClick={() => setShowCheckout(true)}
               style={{ background: canProceed ? COLORS.clay : "rgba(255,255,255,0.1)", color: canProceed ? "#fff" : "#5B6B85" }}
@@ -7137,7 +7079,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                             <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
                           </p>
                           {c.modality !== "individual" && (
-                            <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Con {partners[c.id]?.name || "—"}</p>
+                            <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Dobles -- invitas a tu pareja después de pagar</p>
                           )}
                         </div>
                         <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
@@ -8298,7 +8240,7 @@ function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance, onSetPa
 // sin más dato que el nombre y el precio. Reutiliza registerForOpenPlay/registerForClass tal
 // cual -- arranca "Por pagar" (mismo criterio que TeamRegistration en torneos) y el admin
 // verifica el pago después, en la cancha, con el mismo PaymentStatusSelect que ya usa la
-// lista de inscritos. Búsqueda de socio opcional (mismo patrón de PartnerPicker) solo para
+// lista de inscritos. Búsqueda de socio opcional (mismo patrón que RegistrantPicker) solo para
 // asociar userId -- el precio SIEMPRE lo escribe el admin a mano, porque acá no sabemos qué
 // plan tiene el socio elegido para calcularle el descuento solo.
 function WalkInRegistration({ users, basePrice, club, onAdd }) {
