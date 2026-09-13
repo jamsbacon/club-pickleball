@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.51.0";
+const APP_VERSION = "2.51.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3867,18 +3867,27 @@ function TickerStat({ label, value }) {
   );
 }
 
+// v2.51.1: el admin tiene 8 pestañas (Estadísticas/Usuarios/Pagos/Actividades/Reservas/
+// Torneos/Mi Club/Perfil) contra las 5 del cliente -- `justify-around` sin scroll las repartía
+// bien mientras entraban, pero para 8 (que no caben en el ancho de un teléfono) los botones no
+// se encogían más allá de su contenido y las últimas pestañas (Perfil incluida) quedaban
+// empujadas fuera de la pantalla, imposibles de tocar -- sin scroll para alcanzarlas. `flex-1`
+// sigue reparejándolas parejo cuando SÍ caben (el caso normal, sin cambio visual ahí); ahora
+// con `overflow-x-auto` (y sin `justify-around`, que en Chrome puede recortar el lado
+// izquierdo del contenido que desborda en vez de dejarlo alcanzable con scroll) esas 8 se
+// pueden deslizar en vez de recortarse -- nunca más una pestaña inalcanzable, sea cual sea el
+// rol.
 function MobileNav({ tab, setTab, visibleNav }) {
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 flex justify-around px-1.5 py-2"
-      style={{ background: COLORS.courtDark, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 flex overflow-x-auto px-1.5 py-2"
+      style={{ background: COLORS.courtDark, borderTop: "1px solid rgba(255,255,255,0.08)", scrollbarWidth: "none" }}>
       {visibleNav.map((it) => {
         const Icon = it.icon;
         const active = tab === it.id;
         return (
-          <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-1 px-2 py-1 rounded-lg flex-1"
-            style={{ color: active ? COLORS.ball : "#6B7688" }}>
+          <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-1 px-2 py-1 rounded-lg flex-1" style={{ color: active ? COLORS.ball : "#6B7688" }}>
             <Icon size={17} strokeWidth={2.25} />
-            <span className="text-[9px] font-semibold">{it.short}</span>
+            <span className="text-[9px] font-semibold whitespace-nowrap">{it.short}</span>
           </button>
         );
       })}
