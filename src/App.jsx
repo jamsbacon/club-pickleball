@@ -1219,7 +1219,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.54.0";
+const APP_VERSION = "2.55.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2162,7 +2162,22 @@ export default function PickleballTournamentApp() {
   // único lugar que llama a esto es Inscritos (ver removePersonFromTournament ahí mismo, que
   // puede llamarlo varias veces seguidas para borrar a la misma persona de TODAS sus
   // categorías de una) -- el borrado ya no vive en Duplas/TeamRegistration.
+  // v2.55.0: además reajusta el precio de las categorías que le QUEDAN a esta persona en el
+  // mismo torneo -- si pagó 2 categorías juntas ($35, repartido $17.50 c/u -- ver
+  // InscripcionTab/JoinTeamModal, mismo criterio de reparto parejo) y se retira de una, la que
+  // le queda debe pasar a costar lo que cuesta 1 sola categoría ($20), no quedarse pegada para
+  // siempre en el precio de "categoría adicional" de un carrito que ya no existe. NUNCA toca
+  // una categoría cuyo pago YA esté verificado -- eso es plata que de verdad entró; cambiar ese
+  // número después sería falsear la contabilidad. El ajuste solo alcanza a lo que sigue "por
+  // verificar" (ver rebalancePersonPricing).
   const removePersonFromCategory = async (catId, teamId, playerIdx, inWaitlist) => {
+    const targetCat = categories.find((c) => c.id === catId);
+    if (!targetCat) return { error: "Esta categoría ya no existe." };
+    const removedTeam = (inWaitlist ? targetCat.waitlist : targetCat.teams || [])?.find((t) => t.id === teamId);
+    const removedPlayer = removedTeam?.players?.[playerIdx];
+    const personKey = removedPlayer ? (removedPlayer.userId || (removedPlayer.name || "").trim().toLowerCase()) : null;
+    const tournamentId = targetCat.tournamentId;
+
     const result = await updateCategory(catId, (c) => {
       if (inWaitlist) {
         c.waitlist = playerIdx === 0
@@ -2184,7 +2199,53 @@ export default function PickleballTournamentApp() {
       }
       return c;
     });
-    return { error: result?.error };
+    if (result?.error) return { error: result.error };
+    if (personKey && tournamentId) await rebalancePersonPricing(tournamentId, personKey, catId);
+    return {};
+  };
+
+  // Recalcula el precio de las categorías SIN VERIFICAR que le quedan a una persona en un
+  // torneo, justo después de quitarle una (v2.55.0). Mismo reparto parejo que usa el checkout
+  // (tournamentRegPrice(tournament, N) / N), aplicado de nuevo con la N que le queda de verdad.
+  // `justRemovedCatId` se descarta a mano de la búsqueda porque el closure de `categories` acá
+  // todavía es el de ANTES del borrado que se acaba de guardar (React no re-renderiza a mitad
+  // de esta función) -- confiar en que ya no aparezca sin este descarte volvería a contar una
+  // categoría que en la práctica ya se fue.
+  const rebalancePersonPricing = async (tournamentId, personKey, justRemovedCatId) => {
+    const tournament = tournaments.find((t) => t.id === tournamentId);
+    if (!tournament) return;
+    const matchesPerson = (p) => (p.userId || (p.name || "").trim().toLowerCase()) === personKey;
+    const remaining = [];
+    categories.forEach((c) => {
+      if (c.tournamentId !== tournamentId || c.id === justRemovedCatId) return;
+      [...(c.teams || []), ...(c.waitlist || [])].forEach((team) => {
+        (team.players || []).forEach((p, idx) => {
+          if (!matchesPerson(p)) return;
+          const ownPayment = idx > 0 && p.paymentStatus !== undefined;
+          const paymentStatus = ownPayment ? p.paymentStatus : team.paymentStatus;
+          if (paymentStatus === "confirmada") return; // plata ya verificada -- no se toca
+          remaining.push({ catId: c.id, teamId: team.id, playerIdx: idx, ownPayment });
+        });
+      });
+    });
+    if (remaining.length === 0) return;
+    const total = tournamentRegPrice(tournament, remaining.length);
+    const pricePerCat = total / remaining.length;
+    const bsRate = Number(club.bsPerUsd) || 0;
+    for (const r of remaining) {
+      await updateCategory(r.catId, (c) => {
+        const patch = (t) => {
+          if (t.id !== r.teamId) return t;
+          if (r.ownPayment) {
+            return { ...t, players: t.players.map((p, i) => (i === r.playerIdx ? { ...p, priceUsd: pricePerCat, priceBs: pricePerCat * bsRate } : p)) };
+          }
+          return { ...t, priceUsd: pricePerCat, priceBs: pricePerCat * bsRate };
+        };
+        c.teams = (c.teams || []).map(patch);
+        c.waitlist = (c.waitlist || []).map(patch);
+        return c;
+      });
+    }
   };
   // Estado de pago de un equipo (v2.21.0) -- vive en el propio JSONB de `teams` (igual que el
   // resto de sus campos), así que basta con un patch normal via updateCategory, sin migración.
