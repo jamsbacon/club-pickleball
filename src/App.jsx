@@ -380,6 +380,45 @@ function countRegisteredCategories(categories, tournamentId, identity, excludeCa
   }).length;
 }
 
+// Capacidad real de una categoría, en JUGADORES -- no en filas de `teams` (v2.57.0). En
+// individual cada fila es 1 jugador, así que maxTeams ya era la capacidad real. En DOBLES cada
+// fila es una DUPLA de hasta 2 jugadores, y desde v2.51.0 una dupla puede arrancar con un solo
+// jugador "esperando pareja" (ver InscripcionTab) -- antes de este fix, el cupo se comparaba
+// contra la cantidad de FILAS, así que 16 personas anotándose solas (sin pareja todavía) ya
+// llenaban las 16 filas y mandaban a la 17ma persona a lista de espera, cuando "16 duplas" para
+// el club significa 32 jugadores. Devuelve null si la categoría no tiene límite (maxTeams vacío).
+function categoryMaxPlayers(cat) {
+  if (!cat.maxTeams) return null;
+  return cat.modality === "individual" ? cat.maxTeams : cat.maxTeams * 2;
+}
+
+// Cuántos jugadores hay de verdad anotados en una lista de filas (`teams` o `waitlist` -- cada
+// fila puede tener 1 o 2 jugadores si es una dupla que sigue esperando pareja).
+function countCategoryPlayers(teams) {
+  return (teams || []).reduce((sum, t) => sum + (t.players || []).length, 0);
+}
+
+// Si una categoría ya llegó a su cupo real (en jugadores, ver categoryMaxPlayers arriba) -- el
+// punto en el que un addTeam nuevo debe caer en lista de espera en vez del roster principal.
+function categoryIsFull(cat) {
+  const capacity = categoryMaxPlayers(cat);
+  return capacity !== null && countCategoryPlayers(cat.teams) >= capacity;
+}
+
+// Texto legible de cuántos hay anotados en una categoría, en la unidad correcta según
+// modalidad -- "X/Y jugadores" en individual (1 fila = 1 persona), "X duplas (Y/Z jugadores)"
+// en dobles, porque ahí una fila puede tener 1 o 2 jugadores y lo que de verdad importa para el
+// cupo es la cantidad de PERSONAS, no de filas (ver categoryMaxPlayers). Reemplaza los "X/Y
+// equipos" repetidos por toda la pantalla de inscripción/roster que asumían 1 fila = 1 persona.
+function categoryCountLabel(cat) {
+  const rows = cat.teams.length;
+  if (cat.modality === "individual") {
+    return `${rows}${cat.maxTeams ? `/${cat.maxTeams}` : ""} jugador${rows === 1 ? "" : "es"}`;
+  }
+  const maxPlayers = categoryMaxPlayers(cat);
+  return `${rows} dupla${rows === 1 ? "" : "s"}${maxPlayers ? ` (${countCategoryPlayers(cat.teams)}/${maxPlayers} jugadores)` : ""}`;
+}
+
 // Resolves a court's BASE price for a given time-of-day, honoring an optional list of
 // time-window overrides (peak/off-peak pricing) before falling back to the court's base price.
 // Used to just return {base, member} -- member pricing moved to the membership plan's own
@@ -1251,7 +1290,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.56.0";
+const APP_VERSION = "2.57.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2107,7 +2146,10 @@ export default function PickleballTournamentApp() {
       // registrarse; el admin lo pasa a "pago verificado" cuando de verdad reciba el dinero.
       const paymentStatus = checkout ? initialPaymentStatus(checkout.paymentMethod) : "pendiente_efectivo";
       const team = { id: teamId, name, players, createdAt: Date.now(), ...(checkout || {}), paymentStatus };
-      if (c.maxTeams && c.teams.length >= c.maxTeams) {
+      // v2.57.0: cupo real en JUGADORES, no en filas -- ver categoryIsFull. Antes esto
+      // comparaba contra c.teams.length, así que en dobles cada persona anotándose SOLA
+      // (esperando pareja) ocupaba una fila entera del cupo en vez de solo su mitad.
+      if (categoryIsFull(c)) {
         c.waitlist = [...c.waitlist, team];
       } else {
         c.teams = [...c.teams, team];
@@ -5735,8 +5777,10 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
                   <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
                     {activeCat.format ? FORMAT_LABELS[activeCat.format] : "Formato por definir"}
                   </span>
+                  {/* v2.57.0: categoryCountLabel ya elige la unidad correcta (jugadores en
+                     individual, duplas + jugadores reales en dobles) -- ver su comentario. */}
                   <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
-                    {activeCat.teams.length}{activeCat.maxTeams ? `/${activeCat.maxTeams}` : ""} equipo{activeCat.teams.length === 1 ? "" : "s"} inscrito{activeCat.teams.length === 1 ? "" : "s"}
+                    {categoryCountLabel(activeCat)} inscrito{activeCat.teams.length === 1 ? "" : "s"}
                   </span>
                   {activeCat.waitlist.length > 0 && (
                     <span className="text-xs px-2.5 py-1 rounded-full font-semibold flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
@@ -6067,11 +6111,20 @@ function NewCategoryForm({ onCreate, onCancel }) {
             </select>
           </div>
           <div>
-            <Label>Cupo máximo de equipos (opcional)</Label>
-            <input type="number" min={2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
+            {/* v2.57.0: "equipos" confundía -- en dobles cada cupo es una DUPLA de 2
+               jugadores (16 duplas = 32 jugadores), no 1 persona por cupo. En individual el
+               cupo SÍ es 1 jugador por número, así que el campo pide directamente
+               "jugadores" ahí en vez de "duplas". */}
+            <Label>{modality === "individual" ? "Cupo máximo de jugadores (opcional)" : "Cupo máximo de duplas (opcional)"}</Label>
+            <input type="number" min={modality === "individual" ? 1 : 2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
           </div>
         </div>
-        <p className="text-xs -mt-3" style={{ color: "#6B7688" }}>Al llenarse el cupo, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.</p>
+        <p className="text-xs -mt-3" style={{ color: "#6B7688" }}>
+          {modality === "individual"
+            ? "Cada cupo es para 1 jugador."
+            : `Cada cupo es para 1 dupla (2 jugadores)${maxTeams ? ` -- ${maxTeams} duplas = ${Number(maxTeams) * 2} jugadores en total` : ""}.`}
+          {" "}Al llenarse el cupo, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.
+        </p>
 
         <div className="text-sm px-4 py-3 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           Nombre automático: <b>{previewName}</b>
@@ -6118,7 +6171,7 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking,
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
   const [error, setError] = useState("");
-  const full = cat.maxTeams && cat.teams.length >= cat.maxTeams;
+  const full = categoryIsFull(cat); // v2.57.0 -- cupo real en jugadores, no en filas (ver categoryIsFull)
 
   // Ahora espera el resultado real de addTeam (v2.44.4) -- antes disparaba y limpiaba los
   // campos de una, sin chequear si el guardado en Supabase de verdad llegó a pasar.
@@ -6136,7 +6189,7 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking,
   return (
     <Card>
       <SectionTitle sub="El nombre del equipo se arma solo con los nombres de los jugadores. El ranking sale automático del historial de la app.">
-        Equipos inscritos {cat.maxTeams ? `(${cat.teams.length}/${cat.maxTeams})` : ""}
+        {isDoubles ? "Duplas inscritas" : "Jugadores inscritos"} {cat.maxTeams ? `-- ${categoryCountLabel(cat)}` : ""}
       </SectionTitle>
 
       <div className={`grid gap-2 items-start mb-4 ${isDoubles ? "md:grid-cols-[1fr_1fr_auto]" : "md:grid-cols-[1fr_auto]"}`}>
@@ -7183,8 +7236,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               {isExpanded && (
                 <div className="px-3 pb-3 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   {cats.map((c) => {
-                    const spotsLeft = c.maxTeams ? Math.max(0, c.maxTeams - c.teams.length) : null;
-                    const isFull = spotsLeft === 0;
+                    const isFull = categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas
                     const isSelected = selectedIds.includes(c.id);
                     return (
                       <button key={c.id} type="button" onClick={() => toggleCat(c.id)}
@@ -7196,7 +7248,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-semibold" style={{ color: COLORS.ink }}>{c.modality === "individual" ? "Individual" : "Dobles"} {GENDER_LABELS[c.gender]}</p>
                           <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
-                            {c.teams.length}{c.maxTeams ? `/${c.maxTeams}` : ""} equipos{isFull ? " · Lista de espera" : ""}
+                            {categoryCountLabel(c)}{isFull ? " · Lista de espera" : ""}
                           </p>
                         </div>
                       </button>
@@ -7290,8 +7342,12 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                      mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo
                      se arma la suma antes de pagar. */}
                   {selectedCats.map((c, i) => {
-                    const isFull = c.maxTeams && c.teams.length >= c.maxTeams;
-                    const tierPrice = tournamentTierPrice(tournament, Math.min(2, i + 1));
+                    const isFull = categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas
+                    // v2.56.0: si ya tenía categorías de un checkout anterior (alreadyRegisteredCount),
+                    // esta línea es la (alreadyRegisteredCount+i+1)-ésima de verdad -- solo la
+                    // primerísima categoría de todas (nunca tuvo ninguna antes) paga tier 1, el
+                    // resto paga tier 2 ("categoría adicional"), igual que tournamentRegPriceFrom.
+                    const tierPrice = tournamentTierPrice(tournament, Math.min(2, alreadyRegisteredCount + i + 1));
                     return (
                       <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
                         <div className="min-w-0">
