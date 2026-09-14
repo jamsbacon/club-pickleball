@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.63.0";
+const APP_VERSION = "2.64.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7453,6 +7453,28 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     return true;
   }) : [];
 
+  // Categorías de dobles en las que el registrant YA es TITULAR de un cupo "esperando pareja"
+  // (v2.64.0) -- antes el único lugar para conseguir el link de invitar pareja era el popup de
+  // éxito justo después de pagar (ver `done` más abajo); si se cerraba sin compartirlo, o el
+  // checkout había sido en otra sesión/dispositivo, no quedaba forma de recuperarlo -- ni
+  // siquiera el admin podía regenerarlo a mano. Esta sección deja reenviar ese link en
+  // cualquier momento. Solo cuenta si es TITULAR (players[0]) -- alguien que se unió como
+  // players[1] no tiene cupo propio que ofrecer, ya está completo.
+  const myPendingTeams = useMemo(() => {
+    if (!registrant) return [];
+    const out = [];
+    categories.forEach((c) => {
+      if (c.modality === "individual") return;
+      (c.teams || []).forEach((t) => {
+        if ((t.players || []).length !== 1) return;
+        const creator = t.players[0];
+        const isMine = registrant.userId ? creator.userId === registrant.userId : creator.name.trim().toLowerCase() === registrant.name.trim().toLowerCase();
+        if (isMine) out.push({ catId: c.id, catName: c.name, teamId: t.id });
+      });
+    });
+    return out;
+  }, [categories, registrant]);
+
   // ---- Carrito de inscripción: el jugador marca TODAS las categorías en las que quiere
   // participar (no una a la vez) y un solo pago cubre todo el carrito. Ya no se elige pareja
   // acá (v2.51.0) -- toda categoría de dobles arranca "esperando pareja"; el botón de invitar
@@ -7564,6 +7586,34 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   return (
     <div className="mt-2 max-w-3xl">
       {isAdmin && <RegistrantPicker users={users} currentUser={currentUser} onChange={setRegistrant} />}
+
+      {/* v2.64.0: reenviar el link de invitar pareja en cualquier momento -- ver comentario de
+         myPendingTeams más arriba. Va ANTES de "Categorías abiertas" a propósito: si ya tiene
+         un cupo esperando pareja, resolver eso es más urgente que ver qué más puede inscribir. */}
+      {myPendingTeams.length > 0 && (
+        <Card className="mb-5">
+          <p className="font-bold text-sm mb-1" style={{ color: COLORS.courtDark }}>
+            {isSelf ? "Todavía esperando pareja" : `${registrant.name} todavía espera pareja`}
+          </p>
+          <p className="text-xs mb-3" style={{ color: "#6B7688" }}>
+            {myPendingTeams.length === 1 ? "Esta categoría" : "Estas categorías"} ya está{myPendingTeams.length === 1 ? "" : "n"} pagada{myPendingTeams.length === 1 ? "" : "s"} -- comparte el link cuando quieras, se puede reenviar las veces que haga falta.
+          </p>
+          <div className="space-y-2">
+            {myPendingTeams.map((pt) => {
+              const waMessage = isSelf
+                ? `Te invité a jugar ${pt.catName} conmigo en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`
+                : `${registrant.name} te invitó a jugar ${pt.catName} en ${tournament.name} -- únete y confirma tu cupo acá:\n${joinTeamUrl(pt.catId, pt.teamId)}`;
+              return (
+                <a key={pt.teamId} href={`https://wa.me/?text=${encodeURIComponent(waMessage)}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-bold" style={{ background: "#25D366", color: "#fff" }}>
+                  <Share2 size={14} /> {isSelf ? `Invitar a tu pareja en ${pt.catName}` : `Compartir invitación a pareja en ${pt.catName}`}
+                </a>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       <SectionTitle sub="Elige el nivel y después la modalidad -- puedes marcar varias, se pagan juntas en un solo checkout.">
         Categorías abiertas
