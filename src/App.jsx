@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.62.0";
+const APP_VERSION = "2.63.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6070,6 +6070,16 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 // efectivo (nada que verificar todavía, se cobra en la cancha) o Pago Móvil (verificar que
 // llegó) -- MANTENER el estado en 3 valores por debajo evita una migración de los 4 checks de
 // Postgres que ya existen (bookings/open_play/class/subscriptions) solo para esta pantalla.
+// v2.63.0: "pagado" ya no significa solo "confirmada" -- un Pago Móvil "por verificar" es
+// plata que la persona YA mandó de su cuenta, solo falta que el admin confirme que llegó. Antes
+// esta fila mostraba "$0,00 pagado" para esos casos, lo cual es falso y confundía (parecía que
+// nadie había pagado nada). `paidUsd`/`paidBs` ahora suman todo lo que no sea "pendiente_efectivo"
+// (ese sí es plata que de verdad no se ha entregado -- se paga en la cancha). `verifiedUsd`
+// se queda con el significado viejo (solo "confirmada") para las tarjetas de arriba, que SÍ
+// deben seguir mostrando plata YA confirmada, no lo que falta verificar. `priceBs` es el monto
+// en bolívares que ya quedó FIJO al momento del checkout (ver InscripcionTab/JoinTeamModal:
+// priceBs = pricePerTeam * bsRate DE ESE MOMENTO) -- sumar eso acá es automáticamente el monto
+// fijo pedido, nunca se recalcula con la tasa de hoy.
 function buildTournamentParticipants(categories) {
   const byPerson = new Map();
   categories.forEach((cat) => {
@@ -6080,20 +6090,24 @@ function buildTournamentParticipants(categories) {
         // el link (joinTeam, v2.44.2) -- si no, comparte el pago de quien creó el equipo.
         const ownPayment = idx > 0 && p.paymentStatus !== undefined;
         const priceUsd = Number(ownPayment ? p.priceUsd : team.priceUsd) || 0;
+        const priceBs = Number(ownPayment ? p.priceBs : team.priceBs) || 0;
         const paymentMethod = ownPayment ? p.paymentMethod : team.paymentMethod;
         const paymentStatus = ownPayment ? p.paymentStatus : team.paymentStatus;
+        const reference = (ownPayment ? p.reference : team.reference) || "";
         const createdAt = (ownPayment ? p.joinedAt : team.createdAt) || 0;
         const key = p.userId || `name:${p.name.trim().toLowerCase()}`;
         const entry = byPerson.get(key) || {
-          key, name: p.name, categories: [], totalUsd: 0, paidUsd: 0,
-          methods: new Set(), lastAt: 0, verifyTargets: [], removalTargets: [],
+          key, name: p.name, categories: [], totalUsd: 0, paidUsd: 0, paidBs: 0, verifiedUsd: 0,
+          methods: new Set(), references: new Set(), lastAt: 0, verifyTargets: [], removalTargets: [],
         };
         entry.categories.push(cat.name);
         entry.totalUsd += priceUsd;
-        if (paymentStatus === "confirmada") entry.paidUsd += priceUsd;
-        else entry.verifyTargets.push(ownPayment ? { kind: "player", catId: cat.id, teamId: team.id, playerIdx: idx } : { kind: "team", catId: cat.id, teamId: team.id });
+        if (paymentStatus === "confirmada") entry.verifiedUsd += priceUsd;
+        if (paymentStatus !== "pendiente_efectivo") { entry.paidUsd += priceUsd; entry.paidBs += priceBs; }
+        if (paymentStatus !== "confirmada") entry.verifyTargets.push(ownPayment ? { kind: "player", catId: cat.id, teamId: team.id, playerIdx: idx } : { kind: "team", catId: cat.id, teamId: team.id });
         entry.removalTargets.push({ catId: cat.id, catName: cat.name, teamId: team.id, playerIdx: idx, inWaitlist });
         if (paymentMethod) entry.methods.add(paymentMethod);
+        if (reference.trim()) entry.references.add(reference.trim());
         if (createdAt > entry.lastAt) entry.lastAt = createdAt;
         byPerson.set(key, entry);
       });
@@ -6161,17 +6175,48 @@ function findUnverifiedCategoryEntries(categories, userId) {
   return out;
 }
 
+// Últimos 4 caracteres de cada referencia distinta que dejó esta persona (v2.63.0) -- alcanza
+// para cruzar contra el comprobante real sin tener que mostrar el número completo. Casi
+// siempre es una sola (todas sus categorías del mismo carrito comparten el mismo checkout,
+// ver InscripcionTab) -- si hay más de una (categorías pagadas en checkouts separados,
+// quizás con métodos distintos) se listan todas.
+function referenceHint(entry) {
+  if (entry.references.size === 0) return "—";
+  return [...entry.references].map((r) => `••${r.slice(-4)}`).join(", ");
+}
+
 function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [methodFilter, setMethodFilter] = useState("all");
 
   const participants = useMemo(() => buildTournamentParticipants(categories), [categories]);
+  // Lista de categorías para el dropdown (v2.63.0) -- las que de verdad tienen algún inscrito,
+  // no todas las de `categories` (mostrar una vacía en el filtro no ayuda a nadie), en el mismo
+  // orden en que ya aparecen en la pestaña Categorías.
+  const categoryOptions = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    categories.forEach((c) => { if (!seen.has(c.name) && (c.teams?.length || c.waitlist?.length)) { seen.add(c.name); out.push(c.name); } });
+    return out;
+  }, [categories]);
 
-  const verifyAll = (entry) => {
-    entry.verifyTargets.forEach((t) => {
+  // Verificar (v2.63.0: ahora con confirmación -- antes un solo click aplicaba el cambio de
+  // una, sin aviso; antes de eso, ver removeTarget más abajo, que ya lo pedía para borrar).
+  // Mismo patrón que removeTarget: `verifyTarget` es la entrada de la tabla, o null si el
+  // diálogo está cerrado.
+  const [verifyTarget, setVerifyTarget] = useState(null);
+  const [verifying, setVerifying] = useState(false);
+  const confirmVerify = () => {
+    if (!verifyTarget || verifying) return;
+    setVerifying(true);
+    verifyTarget.verifyTargets.forEach((t) => {
       if (t.kind === "team") setTeamPaymentStatus(t.catId, t.teamId, "confirmada");
       else setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, "confirmada");
     });
+    setVerifying(false);
+    setVerifyTarget(null);
   };
 
   // Borrar a una persona de TODO el torneo (v2.50.0) -- único lugar del admin para hacerlo,
@@ -6197,6 +6242,8 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
   const filtered = participants.filter((e) => {
     if (statusFilter === "pending" && e.verifyTargets.length === 0) return false;
     if (statusFilter === "verificado" && e.verifyTargets.length > 0) return false;
+    if (categoryFilter !== "all" && !e.categories.includes(categoryFilter)) return false;
+    if (methodFilter !== "all" && !e.methods.has(methodFilter)) return false;
     const q = search.trim().toLowerCase();
     if (!q) return true;
     return e.name.toLowerCase().includes(q) || e.categories.some((c) => c.toLowerCase().includes(q));
@@ -6206,10 +6253,12 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 
   // Totales del torneo completo (v2.53.0) -- siempre sobre TODOS los inscritos, sin importar
   // el filtro de estatus/búsqueda activo, para que sean un resumen estable arriba de la tabla
-  // en vez de moverse cada vez que alguien busca o filtra.
+  // en vez de moverse cada vez que alguien busca o filtra. "Monto verificado" usa verifiedUsd
+  // (solo "confirmada") a propósito -- sigue siendo plata YA revisada, distinto de paidUsd
+  // (confirmada + por verificar) que ahora se muestra por fila, ver buildTournamentParticipants.
   const totalProjected = participants.reduce((s, e) => s + e.totalUsd, 0);
-  const totalPaid = participants.reduce((s, e) => s + e.paidUsd, 0);
-  const totalPendingAmount = participants.reduce((s, e) => s + (e.totalUsd - e.paidUsd), 0);
+  const totalVerified = participants.reduce((s, e) => s + e.verifiedUsd, 0);
+  const totalPendingAmount = participants.reduce((s, e) => s + (e.totalUsd - e.verifiedUsd), 0);
 
   return (
     <div className="mt-2 space-y-3">
@@ -6220,7 +6269,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard label="Jugadores inscritos" value={participants.length} icon={Users} />
         <StatCard label="Monto proyectado" value={formatMoney(totalProjected)} icon={Euro} />
-        <StatCard label="Monto verificado" value={formatMoney(totalPaid)} icon={CheckCircle2} />
+        <StatCard label="Monto verificado" value={formatMoney(totalVerified)} icon={CheckCircle2} />
         <StatCard label="Por verificar" value={formatMoney(totalPendingAmount)} icon={Hourglass} />
       </div>
 
@@ -6232,13 +6281,25 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
           </button>
         ))}
       </div>
+      {/* v2.63.0: filtros nuevos, aparte del estatus de arriba -- por categoría y por medio de
+         pago, como dropdown en vez de pastillas (demasiadas categorías para eso). */}
+      <div className="flex flex-wrap gap-2">
+        <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs font-semibold">
+          <option value="all">Todas las categorías</option>
+          {categoryOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+        <select value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs font-semibold">
+          <option value="all">Todos los medios de pago</option>
+          {Object.entries(METHOD_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </div>
       <div className="relative">
         <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" color="#9AA6BC" />
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre o categoría…" style={{ ...inputStyle, paddingLeft: 38 }} />
       </div>
 
       <div className="overflow-x-auto rounded-xl" style={{ border: `1px solid ${COLORS.line}` }}>
-        <table className="w-full text-sm" style={{ minWidth: 760 }}>
+        <table className="w-full text-sm" style={{ minWidth: 900 }}>
           <thead>
             <tr className="text-left text-[11px] text-gray-400 uppercase" style={{ background: "#F4F6FA" }}>
               <th className="py-2.5 px-3">#</th>
@@ -6246,6 +6307,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
               <th className="py-2.5 px-3">Categorías</th>
               <th className="py-2.5 px-3">Monto a pagar</th>
               <th className="py-2.5 px-3">Monto pagado</th>
+              <th className="py-2.5 px-3">Comprobante</th>
               <th className="py-2.5 px-3">Fecha</th>
               <th className="py-2.5 px-3">Medio de pago</th>
               <th className="py-2.5 px-3">Estatus</th>
@@ -6261,9 +6323,16 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
                 <tr key={e.key} className="border-t" style={{ borderColor: COLORS.line }}>
                   <td className="py-2.5 px-3 mono text-gray-400">{i + 1}</td>
                   <td className="py-2.5 px-3 font-semibold whitespace-nowrap">{e.name}</td>
-                  <td className="py-2.5 px-3 text-center">{e.categories.length}</td>
+                  {/* v2.63.0: title = tooltip nativo del navegador al pasar el mouse, con los
+                     nombres de las categorías -- no hace falta un componente de tooltip propio
+                     para esto. */}
+                  <td className="py-2.5 px-3 text-center" title={e.categories.join(", ")} style={{ cursor: "help" }}>{e.categories.length}</td>
                   <td className="py-2.5 px-3 mono">{formatMoney(e.totalUsd)}</td>
-                  <td className="py-2.5 px-3 mono">{formatMoney(e.paidUsd)}</td>
+                  <td className="py-2.5 px-3 mono">
+                    {formatMoney(e.paidUsd)}
+                    {e.paidBs > 0 && <span className="block text-[10px] text-gray-400">≈ {formatMoney(e.paidBs, "Bs. ")}</span>}
+                  </td>
+                  <td className="py-2.5 px-3 mono text-xs text-gray-500 whitespace-nowrap">{referenceHint(e)}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{e.lastAt ? formatDateHuman(new Date(e.lastAt).toISOString().slice(0, 10)) : "—"}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{methodLabel}</td>
                   <td className="py-2.5 px-3">
@@ -6273,7 +6342,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
                   </td>
                   <td className="py-2.5 px-3">
                     {pending && (
-                      <button onClick={() => verifyAll(e)} className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap" style={{ background: COLORS.court, color: "#fff" }}>
+                      <button onClick={() => setVerifyTarget(e)} className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap" style={{ background: COLORS.court, color: "#fff" }}>
                         Verificar
                       </button>
                     )}
@@ -6288,6 +6357,14 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
         </table>
         {filtered.length === 0 && <p className="text-sm text-gray-400 italic py-6 text-center">Nadie coincide con este filtro.</p>}
       </div>
+
+      {verifyTarget && (
+        <ConfirmDeleteModal
+          title={`¿Confirmar el pago de ${verifyTarget.name}?`}
+          message={`Se marca como verificado ${verifyTarget.verifyTargets.length === 1 ? "lo que le falta" : `las ${verifyTarget.verifyTargets.length} categorías`} por confirmar -- ${formatMoney(verifyTarget.totalUsd - verifyTarget.verifiedUsd)}. Revisa el comprobante (${referenceHint(verifyTarget)}) antes de confirmar.`}
+          options={[{ label: verifying ? "Confirmando…" : "Verificar pago", variant: "danger", onClick: confirmVerify }]}
+          onCancel={() => setVerifyTarget(null)} />
+      )}
 
       {removeTarget && (
         <ConfirmDeleteModal
