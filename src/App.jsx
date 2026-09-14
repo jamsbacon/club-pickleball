@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.64.1";
+const APP_VERSION = "2.65.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6534,22 +6534,17 @@ function NewCategoryForm({ onCreate, onCancel }) {
 }
 
 
-/* Player-name + ranking field: autofills the ranking from the app-wide directory
-   (by prior tournament results) and only lets the organizer override it. */
-// Sin edición manual de ranking (v2.42.3) -- antes el organizador podía tipear un número
-// propio con el lápiz, pero eso hacía que anotar un equipo pidiera un paso extra por
-// jugador para nada (el ranking sugerido, por historial de la app, ya es el dato correcto
-// casi siempre). Ahora el ranking sale solo, de una: se muestra tal cual lo calcula
-// suggestedRanking, sin campo ni botón que editarlo.
-function PlayerField({ label, name, setName, suggestedRanking }) {
-  const suggestion = name.trim() ? suggestedRanking(name) : "";
+/* Player-name field para el roster del organizador (TeamRegistration) -- el ranking se sigue
+   calculando solo, de una (suggestedRanking, sin campo ni botón para editarlo, v2.42.3), pero
+   ya NO se muestra un recuadro aparte por cada jugador mientras se escribe (v2.65.0, a pedido
+   del club: ese "Ranking: Sin historial (0)" repetido dos veces era puro ruido visual en este
+   formulario -- el ranking sigue viéndose una vez guardado el equipo, junto al nombre en la
+   lista de abajo). */
+function PlayerField({ label, name, setName }) {
   return (
     <div>
       <Label>{label}</Label>
-      <input style={{ ...inputStyle, marginBottom: 6 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre" />
-      <div className="px-3 py-2.5 rounded-xl text-sm" style={{ background: "#EEF1F7", color: suggestion !== "" ? COLORS.ink : "#9AA6BC" }}>
-        Ranking: <span className="font-semibold">{suggestion !== "" ? suggestion : "Sin historial (0)"}</span>
-      </div>
+      <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre" />
     </div>
   );
 }
@@ -6558,7 +6553,7 @@ function PlayerField({ label, name, setName, suggestedRanking }) {
 // borra a nadie (v2.50.0) -- ni equipo ni lista de espera; el borrado se centralizó en
 // Inscritos (InscritosTab), por PERSONA y de una vez en todas sus categorías, no por equipo
 // suelto acá. Ver el comentario en TORNEO_SUB_ITEMS para el porqué.
-function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+function TeamRegistration({ cat, addTeam, suggestedRanking }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -6580,13 +6575,17 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking,
 
   return (
     <Card>
+      {/* v2.65.0: nombre de la categoría chiquito arriba del título -- antes, con varias
+         categorías del mismo nivel/modalidad abiertas a la vez, "Duplas inscritas" a secas no
+         dejaba claro cuál se estaba viendo sin mirar el sidebar de al lado. */}
+      <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "#9AA6BC" }}>{cat.name}</p>
       <SectionTitle sub="El nombre del equipo se arma solo con los nombres de los jugadores. El ranking sale automático del historial de la app.">
         {isDoubles ? "Duplas inscritas" : "Jugadores inscritos"} {cat.maxTeams ? `-- ${categoryCountLabel(cat)}` : ""}
       </SectionTitle>
 
       <div className={`grid gap-2 items-start mb-4 ${isDoubles ? "md:grid-cols-[1fr_1fr_auto]" : "md:grid-cols-[1fr_auto]"}`}>
-        <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} suggestedRanking={suggestedRanking} />
-        {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} suggestedRanking={suggestedRanking} />}
+        <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} />
+        {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} />}
         <button onClick={submit} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1 h-[38px] self-end">
           <Plus size={16} /> {full ? "Añadir (espera)" : "Añadir"}
         </button>
@@ -6606,66 +6605,46 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, upsertPlayerRanking,
 
       <div className="space-y-1.5 max-h-96 overflow-y-auto pr-1">
         {(cat.teams || []).map((t) => {
-          // Equipos anotados a mano por el organizador (InscripcionAdminForm) no traen
-          // paymentMethod -- solo hay detalle de pago que mostrar si el equipo vino de un
-          // checkout real (InscripcionTab). El estado sí siempre existe (ver addTeam).
-          const hasCheckout = !!t.paymentMethod;
           // "Esperando pareja" (v2.44.2) -- un equipo de dobles (ver InscripcionTab/
           // JoinTeamModal, ya no se elige pareja al inscribirse desde v2.51.0) arranca siempre
-          // con un solo jugador; el segundo llega
-          // más tarde por su propio link, pagando su propia inscripción por separado -- ese
-          // pago vive en `players[1].paymentStatus`, NUNCA en `t.paymentStatus` (eso sigue
-          // siendo solo lo que pagó quien creó el equipo). Mientras falte, se muestra un aviso
-          // en vez de fingir que hay un segundo jugador con nombre "—".
+          // con un solo jugador; el segundo llega más tarde por su propio link, pagando su
+          // propia inscripción por separado -- ese pago vive en `players[1].paymentStatus`,
+          // NUNCA en `t.paymentStatus` (eso sigue siendo solo lo que pagó quien creó el
+          // equipo). Mientras falte, se muestra un aviso en vez de fingir que hay un segundo
+          // jugador con nombre "—".
           const isDoublesTeam = cat.modality !== "individual";
           const waitingPartner = isDoublesTeam && (t.players || []).length < 2;
-          const partner = t.players?.[1];
-          const partnerHasOwnPayment = isDoublesTeam && partner && partner.paymentStatus !== undefined;
+          // v2.65.0: sin la línea de detalle de pago (método/fecha/monto/referencia) debajo de
+          // cada dupla -- a pedido del club, era puro ruido visual acá; para revisar un pago de
+          // verdad sigue estando Inscritos/Pagos, con más contexto. Alcanza con saber de un
+          // vistazo quién falta: el nombre de quien todavía no tiene el pago confirmado se
+          // pinta en rojo, el de quien sí en el color normal -- cada jugador puede tener su
+          // PROPIO estado (players[1] con pago propio, ver comentario arriba); si no, comparte
+          // el de t.paymentStatus (equipo completo anotado a mano, o el titular del equipo).
+          const statusFor = (p, idx) => (idx === 1 && p.paymentStatus !== undefined ? p.paymentStatus : t.paymentStatus);
           return (
             <div key={t.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm flex-wrap" style={{ background: "#EEF1F7" }}>
               <div className="min-w-0">
-                <span className="font-semibold">{t.name}</span>
-                <span className="text-gray-500 ml-2 text-xs">{(t.players || []).map((p) => `${p.name} (${p.ranking || 0})`).join(" · ")}</span>
+                {(t.players || []).map((p, idx) => (
+                  <span key={idx} className="font-semibold" style={{ color: statusFor(p, idx) === "confirmada" ? COLORS.ink : COLORS.clay }}>
+                    {idx > 0 ? " · " : ""}{p.name} ({p.ranking || 0})
+                  </span>
+                ))}
                 {waitingPartner && (
                   <span className="text-[10px] font-bold ml-2 px-1.5 py-0.5 rounded-full inline-flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
                     <Hourglass size={9} /> Esperando pareja
                   </span>
                 )}
-                <span className="text-xs text-gray-500 block mt-0.5">
-                  {hasCheckout ? (
-                    <>
-                      {partnerHasOwnPayment && `${t.players[0].name}: `}{t.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(t.createdAt).toISOString().slice(0, 10))}
-                      {t.priceUsd != null && ` · ${formatMoney(t.priceUsd)}`}
-                      {t.paymentMethod === "movil" && t.reference && ` · ref. ${t.reference}`}
-                      {t.paymentMethod === "movil" && (t.proofName ? " · comprobante" : " · sin comprobante")}
-                    </>
-                  ) : "Anotado por el organizador, sin checkout"}
-                  {partnerHasOwnPayment && (
-                    <>
-                      {" · "}{partner.name}: {partner.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(partner.joinedAt).toISOString().slice(0, 10))}
-                      {partner.priceUsd != null && ` · ${formatMoney(partner.priceUsd)}`}
-                      {partner.paymentMethod === "movil" && partner.reference && ` · ref. ${partner.reference}`}
-                      {partner.paymentMethod === "movil" && (partner.proofName ? " · comprobante" : " · sin comprobante")}
-                    </>
-                  )}
-                </span>
               </div>
-              <div className="flex items-center gap-2.5 shrink-0 ml-auto">
-                <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
-                <div className="flex flex-col gap-1 items-end">
-                  {setTeamPaymentStatus ? <PaymentStatusSelect status={t.paymentStatus} onChange={(v) => setTeamPaymentStatus(cat.id, t.id, v)} /> : <PaymentStatusBadge status={t.paymentStatus} />}
-                  {partnerHasOwnPayment && (
-                    setPlayerPaymentStatus
-                      ? <PaymentStatusSelect status={partner.paymentStatus} onChange={(v) => setPlayerPaymentStatus(cat.id, t.id, 1, v)} />
-                      : <PaymentStatusBadge status={partner.paymentStatus} />
-                  )}
-                </div>
-              </div>
+              <span className="mono text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
             </div>
           );
         })}
         {(cat.teams || []).length === 0 && <p className="text-xs text-gray-400 italic">Sin equipos todavía.</p>}
       </div>
+      <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>
+        <span style={{ color: COLORS.clay }}>●</span> Rojo = pago sin confirmar todavía. Para verificarlo o cambiar su estado, ve a Inscritos o Pagos.
+      </p>
 
       {(cat.waitlist || []).length > 0 && (
         <div className="mt-4 pt-4 border-t" style={{ borderColor: COLORS.line }}>
