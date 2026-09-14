@@ -336,9 +336,10 @@ function tournamentTierPrice(tournament, tier) {
 // precio marginal, sin un tercer nivel que las cubra distinto). El total se arma:
 // 1 categoría = price1, n categorías = price1 + price2*(n-1).
 // Ejemplo pedido por el club: price1=$30, price2=$15 -> 3 categorías = 30+15+15 = $60.
-// No lleva cuenta acumulada entre inscripciones separadas en momentos distintos -- si el
-// jugador vuelve más tarde a anotarse en una categoría más, ese carrito nuevo arranca su propio
-// nivel 1, no se suma a lo que ya pagó antes.
+// Esta función sola NO acumula entre inscripciones separadas en momentos distintos -- un
+// carrito que arranca de cero siempre paga su propio nivel 1. La acumulación real (si la
+// persona ya venía inscrita en categorías de un checkout ANTERIOR) la resuelve
+// tournamentRegPriceFrom, justo debajo, apoyándose en esta misma función.
 // (v2.32.0-v2.44.0 tuvieron un 3er nivel, "price3", que cubría la 3ra categoría en adelante a un
 // precio propio -- se colapsó en uno solo porque en la práctica nunca hacía falta un precio
 // DISTINTO para la 3ra vs. la 2da adicional; las columnas presale_price_3/regular_price_3
@@ -346,6 +347,37 @@ function tournamentTierPrice(tournament, tier) {
 function tournamentRegPrice(tournament, catCount) {
   const n = Math.max(1, Number(catCount) || 1);
   return tournamentTierPrice(tournament, 1) + tournamentTierPrice(tournament, 2) * (n - 1);
+}
+
+// Precio TOTAL de agregar `newCount` categorías más en un carrito NUEVO, cuando la persona ya
+// está inscrita (de un checkout anterior y separado) en `alreadyCount` categorías de este mismo
+// torneo (v2.56.0). Antes cada carrito arrancaba su propio nivel 1 sin memoria de checkouts
+// pasados (ver nota arriba) -- a pedido del club, si ya pagó su 1ra categoría en algún momento,
+// este carrito nuevo debe arrancar directo en precio de "categoría adicional" para TODO lo que
+// agregue ahora, en vez de volver a cobrar el precio de 1ra categoría. Se calcula como la
+// diferencia entre el total acumulado hasta (alreadyCount+newCount) y el acumulado hasta
+// alreadyCount, reusando tournamentRegPrice para no duplicar la lógica de tiers -- con
+// alreadyCount=0 da exactamente lo mismo que tournamentRegPrice(tournament, newCount) de
+// siempre (upTo(0) = 0).
+function tournamentRegPriceFrom(tournament, alreadyCount, newCount) {
+  const n = Math.max(0, Number(newCount) || 0);
+  if (n === 0) return 0;
+  const already = Math.max(0, Number(alreadyCount) || 0);
+  const upTo = (count) => (count <= 0 ? 0 : tournamentRegPrice(tournament, count));
+  return upTo(already + n) - upTo(already);
+}
+
+// Cuántas categorías de ESTE torneo tiene ya un jugador (teams o waitlist -- la lista de espera
+// también pagó al inscribirse, ver InscripcionTab) -- usado para que un checkout nuevo sepa
+// desde qué nivel de tournamentRegPriceFrom debe arrancar. `excludeCatId` opcional para no
+// contar la categoría que se está por unir en el mismo flujo (ver JoinTeamModal).
+function countRegisteredCategories(categories, tournamentId, identity, excludeCatId) {
+  return categories.filter((c) => {
+    if (c.tournamentId !== tournamentId) return false;
+    if (excludeCatId && c.id === excludeCatId) return false;
+    return [...(c.teams || []), ...(c.waitlist || [])].some((t) =>
+      (t.players || []).some((p) => (identity.userId ? p.userId === identity.userId : p.name.trim().toLowerCase() === identity.name.trim().toLowerCase())));
+  }).length;
 }
 
 // Resolves a court's BASE price for a given time-of-day, honoring an optional list of
@@ -1219,7 +1251,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.55.0";
+const APP_VERSION = "2.56.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3382,7 +3414,12 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
   });
   const selectedExtras = extraEligible.filter((c) => extraIds.includes(c.id));
   const catCount = 1 + selectedExtras.length;
-  const total = tournamentRegPrice(tournament, catCount);
+  // v2.56.0: si currentUser ya está inscrito en otras categorías de este torneo de un checkout
+  // ANTERIOR (nunca cuenta `cat`, la del link -- alreadyInCat ya bloquea ese caso más arriba),
+  // este carrito tampoco debe volver a cobrar precio de 1ra categoría -- mismo criterio que
+  // InscripcionTab (ver tournamentRegPriceFrom).
+  const alreadyRegisteredCount = countRegisteredCategories(categories, tournament.id, { userId: currentUser.id, name: currentUser.name }, cat.id);
+  const total = tournamentRegPriceFrom(tournament, alreadyRegisteredCount, catCount);
   const pricePerCat = total / catCount;
 
   const toggleExtra = (id) => setExtraIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -6991,14 +7028,19 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   }, [registrant?.name]);
 
   const selectedCats = eligible.filter((c) => selectedIds.includes(c.id));
-  // Precio TOTAL del carrito según cuántas categorías se eligieron de una -- cada una suma su
-  // propio precio marginal (ver tournamentRegPrice, v2.33.0: 1ra + 2da + 3ra en adelante,
-  // c/u). pricePerTeam reparte ese total en partes iguales entre los equipos que se van a
+  // Cuántas categorías de este torneo tiene YA el registrant, de un checkout anterior y
+  // separado (v2.56.0) -- si ya pagó su 1ra categoría en algún momento, este carrito nuevo no
+  // debe volver a cobrarle el precio de 1ra categoría (ver tournamentRegPriceFrom).
+  const alreadyRegisteredCount = registrant ? countRegisteredCategories(categories, tournament.id, registrant) : 0;
+  // Precio TOTAL del carrito según cuántas categorías se eligieron de una, sumado a lo que ya
+  // tiene inscrito de antes -- cada una suma su propio precio marginal (ver
+  // tournamentRegPriceFrom, v2.56.0, antes tournamentRegPrice sin memoria de checkouts
+  // pasados). pricePerTeam reparte ese total en partes iguales entre los equipos que se van a
   // crear, para que la suma de priceUsd guardada en cada equipo dé el total real cobrado
   // (buildClientActivity() suma priceUsd por jugador para las estadísticas del club -- si acá
   // se guardara el total completo en cada equipo, esa suma inflaría el ingreso real del
   // carrito por la cantidad de categorías elegidas).
-  const total = selectedCats.length > 0 ? tournamentRegPrice(tournament, selectedCats.length) : 0;
+  const total = selectedCats.length > 0 ? tournamentRegPriceFrom(tournament, alreadyRegisteredCount, selectedCats.length) : 0;
   const pricePerTeam = selectedCats.length > 0 ? total / selectedCats.length : 0;
   const canProceed = selectedCats.length > 0;
 
@@ -7086,12 +7128,21 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
          marginal (v2.33.0, ver tournamentRegPrice), ya no es un precio de bundle fijo. Se
          muestra antes de la lista para que el jugador sepa el trato de entrada, ya que las
          tarjetas de abajo ya no llevan un precio fijo por categoría (depende de cuántas se
-         elijan juntas). */}
-      {[1, 2, 3].some((n) => tournamentRegPrice(tournament, n) > 0) && (
+         elijan juntas). v2.56.0: si el registrant ya tiene categorías de un checkout anterior
+         (alreadyRegisteredCount > 0), estos montos ya arrancan en precio de "categoría
+         adicional" en vez de volver a mostrar el precio de 1ra categoría -- mismo
+         tournamentRegPriceFrom que usa el total real del carrito, así el aviso nunca promete un
+         precio que el checkout no va a cobrar. */}
+      {[1, 2, 3].some((n) => tournamentRegPriceFrom(tournament, alreadyRegisteredCount, n) > 0) && (
         <div className="mb-4">
+          {alreadyRegisteredCount > 0 && (
+            <p className="text-[11px] mb-1.5 font-semibold" style={{ color: COLORS.courtDark }}>
+              Ya estás inscrito en {alreadyRegisteredCount} categoría{alreadyRegisteredCount === 1 ? "" : "s"} de este torneo -- lo que agregues ahora paga precio de categoría adicional.
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             {[1, 2, 3].map((n) => {
-              const price = tournamentRegPrice(tournament, n);
+              const price = tournamentRegPriceFrom(tournament, alreadyRegisteredCount, n);
               if (!price) return null;
               return (
                 <span key={n} className="text-xs px-3 py-1.5 rounded-full font-semibold" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
