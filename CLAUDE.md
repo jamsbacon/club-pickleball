@@ -30,6 +30,16 @@ After bumping the version (above), commit the change and push to `origin/main` r
 
 This does not apply to changes that don't touch the app itself (e.g. editing this file, README, or git/deploy config).
 
+## Verifying against the live app — always clean up test data afterward
+
+There is one shared Supabase project — no separate staging database — so `npm run dev` (local) and the deployed app at `https://club-pickleball.vercel.app/` both read and write the **exact same live data**, including real tournaments with real people and real money. Verifying a change by actually clicking through the app (per the verification workflow) is expected and encouraged, but **any row your own testing creates or changes must be removed/reverted again before you finish that piece of work** — a test category registration, booking, Open Play sign-up, subscription, or role change left behind is exactly as visible to the club and its members as a real one. This bit the project already once: a leftover test registration under the admin's own account (`moralesjtr@gmail.com`, in a tournament category, with the display name literally set to the raw email instead of a real name) sat live in the "Inscritos"/"Pagos" screens until the admin spotted it and had to ask for it to be found and removed (see git history around v2.59.0/v2.60.0).
+
+Practical rules:
+- Prefer a disposable identity for anything that writes data (a throwaway test account, a fake name/email typed into an admin "walk-in" form) over the admin's own real account or a real member's — it's easier to spot and safer to leave a trace of by accident.
+- If you must exercise a flow that only makes sense on real data (e.g. confirming a fix against an actual live registration), undo the specific thing you changed immediately after confirming it works — don't leave "I'll clean this up later" for a following turn.
+- Before ending a turn that touched live data, actively check for anything left over (query the affected table, re-open the relevant admin screen) rather than assuming your own mutations self-cleaned.
+- This is stricter than the general safety rule about confirming destructive actions — reverting your *own* test data does not need to wait for permission the way deleting *the user's* real data does.
+
 ## Architecture
 
 This is a single-page club-management app ("Club OS") for a pickleball club: bookings, tournaments, open plays, classes and memberships, built as **one React component tree in one file**, [src/App.jsx](src/App.jsx) (~3700 lines). [src/main.jsx](src/main.jsx) just mounts `<App />`; there is no router — navigation is a `tab` state string switched in the main component.

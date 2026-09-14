@@ -1290,7 +1290,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.59.0";
+const APP_VERSION = "2.60.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1322,7 +1322,7 @@ const GENDER_LABELS = { masculino: "Masculino", femenino: "Femenino", mixto: "Mi
 // (NewCategoryForm) y el "nivel recomendado" de Open Play/Clase; se agrega al final para no
 // mover el índice de ninguna opción existente (recommendFormat usa esa posición como
 // prioridad de cancha entre categorías -- ver comentario ahí).
-const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open / Profesional", "Master (+50)"];
+const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open", "Master (+50)"];
 
 function makeCategoryName(modality, gender, level) {
   return `${MODALITY_LABELS[modality]} ${GENDER_LABELS[gender]} ${level}`.replace("Individual (single)", "Individual");
@@ -5865,10 +5865,15 @@ function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, 
       <div className="space-y-1.5">
         {categories.map((c) => (
           <button key={c.id} onClick={() => setActiveCatId(c.id)}
-            className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between group"
+            className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2 group"
             style={{ background: activeCat?.id === c.id ? "#EAF3E6" : "transparent", color: activeCat?.id === c.id ? COLORS.courtDark : COLORS.ink, fontWeight: activeCat?.id === c.id ? 700 : 500 }}>
-            <span className="truncate"><CategoryLabel cat={c} /></span>
-            <ChevronRight size={14} className="opacity-40 group-hover:opacity-100" />
+            {/* v2.60.0: nada de `truncate` acá -- un nombre largo ("Open Dobles Mixto") se
+               cortaba a media palabra en el sidebar angosto y quedaba ilegible. Ahora envuelve
+               a la línea siguiente en vez de recortarse; min-w-0 en el span deja que el flex
+               item se angoste de verdad (si no, un texto largo empuja el ancho del botón en
+               vez de partirse). */}
+            <span className="min-w-0"><CategoryLabel cat={c} /></span>
+            <ChevronRight size={14} className="opacity-40 group-hover:opacity-100 shrink-0" />
           </button>
         ))}
         {categories.length === 0 && <p className="text-xs text-gray-400 italic px-1">{emptyHint || "Crea tu primera categoría."}</p>}
@@ -7546,11 +7551,14 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                     return (
                       <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm" style={{ background: "#EEF1F7" }}>
                         <div className="min-w-0">
-                          <p className="font-semibold truncate" style={{ color: COLORS.ink }}>
-                            <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
+                          {/* v2.60.0: sin `truncate` en el nombre -- con un badge "Lista de
+                             espera" pegado al lado, truncar cortaba el badge a media palabra.
+                             Deja que el nombre haga wrap en vez de recortarse. */}
+                          <p className="font-semibold" style={{ color: COLORS.ink }}>
+                            <CategoryLabel cat={c} />{isFull && <span className="text-[9px] font-bold ml-1.5 px-1.5 py-0.5 rounded-full whitespace-nowrap" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Lista de espera</span>}
                           </p>
                           {c.modality !== "individual" && (
-                            <p className="text-[11px] truncate" style={{ color: "#6B7688" }}>Dobles -- invitas a tu pareja después de pagar</p>
+                            <p className="text-[11px]" style={{ color: "#6B7688" }}>Dobles -- invitas a tu pareja después de pagar</p>
                           )}
                         </div>
                         <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
