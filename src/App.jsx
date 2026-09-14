@@ -16,8 +16,26 @@ import clubLogo from "./assets/pickle-hub-logo.png";
 /* =========================================================================
    ID / UTILITY HELPERS
    ========================================================================= */
-let __id = 1;
-const uid = (p = "id") => `${p}_${__id++}`;
+// v2.61.0: CRITICAL FIX -- uid() usaba un contador en memoria (`__id`) que arranca en 1 cada
+// vez que se carga la página. Eso lo hacía ÚNICO solo dentro de UNA pestaña/sesión, nunca entre
+// personas distintas: dos jugadores que abren la app por su cuenta y son cada uno el primero en
+// crear un equipo en SU sesión terminan con el MISMO id ("team_1"). Como categories.teams vive
+// como JSONB (nada de UNIQUE de base de datos que lo hubiera evitado), esto produjo IDs
+// duplicados de verdad en producción -- y filter(t => t.id !== teamId)/find(t => t.id ===
+// teamId) (removePersonFromCategory, resolveJoinInfo, joinTeam...) no distinguen "el" equipo de
+// "los" equipos con ese id: borrar a UNA persona borraba a TODAS las que compartían id por
+// accidente, y un link "invitar a mi pareja" podía resolver al equipo de OTRA persona con el
+// mismo id. Así se perdieron de verdad las inscripciones de Adrián Morales y Jessica Betancourt
+// en Dobles Mixto Open (colisión real en producción, torneo ACP 500) al borrar a alguien más
+// que compartía su mismo id "team_1" -- y "Dobles Femenino 3.5" tenía OTRA colisión viva
+// (Angelica Da Silva / Marianni Maizo) esperando el mismo accidente. Ahora usa crypto.randomUUID
+// (soportado en todo navegador moderno sobre HTTPS o localhost, que es donde corre esta app) --
+// con un respaldo con timestamp+random solo por si ese API no existe -- para que dos IDs jamás
+// vuelvan a coincidir sin importar cuántas sesiones distintas los generen a la vez.
+const uid = (p = "id") => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `${p}_${crypto.randomUUID()}`;
+  return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+};
 
 // Estado de pago (v2.21.0) -- mismo vocabulario para bookings, open_play_registrations,
 // class_registrations y equipos de torneo (categories.teams, JSONB): "por pagar" (efectivo,
@@ -1290,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.60.0";
+const APP_VERSION = "2.61.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2187,6 +2205,22 @@ export default function PickleballTournamentApp() {
     const team = cat.teams.find((t) => t.id === teamId) || cat.waitlist.find((t) => t.id === teamId);
     if (!team) return { error: "Este cupo ya no existe -- puede que lo hayan borrado." };
     if ((team.players || []).length >= 2) return { error: "Este cupo ya se completó -- alguien más se anotó primero." };
+    // v2.61.0: una dupla MIXTA es 1 hombre + 1 mujer, nunca 2 del mismo género -- nada lo
+    // impedía hasta ahora (el filtro de "categorías elegibles" en InscripcionTab/JoinTeamModal
+    // deja pasar CUALQUIER género para "mixto" a propósito, porque cualquiera puede ARRANCAR un
+    // cupo mixto; lo que faltaba validar es que la SEGUNDA persona que se une sea del género
+    // contrario). El team/player guardado no lleva gender (solo vive en profiles/directory), así
+    // que se resuelve buscando el userId de cada quien en `users`. Si no se puede saber el
+    // género de alguno de los dos (invitado sin cuenta, perfil incompleto) no se bloquea -- mismo
+    // criterio de "si no se conoce, no se filtra" que ya usa el resto de la app.
+    if (cat.gender === "mixto") {
+      const creator = team.players[0];
+      const creatorGender = users.find((u) => u.id === creator?.userId)?.gender;
+      const joinerGender = users.find((u) => u.id === player.userId)?.gender;
+      if (creatorGender && joinerGender && creatorGender === joinerGender) {
+        return { error: `Esta categoría es mixta -- necesita 1 hombre y 1 mujer. ${creator?.name || "Quien creó este cupo"} ya está anotado/a, así que no te puedes unir con el mismo género.` };
+      }
+    }
     upsertPlayerRanking(player.name, player.ranking, true);
     const paymentStatus = initialPaymentStatus(checkout.paymentMethod, checkout.priceUsd);
     const joinedPlayer = {
@@ -2247,7 +2281,17 @@ export default function PickleballTournamentApp() {
   const removePersonFromCategory = async (catId, teamId, playerIdx, inWaitlist) => {
     const targetCat = categories.find((c) => c.id === catId);
     if (!targetCat) return { error: "Esta categoría ya no existe." };
-    const removedTeam = (inWaitlist ? targetCat.waitlist : targetCat.teams || [])?.find((t) => t.id === teamId);
+    // v2.61.0: blindaje contra IDs duplicados -- uid() ya no debería producirlos (ver su
+    // comentario, esto es lo que causó que borrar a UNA persona se llevara de encuentro a otras
+    // que por accidente compartían el mismo "team_id"), pero datos viejos de ANTES de ese fix
+    // podrían seguir teniendo colisiones sin detectar. Si el id no es único en esta lista, mejor
+    // no borrar nada que arriesgarse a borrar al equipo equivocado en silencio otra vez.
+    const list = inWaitlist ? (targetCat.waitlist || []) : (targetCat.teams || []);
+    if (list.filter((t) => t.id === teamId).length > 1) {
+      console.error(`removePersonFromCategory: id de equipo duplicado ("${teamId}") en "${targetCat.name}" -- abortado.`);
+      return { error: `Hay más de un equipo con el mismo identificador en "${targetCat.name}" (dato corrupto de una colisión de IDs vieja) -- no se borró nada para no arriesgarse a borrar al equipo equivocado. Avísale al admin de la app para revisarlo a mano.` };
+    }
+    const removedTeam = list.find((t) => t.id === teamId);
     const removedPlayer = removedTeam?.players?.[playerIdx];
     const personKey = removedPlayer ? (removedPlayer.userId || (removedPlayer.name || "").trim().toLowerCase()) : null;
     const tournamentId = targetCat.tournamentId;
@@ -3240,7 +3284,7 @@ export default function PickleballTournamentApp() {
          que se estaba viendo. */}
       {joinParam && !joinModalDismissed && (
         <JoinTeamModal info={resolveJoinInfo(joinParam, categories, tournaments)} currentUser={currentUser} club={club}
-          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking}
+          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking} users={users}
           onClose={() => setJoinModalDismissed(true)} />
       )}
     </div>
@@ -3465,7 +3509,7 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
 // normal de InscripcionTab. Ahora la categoría del link cuenta como una más del mismo carrito
 // -- mismo tournamentRegPrice(tournament, catCount) que usa InscripcionTab, split en partes
 // iguales entre el join y cada equipo nuevo (ver confirm más abajo).
-function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, onClose }) {
+function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, users, onClose }) {
   const [done, setDone] = useState(null); // { names, failedNames, pendingTeams } tras confirmar
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -3487,7 +3531,13 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
   const creator = team.players[0];
   const isOwnTeam = creator.userId === currentUser.id;
   const alreadyInCat = [...cat.teams, ...cat.waitlist].some((t) => t.players.some((p) => p.userId === currentUser.id));
-  const blocked = full || drawStarted || isOwnTeam || alreadyInCat;
+  // v2.61.0: mismo bloqueo que ya aplica joinTeam del lado de la app principal (ver ese
+  // comentario) -- acá se repite SOLO para avisar de entrada, antes de que la persona llegue al
+  // botón de pagar, en vez de dejarla completar el checkout y recién ahí enterarse. joinTeam
+  // sigue siendo la validación real (esto es apenas la UI adelantándose).
+  const genderMismatch = cat.gender === "mixto" && creator.userId && currentUser.gender
+    && users.find((u) => u.id === creator.userId)?.gender === currentUser.gender;
+  const blocked = full || drawStarted || isOwnTeam || alreadyInCat || genderMismatch;
 
   // Mismo criterio de elegibilidad que InscripcionTab.eligible -- otras categorías de ESTE
   // torneo (nunca la del link, esa se une aparte con joinTeam) todavía abiertas y en las que
@@ -3578,6 +3628,7 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
             <p className="text-sm mb-4" style={{ color: "#6B7688" }}>
               {isOwnTeam ? "Este es tu propio cupo -- comparte el link con tu pareja, no contigo mismo."
                 : alreadyInCat ? "Ya estás inscrito en esta categoría con otro equipo."
+                : genderMismatch ? `Esta categoría es mixta -- necesita 1 hombre y 1 mujer. ${creator.name} ya está anotado/a, así que no te puedes unir con el mismo género.`
                 : full ? "Este cupo ya se completó -- alguien más se anotó primero."
                 : "Esta categoría ya cerró su inscripción."}
             </p>
