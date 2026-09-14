@@ -1290,7 +1290,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.58.0";
+const APP_VERSION = "2.59.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5077,6 +5077,16 @@ function AsistenciaHistorial({ openPlays, classes, users, onRemoveOpenPlayRegist
    ========================================================================= */
 function buildPaymentRows(tournaments, categories, openPlays, classes, setTeamPaymentStatus, setPlayerPaymentStatus, setOpenPlayPaymentStatus, setClassPaymentStatus) {
   const rows = [];
+  // Torneos: UNA fila por persona POR TORNEO (v2.59.0, antes una fila por categoría) --
+  // InscripcionTab/JoinTeamModal cobran varias categorías juntas en UN solo checkout y
+  // REPARTEN ese total entre ellas (nunca lo duplican -- ver el comentario en InscripcionTab:
+  // guardar el total completo en cada una inflaría el ingreso real al sumar). Mostrar esas
+  // partes como filas sueltas acá ("$17,50" y "$17,50" en vez de "$35,00") hacía parecer que
+  // eran DOS pagos distintos, cuando en realidad el socio pagó UNA sola vez -- justo la
+  // confusión que este agrupado evita. Se agrupa por (torneo, persona), sumando priceUsd de
+  // cada categoría y uniendo sus nombres -- mismo criterio de identidad que
+  // buildTournamentParticipants (InscritosTab): userId si existe, si no el nombre normalizado.
+  const byTournamentPerson = new Map();
   categories.forEach((cat) => {
     const tournament = tournaments.find((t) => t.id === cat.tournamentId);
     [...(cat.teams || []), ...(cat.waitlist || [])].forEach((team) => {
@@ -5086,21 +5096,53 @@ function buildPaymentRows(tournaments, categories, openPlays, classes, setTeamPa
         // siempre usa los campos de nivel de equipo, sea cual sea el modo de inscripción.
         const ownPayment = idx > 0 && p.paymentStatus !== undefined;
         const partner = (team.players || []).find((_, i) => i !== idx);
-        rows.push({
-          id: `t-${cat.id}-${team.id}-${idx}`, kind: "torneo", kindLabel: "Torneo",
-          name: p.name, contextName: cat.name, subContext: tournament?.name || "",
-          partnerName: partner?.name || null,
-          priceUsd: ownPayment ? p.priceUsd : team.priceUsd,
+        const key = `${cat.tournamentId}::${p.userId || `name:${p.name.trim().toLowerCase()}`}`;
+        const entry = byTournamentPerson.get(key) || {
+          key, name: p.name, subContext: tournament?.name || "", partnerNames: new Set(),
+          priceUsd: 0, catNames: [], createdAt: 0, targets: [], // targets: {catId, teamId, playerIdx, ownPayment, paymentStatus, paymentMethod, reference, proofName}
+        };
+        const createdAt = ownPayment ? p.joinedAt : team.createdAt;
+        entry.priceUsd += Number(ownPayment ? p.priceUsd : team.priceUsd) || 0;
+        entry.catNames.push(cat.name);
+        if (partner) entry.partnerNames.add(partner.name);
+        if (createdAt > entry.createdAt) entry.createdAt = createdAt;
+        entry.targets.push({
+          catId: cat.id, teamId: team.id, playerIdx: idx, ownPayment,
+          paymentStatus: ownPayment ? p.paymentStatus : team.paymentStatus,
           paymentMethod: ownPayment ? p.paymentMethod : team.paymentMethod,
           reference: ownPayment ? p.reference : team.reference,
           proofName: ownPayment ? p.proofName : team.proofName,
-          paymentStatus: ownPayment ? p.paymentStatus : team.paymentStatus,
-          createdAt: ownPayment ? p.joinedAt : team.createdAt,
-          onSetStatus: ownPayment
-            ? (v) => setPlayerPaymentStatus(cat.id, team.id, idx, v)
-            : (v) => setTeamPaymentStatus(cat.id, team.id, v),
         });
+        byTournamentPerson.set(key, entry);
       });
+    });
+  });
+  byTournamentPerson.forEach((entry) => {
+    const pending = entry.targets.filter((t) => t.paymentStatus !== "confirmada");
+    // Método/referencia: se muestran solo si TODAS las partes coinciden (lo normal -- un mismo
+    // checkout reparte el mismo método/referencia a cada categoría) -- si difieren (categorías
+    // pagadas en checkouts separados, quizás por métodos distintos) se omiten en vez de mostrar
+    // un dato que solo sería cierto para una parte del total.
+    const methods = new Set(entry.targets.map((t) => t.paymentMethod).filter(Boolean));
+    const references = new Set(entry.targets.map((t) => t.reference).filter(Boolean));
+    // Si algo quedó sin verificar, se prioriza mostrar "Pago por verificar" sobre "Por pagar"
+    // -- es el estado más urgente (alguien ya mandó comprobante y está esperando revisión), así
+    // nunca se pierde de vista solo porque otra categoría del mismo carrito todavía ni se paga.
+    const status = pending.length === 0 ? "confirmada"
+      : pending.some((t) => t.paymentStatus === "pendiente_verificacion") ? "pendiente_verificacion" : "pendiente_efectivo";
+    rows.push({
+      id: `t-${entry.key}`, kind: "torneo", kindLabel: "Torneo",
+      name: entry.name, contextName: entry.catNames.join(", "), subContext: entry.subContext,
+      partnerName: entry.partnerNames.size > 0 ? [...entry.partnerNames].join(", ") : null,
+      priceUsd: entry.priceUsd,
+      paymentMethod: methods.size === 1 ? [...methods][0] : null,
+      reference: references.size === 1 ? [...references][0] : null,
+      paymentStatus: status, createdAt: entry.createdAt,
+      // Aplica el nuevo estado a TODO lo que siga sin verificar en el grupo de una sola vez
+      // (mismo criterio que InscritosTab/verifyAll) -- nunca toca lo que ya esté "confirmada".
+      onSetStatus: (v) => pending.forEach((t) => (t.ownPayment
+        ? setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, v)
+        : setTeamPaymentStatus(t.catId, t.teamId, v))),
     });
   });
   openPlays.forEach((e) => (e.registrations || []).forEach((r) => {
