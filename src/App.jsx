@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.64.0";
+const APP_VERSION = "2.64.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6330,9 +6330,9 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
                   <td className="py-2.5 px-3 mono">{formatMoney(e.totalUsd)}</td>
                   <td className="py-2.5 px-3 mono">
                     {formatMoney(e.paidUsd)}
-                    {e.paidBs > 0 && <span className="block text-[10px] text-gray-400">≈ {formatMoney(e.paidBs, "Bs. ")}</span>}
+                    {e.paidBs > 0 && <span className="block text-[13px] text-gray-500">≈ {formatMoney(e.paidBs, "Bs. ")}</span>}
                   </td>
-                  <td className="py-2.5 px-3 mono text-xs text-gray-500 whitespace-nowrap">{referenceHint(e)}</td>
+                  <td className="py-2.5 px-3 mono text-sm text-gray-700 whitespace-nowrap">{referenceHint(e)}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{e.lastAt ? formatDateHuman(new Date(e.lastAt).toISOString().slice(0, 10)) : "—"}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap text-gray-500">{methodLabel}</td>
                   <td className="py-2.5 px-3">
