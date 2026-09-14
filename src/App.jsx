@@ -1290,7 +1290,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.57.0";
+const APP_VERSION = "2.58.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2927,6 +2927,51 @@ export default function PickleballTournamentApp() {
     return {};
   };
 
+  // Elimina la cuenta de un socio por completo (v2.58.0, pestaña Usuarios) -- a pedido del
+  // club: borra TODO lo que no tenga el pago verificado (reservas, inscripciones a torneo/Open
+  // Play/clase, suscripciones de membresía por pagar o por verificar) y de verdad revoca su
+  // acceso -- borra también su cuenta de Auth, no solo la fila de perfil, así que no puede
+  // volver a entrar con ese correo. Los pagos YA VERIFICADOS se CONSERVAN a propósito como
+  // historial del club (ver buildUserDeletionSummary/findUnverifiedCategoryEntries) -- nunca se
+  // tocan acá.
+  //
+  // Dos pasos, en este orden:
+  // 1. Categorías de torneo primero, EN EL CLIENTE: reusa removePersonFromCategory (misma
+  //    lógica ya probada de reajuste de precio/promoción de lista de espera) -- replicar eso en
+  //    el servidor sería duplicar lógica delicada que hoy vive en un solo lugar.
+  // 2. Todo lo demás (reservas/suscripciones/inscripciones a Open Play y clase sin verificar,
+  //    push_subscriptions, la fila de profiles, y la cuenta de Auth) va al endpoint
+  //    api/delete-user.js -- tiene que correr con la service_role key porque RLS a propósito no
+  //    deja borrar bookings/subscriptions/profiles desde el cliente, ni con sesión de admin (ver
+  //    el comentario de seguridad de api/send-push.js: ninguna llave privada llega nunca al
+  //    bundle). Ese endpoint además revalida token+rol admin por su cuenta -- nunca confía en lo
+  //    que diga el cliente.
+  const deleteUserAccount = async (targetUserId) => {
+    const unverified = findUnverifiedCategoryEntries(categories, targetUserId);
+    for (const t of unverified) {
+      const result = await removePersonFromCategory(t.catId, t.teamId, t.playerIdx, t.inWaitlist);
+      if (result?.error) return { error: `No se pudo limpiar su inscripción en "${t.catName}" -- intenta de nuevo.` };
+    }
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    if (!token) return { error: "Tu sesión expiró -- vuelve a iniciar sesión e intenta de nuevo." };
+    let res;
+    try {
+      res = await fetch("/api/delete-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ userId: targetUserId }),
+      });
+    } catch {
+      return { error: "No se pudo conectar con el servidor -- revisa tu conexión e intenta de nuevo." };
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: body?.error || "No se pudo eliminar el usuario -- intenta de nuevo." };
+    setProfiles((prev) => prev.filter((u) => u.id !== targetUserId));
+    setDirectory((prev) => prev.filter((u) => u.id !== targetUserId));
+    return {};
+  };
+
   // Auto-edición de perfil (nombre, WhatsApp, zona, DUPR) desde el tab Perfil -- nunca manda
   // role/plan_id, esos solo cambian vía subscribeToPlan o el admin (además, el trigger
   // profiles_prevent_role_self_escalation revierte cualquier intento de cambiar el role propio).
@@ -3102,7 +3147,8 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
-            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} setUserRole={setUserRole} currentUser={currentUser} />
+            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} setUserRole={setUserRole} currentUser={currentUser}
+              deleteUserAccount={deleteUserAccount} categories={categories} bookings={bookings} openPlays={openPlays} classes={classes} />
           )}
 
           {effectiveTab === "estadisticas" && role === "admin" && (
@@ -5168,7 +5214,7 @@ function PagosTab({ tournaments, categories, openPlays, classes, setTeamPaymentS
    verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
    es el historial de altas, no se usa aquí más que para el contador de arriba.
    ========================================================================= */
-function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, setUserRole, currentUser }) {
+function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, setUserRole, currentUser, deleteUserAccount, categories, bookings, openPlays, classes }) {
   const [query, setQuery] = useState("");
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -5189,6 +5235,31 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
     setChangingRole(false);
     if (result?.error) { setRoleError("No se pudo cambiar el rol -- revisa tu conexión e intenta de nuevo."); return; }
     setRoleTarget(null);
+  };
+
+  // Eliminar la cuenta de un socio por completo (v2.58.0) -- mismo patrón de confirmación
+  // explícita que el cambio de rol arriba. Nunca se ofrece sobre la propia fila (ver más abajo)
+  // ni sobre otro admin -- primero hay que quitarle el rol de admin con el botón de arriba
+  // (mismo bloqueo que ya aplica deleteUserAccount/api/delete-user.js del lado del servidor,
+  // esto es solo la UI reflejándolo). El resumen que se muestra en el popup (qué se borra de
+  // verdad vs. qué pago verificado se conserva) sale de buildUserDeletionSummary -- se recalcula
+  // cada vez que se abre para que nunca muestre un número viejo.
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  const deletionSummary = useMemo(
+    () => (deleteTarget ? buildUserDeletionSummary(deleteTarget.id, { categories, bookings, subscriptions, openPlays, classes }) : null),
+    [deleteTarget, categories, bookings, subscriptions, openPlays, classes]
+  );
+
+  const confirmDeleteUser = async () => {
+    if (deleting || !deleteTarget) return;
+    setDeleting(true); setDeleteError("");
+    const result = await deleteUserAccount(deleteTarget.id);
+    setDeleting(false);
+    if (result?.error) { setDeleteError(result.error); return; }
+    setDeleteTarget(null);
   };
 
   const planFor = (u) => (membershipPlans.find((p) => p.id === u.planId) || membershipPlans[0] || null);
@@ -5261,6 +5332,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                 <th className="py-1.5 pr-3">Rol</th>
                 <th className="py-1.5 pr-3">Membresía</th>
                 <th className="py-1.5 pr-3">Miembro desde</th>
+                <th className="py-1.5 pr-3"></th>
               </tr>
             </thead>
             <tbody>
@@ -5268,6 +5340,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                 const plan = planFor(u);
                 const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
                 const isExpired = isPaidPlan && !isActiveMember(u, plan, todayIso);
+                const isSelf = u.id === currentUser.id;
                 return (
                   <tr key={u.id} className="border-t" style={{ borderColor: COLORS.line }}>
                     <td className="py-2 pr-3 font-semibold">{u.name}</td>
@@ -5278,7 +5351,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                     <td className="py-2 pr-3 text-gray-500">{u.zone || "—"}</td>
                     <td className="py-2 pr-3 mono">{u.duprRating != null ? Number(u.duprRating).toFixed(2) : "—"}</td>
                     <td className="py-2 pr-3">
-                      {u.id === currentUser.id ? (
+                      {isSelf ? (
                         <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: "#FBEAE3", color: COLORS.clay }}>Admin (tú)</span>
                       ) : (
                         <button onClick={() => setRoleTarget(u)} title="Cambiar rol"
@@ -5294,6 +5367,14 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                       </span>
                     </td>
                     <td className="py-2 pr-3 text-gray-500">{formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10))}</td>
+                    <td className="py-2 pr-3">
+                      {/* Nunca sobre uno mismo; sobre otro admin hay que quitarle el rol primero
+                         (con el botón de la columna Rol) -- mismo bloqueo que ya aplica
+                         api/delete-user.js del lado del servidor. */}
+                      {!isSelf && u.role !== "admin" && (
+                        <button onClick={() => setDeleteTarget(u)} title="Eliminar usuario" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -5314,6 +5395,23 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
             variant: "danger", onClick: confirmRoleChange,
           }]}
           onCancel={() => { setRoleTarget(null); setRoleError(""); }} />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDeleteModal
+          title={`¿Eliminar a ${deleteTarget.name} permanentemente?`}
+          message={deleteError || [
+            "No podrá volver a entrar con ese correo -- se borra también su cuenta de acceso, no solo su perfil.",
+            deletionSummary.toDelete > 0
+              ? `Se borran ${deletionSummary.toDelete} registro${deletionSummary.toDelete === 1 ? "" : "s"} sin verificar (reservas, inscripciones a torneo/Open Play/clase, membresías por pagar o por verificar).`
+              : "No tiene ningún registro sin verificar que borrar.",
+            deletionSummary.toKeep > 0
+              ? `Se conservan ${deletionSummary.toKeep} registro${deletionSummary.toKeep === 1 ? "" : "s"} con pago YA VERIFICADO (${formatMoney(deletionSummary.toKeepUsd)}) como historial del club, sin quedar asociados a su cuenta.`
+              : null,
+            "Esta acción no se puede deshacer.",
+          ].filter(Boolean).join(" ")}
+          options={[{ label: deleting ? "Eliminando…" : "Eliminar permanentemente", variant: "danger", onClick: confirmDeleteUser }]}
+          onCancel={() => { setDeleteTarget(null); setDeleteError(""); }} />
       )}
     </div>
   );
@@ -5862,6 +5960,61 @@ function buildTournamentParticipants(categories) {
 }
 
 const METHOD_LABELS = { movil: "Pago Móvil", efectivo: "Efectivo" };
+
+// Resumen de qué se borra y qué se conserva al eliminar la cuenta de un usuario (v2.58.0, ver
+// UsuariosTab/deleteUserAccount) -- recorre todo lo que puede llevar su userId (categorías de
+// cualquier torneo, reservas, inscripciones a Open Play/clase, suscripciones de membresía) y
+// separa cada registro en dos grupos según su estado de pago: los que YA tienen el pago
+// verificado se PRESERVAN (es plata que de verdad entró al club -- borrarla falsearía los
+// totales históricos de Estadísticas), todo lo demás (por pagar, por verificar) se borra de
+// verdad. Mismo criterio "confirmada" que usa el resto de la app. Puramente informativo -- solo
+// arma los números para el popup de confirmación, no borra nada (eso lo hace deleteUserAccount).
+function buildUserDeletionSummary(userId, { categories, bookings, subscriptions, openPlays, classes }) {
+  let toDelete = 0, toKeep = 0, toKeepUsd = 0;
+  const tally = (verified, usd) => { if (verified) { toKeep++; toKeepUsd += Number(usd) || 0; } else { toDelete++; } };
+
+  categories.forEach((cat) => {
+    const scan = (list) => list.forEach((team) => {
+      (team.players || []).forEach((p, idx) => {
+        if (p.userId !== userId) return;
+        const ownPayment = idx > 0 && p.paymentStatus !== undefined;
+        tally((ownPayment ? p.paymentStatus : team.paymentStatus) === "confirmada", ownPayment ? p.priceUsd : team.priceUsd);
+      });
+    });
+    scan(cat.teams || []); scan(cat.waitlist || []);
+  });
+  bookings.forEach((b) => { if (b.userId === userId) tally(b.status === "confirmada", b.priceUsd); });
+  subscriptions.forEach((s) => { if (s.userId === userId) tally(s.paymentStatus === "confirmada", s.priceUsd); });
+  openPlays.forEach((o) => (o.registrations || []).forEach((r) => { if (r.userId === userId) tally(r.paymentStatus === "confirmada", r.priceUsd); }));
+  classes.forEach((c) => (c.registrations || []).forEach((r) => { if (r.userId === userId) tally(r.paymentStatus === "confirmada", r.priceUsd); }));
+
+  return { toDelete, toKeep, toKeepUsd };
+}
+
+// Todas las inscripciones de torneo de un usuario que TODAVÍA no tienen el pago verificado --
+// lo único que deleteUserAccount debe borrar de `categories` antes de eliminar su cuenta (las
+// verificadas se dejan intactas a propósito, ver buildUserDeletionSummary arriba). Mismo shape
+// {catId, teamId, playerIdx, inWaitlist} que ya consume removePersonFromCategory (ver
+// InscritosTab) -- borrar cada entrada reusa exactamente esa misma lógica ya probada (reajuste
+// de precio de las categorías que le quedan a la persona, promoción de lista de espera) en vez
+// de duplicarla.
+function findUnverifiedCategoryEntries(categories, userId) {
+  const out = [];
+  categories.forEach((cat) => {
+    const scan = (list, inWaitlist) => list.forEach((team) => {
+      (team.players || []).forEach((p, idx) => {
+        if (p.userId !== userId) return;
+        const ownPayment = idx > 0 && p.paymentStatus !== undefined;
+        const status = ownPayment ? p.paymentStatus : team.paymentStatus;
+        if (status === "confirmada") return;
+        out.push({ catId: cat.id, catName: cat.name, teamId: team.id, playerIdx: idx, inWaitlist });
+      });
+    });
+    scan(cat.teams || [], false);
+    scan(cat.waitlist || [], true);
+  });
+  return out;
+}
 
 function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory }) {
   const [search, setSearch] = useState("");
