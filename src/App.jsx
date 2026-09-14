@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.61.0";
+const APP_VERSION = "2.62.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1931,7 +1931,7 @@ export default function PickleballTournamentApp() {
 
   const mapCategoryRow = (r) => ({
     id: r.id, tournamentId: r.tournament_id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
-    maxTeams: r.max_teams, seedMode: r.seed_mode, bestOf: r.best_of, bracketSize: r.bracket_size,
+    maxTeams: r.max_teams, minTeams: r.min_teams, seedMode: r.seed_mode, bestOf: r.best_of, bracketSize: r.bracket_size,
     teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
     drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
   });
@@ -2062,7 +2062,7 @@ export default function PickleballTournamentApp() {
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
     return persistCategoryWrite(id, {
-      name: updated.name, max_teams: updated.maxTeams, seed_mode: updated.seedMode,
+      name: updated.name, max_teams: updated.maxTeams, min_teams: updated.minTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
       teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
@@ -2108,10 +2108,10 @@ export default function PickleballTournamentApp() {
     });
   };
 
-  const addCategory = async (modality, gender, level, maxTeams) => {
+  const addCategory = async (modality, gender, level, maxTeams, minTeams) => {
     const { data: row, error } = await supabase.from("categories").insert({
       tournament_id: tournament.id, name: makeCategoryName(modality, gender, level),
-      modality, gender, level, max_teams: maxTeams ? Number(maxTeams) : null,
+      modality, gender, level, max_teams: maxTeams ? Number(maxTeams) : null, min_teams: minTeams ? Number(minTeams) : null,
       seed_mode: "ranking", best_of: 3, bracket_size: 4,
       teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
     }).select().single();
@@ -3069,7 +3069,7 @@ export default function PickleballTournamentApp() {
     // cola de pendientes por su cuenta (v2.34.0) en vez de perderse toda la tanda junta.
     clone.forEach((c) => persistCategoryWrite(c.id, {
       tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
-      max_teams: c.maxTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
+      max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
       draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
       teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
     }, true));
@@ -3240,7 +3240,7 @@ export default function PickleballTournamentApp() {
                 tournament={tournament} setTournament={updateTournament} uploadTournamentImage={uploadTournamentImage} dates={dates}
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
-                addCategory={addCategory} removeCategory={removeCategory}
+                addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
                 addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
@@ -5776,7 +5776,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, addTeam, removePersonFromCategory, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -5854,7 +5854,7 @@ function TorneosSection(props) {
 
       {subTab === "categorias" && role === "admin" && (
         <CategoriasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
-          addCategory={addCategory} removeCategory={removeCategory} setSubTab={setSubTab} />
+          addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory} setSubTab={setSubTab} />
       )}
 
       {subTab === "inscritos" && role === "admin" && (
@@ -5950,10 +5950,37 @@ function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, 
 // solo quedó un resumen de 3 líneas. En vez de crear en el sidebar angosto (donde el
 // formulario completo -- modalidad/género/nivel/cupo -- quedaba apretado), "Crear
 // categoría" ahora abre el formulario EN ese panel grande, con espacio de sobra.
-function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory, setSubTab }) {
+function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, removeCategory, updateCategory, setSubTab }) {
   const [showNew, setShowNew] = useState(categories.length === 0);
   const startCreate = () => setShowNew(true);
   const pickCat = (id) => { setShowNew(false); setActiveCatId(id); };
+
+  // Editar cupo mínimo/máximo de una categoría YA creada (v2.62.0) -- a pedido del club, antes
+  // ambos números se fijaban una sola vez al crear y no había forma de ajustarlos después sin
+  // borrar y recrear la categoría (lo que hubiera borrado a todos los ya inscritos). Reusa
+  // updateCategory (mismo mutador genérico que ya persiste el resto de los campos de una
+  // categoría) y CategoryCapacityFields (mismos inputs/unidad que "Nueva categoría", ver ahí).
+  const [editingCapacity, setEditingCapacity] = useState(false);
+  const [editMax, setEditMax] = useState("");
+  const [editMin, setEditMin] = useState("");
+  const [savingCapacity, setSavingCapacity] = useState(false);
+  useEffect(() => { setEditingCapacity(false); }, [activeCat?.id]);
+  const startEditCapacity = () => {
+    setEditMax(activeCat.maxTeams ?? "");
+    setEditMin(activeCat.minTeams ?? "");
+    setEditingCapacity(true);
+  };
+  const saveCapacity = async () => {
+    if (savingCapacity) return;
+    setSavingCapacity(true);
+    await updateCategory(activeCat.id, (c) => {
+      c.maxTeams = editMax === "" ? null : Number(editMax);
+      c.minTeams = editMin === "" ? null : Number(editMin);
+      return c;
+    });
+    setSavingCapacity(false);
+    setEditingCapacity(false);
+  };
 
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
@@ -5984,9 +6011,29 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
                     </span>
                   )}
                 </div>
+                {activeCat.minTeams > 0 && (
+                  <p className="text-xs mt-2" style={{ color: "#6B7688" }}>
+                    Necesita al menos {activeCat.minTeams} {activeCat.modality === "individual" ? "jugador" + (activeCat.minTeams === 1 ? "" : "es") : "dupla" + (activeCat.minTeams === 1 ? "" : "s")} para jugarse.
+                  </p>
+                )}
               </div>
-              <button onClick={() => removeCategory(activeCat.id)} className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={18} /></button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button onClick={startEditCapacity} title="Editar cupo mínimo/máximo" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>
+                <button onClick={() => removeCategory(activeCat.id)} title="Borrar categoría" className="text-gray-300 hover:text-red-500"><Trash2 size={18} /></button>
+              </div>
             </div>
+
+            {editingCapacity && (
+              <div className="mt-5 pt-5 space-y-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <CategoryCapacityFields modality={activeCat.modality} maxTeams={editMax} setMaxTeams={setEditMax} minTeams={editMin} setMinTeams={setEditMin} />
+                <div className="flex gap-2">
+                  <button onClick={saveCapacity} disabled={savingCapacity} style={{ background: COLORS.court, color: "#fff" }} className="px-5 py-2 rounded-xl text-sm font-bold disabled:opacity-60">
+                    {savingCapacity ? "Guardando…" : "Guardar cupo"}
+                  </button>
+                  <button onClick={() => setEditingCapacity(false)} className="px-4 py-2 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+                </div>
+              </div>
+            )}
 
             <div className="grid sm:grid-cols-2 gap-3 mt-6">
               <button onClick={() => setSubTab?.("duplas")} className="text-left px-4 py-3.5 rounded-xl transition-opacity hover:opacity-90" style={{ background: "#EAF3E6" }}>
@@ -6323,11 +6370,43 @@ function Segmented({ options, value, onChange }) {
   );
 }
 
+// Campos de cupo mínimo/máximo compartidos entre "Nueva categoría" y "Editar cupo" (v2.62.0) --
+// misma unidad que categoryMaxPlayers (duplas en dobles, jugadores en individual, ver su
+// comentario) y mismo texto de ayuda en los dos lados para no explicarlo dos veces distinto.
+// El mínimo es solo de referencia -- no bloquea ninguna inscripción, es para que el admin sepa
+// cuántas hacen falta para que la categoría se juegue (no hay ninguna lógica automática todavía
+// que la cancele/avise si no llega).
+function CategoryCapacityFields({ modality, maxTeams, setMaxTeams, minTeams, setMinTeams }) {
+  const unit = modality === "individual" ? "jugadores" : "duplas";
+  return (
+    <>
+      <div className="grid sm:grid-cols-2 gap-5">
+        <div>
+          <Label>Cupo mínimo de {unit} (opcional)</Label>
+          <input type="number" min={0} style={inputStyle} value={minTeams} onChange={(e) => setMinTeams(e.target.value)} placeholder="Sin mínimo" />
+        </div>
+        <div>
+          <Label>Cupo máximo de {unit} (opcional)</Label>
+          <input type="number" min={modality === "individual" ? 1 : 2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
+        </div>
+      </div>
+      <p className="text-xs -mt-3" style={{ color: "#6B7688" }}>
+        {modality === "individual"
+          ? "Cada cupo es para 1 jugador."
+          : `Cada cupo es para 1 dupla (2 jugadores)${maxTeams ? ` -- ${maxTeams} duplas = ${Number(maxTeams) * 2} jugadores en total` : ""}.`}
+        {" "}Al llenarse el máximo, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.
+        {minTeams ? ` El mínimo es solo de referencia -- no bloquea inscripciones.` : ""}
+      </p>
+    </>
+  );
+}
+
 function NewCategoryForm({ onCreate, onCancel }) {
   const [modality, setModality] = useState("dobles");
   const [gender, setGender] = useState("mixto");
   const [level, setLevel] = useState(LEVEL_OPTIONS[2]);
   const [maxTeams, setMaxTeams] = useState("");
+  const [minTeams, setMinTeams] = useState("");
   const previewName = makeCategoryName(modality, gender, level);
 
   // "Mixto" es un género de pareja (un hombre + una mujer por equipo) -- no existe en
@@ -6354,35 +6433,20 @@ function NewCategoryForm({ onCreate, onCancel }) {
               options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }]} />
           </div>
         </div>
-        <div className="grid sm:grid-cols-2 gap-5">
-          <div>
-            <Label>3. Nivel de habilidad</Label>
-            <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
-              {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
-            </select>
-          </div>
-          <div>
-            {/* v2.57.0: "equipos" confundía -- en dobles cada cupo es una DUPLA de 2
-               jugadores (16 duplas = 32 jugadores), no 1 persona por cupo. En individual el
-               cupo SÍ es 1 jugador por número, así que el campo pide directamente
-               "jugadores" ahí en vez de "duplas". */}
-            <Label>{modality === "individual" ? "Cupo máximo de jugadores (opcional)" : "Cupo máximo de duplas (opcional)"}</Label>
-            <input type="number" min={modality === "individual" ? 1 : 2} style={inputStyle} value={maxTeams} onChange={(e) => setMaxTeams(e.target.value)} placeholder="Sin límite" />
-          </div>
+        <div>
+          <Label>3. Nivel de habilidad</Label>
+          <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
+            {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
         </div>
-        <p className="text-xs -mt-3" style={{ color: "#6B7688" }}>
-          {modality === "individual"
-            ? "Cada cupo es para 1 jugador."
-            : `Cada cupo es para 1 dupla (2 jugadores)${maxTeams ? ` -- ${maxTeams} duplas = ${Number(maxTeams) * 2} jugadores en total` : ""}.`}
-          {" "}Al llenarse el cupo, los siguientes inscritos entran a una lista de espera y suben automáticamente si alguien se retira.
-        </p>
+        <CategoryCapacityFields modality={modality} maxTeams={maxTeams} setMaxTeams={setMaxTeams} minTeams={minTeams} setMinTeams={setMinTeams} />
 
         <div className="text-sm px-4 py-3 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           Nombre automático: <b>{previewName}</b>
         </div>
         <p className="text-xs" style={{ color: "#6B7688" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
         <div className="flex gap-2 pt-1">
-          <button onClick={() => onCreate(modality, gender, level, maxTeams)}
+          <button onClick={() => onCreate(modality, gender, level, maxTeams, minTeams)}
             style={{ background: COLORS.court, color: COLORS.chalk }}
             className="px-6 py-2.5 rounded-xl font-bold text-sm">Crear categoría</button>
           <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
