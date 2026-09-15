@@ -8,7 +8,7 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye, Download
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye, Download, AlertCircle
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -1371,13 +1371,20 @@ function findScheduleConflicts(categories) {
   return Object.values(bySlot).filter((entries) => new Set(entries.map((e) => e.matchId)).size > 1);
 }
 
-// Valida un movimiento manual ANTES de confirmarlo (grid de CalendarioTab, tap-destino):
-// la cancha destino debe estar libre en ese bloque (cruzando cualquier módulo -- reservas,
-// open plays, clases u otro partido de torneo, vía el mismo `occupiedKeys` que usa el resto
-// de la app) y ningún jugador de este partido puede tener ya otro partido a esa hora. El
-// propio bloque de origen del partido no cuenta como "ocupado" para sí mismo (si el destino
-// es el mismo horario/cancha que ya tenía, o si se mueve dentro del mismo horario a otra
-// cancha, no debe autobloquearse).
+// Valida un movimiento manual ANTES de confirmarlo (tablero de CalendarioTab, tap-destino o
+// arrastrar-y-soltar): la cancha destino debe estar libre en ese bloque (cruzando cualquier
+// módulo -- reservas, open plays, clases u otro partido de torneo YA FIJADO, vía el mismo
+// `occupiedKeys` que usa el resto de la app) -- eso sigue bloqueando de verdad, es físicamente
+// imposible jugar dos cosas en la misma cancha a la misma hora. El propio bloque de origen del
+// partido no cuenta como "ocupado" para sí mismo.
+//
+// v2.71.0: que un jugador quede con dos partidos a la misma hora YA NO bloquea el movimiento
+// -- antes sí, pero el tablero ahora marca ese choque con un ícono rojo en ambas tarjetas
+// (ver `findScheduleConflicts` + CalendarioTab), así que tiene más sentido dejar que el
+// organizador lo haga a propósito (o lo note y lo corrija él mismo) que impedírselo de una.
+// Sigue devolviendo el motivo en `warning` (no en `reason`, que ahora es solo para lo que sí
+// bloquea) para que quien llama pueda avisar del choque en el momento, además del ícono
+// persistente en la tarjeta.
 function checkMoveConflict(match, target, categories, occupiedKeys) {
   const targetKey = blockKey(target.courtId, target.day, timeToMinutes(target.time));
   const ownKey = match.day && match.courtId ? blockKey(match.courtId, match.day, timeToMinutes(match.time)) : null;
@@ -1397,7 +1404,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
       const tb = c.teams.find((t) => t.id === m.teamBId);
       const collision = [...(ta?.players || []), ...(tb?.players || [])]
         .find((p) => myKeys.has((p.userId || p.name || "").trim().toLowerCase()));
-      if (collision) return { ok: false, reason: `${collision.name} ya tiene otro partido a esa hora (${c.name}).` };
+      if (collision) return { ok: true, warning: `${collision.name} ya tiene otro partido a esa hora (${c.name}).` };
     }
   }
   return { ok: true };
@@ -1406,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.70.0";
+const APP_VERSION = "2.71.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7577,7 +7584,59 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   scheduled.filter((m) => m.day === day).forEach((m) => {
     (dayMatchesByCourt[m.courtId] = dayMatchesByCourt[m.courtId] || []).push(m);
   });
-  Object.values(dayMatchesByCourt).forEach((list) => list.sort((a, b) => a.time.localeCompare(b.time)));
+
+  // Ícono rojo de choque por partido (v2.71.0) -- mismo cálculo que ya usaba el aviso de texto
+  // de arriba (`conflicts`, de findScheduleConflicts), solo que acá se indexa por matchId para
+  // poder marcar la tarjeta puntual en el tablero, no solo listarlo aparte. El texto del
+  // tooltip nombra con quién choca, no solo que choca.
+  const conflictByMatch = useMemo(() => {
+    const map = {};
+    conflicts.forEach((group) => {
+      group.forEach((e) => {
+        const others = group.filter((x) => x.matchId !== e.matchId).map((x) => `${x.playerName} (${x.catName})`);
+        map[e.matchId] = `${e.playerName} ya tiene otro partido a esta hora: ${others.join(", ")}.`;
+      });
+    });
+    return map;
+  }, [conflicts]);
+
+  // Aviso flotante para arrastrar-y-soltar (v2.71.0) -- rojo si el movimiento se bloqueó de
+  // verdad (cancha físicamente ocupada), ámbar si se permitió pero choca un jugador (mismo
+  // caso que marca el ícono en la tarjeta, solo que este aviso es lo primero que se ve apenas
+  // sueltas). Se borra solo a los 5s para no quedar pegado en pantalla.
+  const [notice, setNotice] = useState(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Arrastrar-y-soltar (v2.71.0) -- nativo del navegador (HTML5 drag & drop), sin librería
+  // nueva. El id del partido viaja en `dataTransfer` (el mecanismo real de HTML5 DnD para
+  // pasar el "payload" de un drag), NO en un estado de React: un estado leído desde el closure
+  // del onDrop puede quedar viejo si React todavía no volvió a renderizar entre el dragstart y
+  // el drop (pasó de verdad al probarlo -- el drop veía el partido arrastrado como `undefined`
+  // aunque el dragstart sí lo había guardado bien un instante antes). `dataTransfer` no tiene
+  // ese problema: el navegador lo entrega tal cual se guardó, sin pasar por React.
+  //
+  // Solo se puede soltar sobre una casilla VACÍA del tablero (una que ya tiene partido no
+  // recibe el drop -- swapear dos partidos de una no está cubierto, hay que sacar uno primero).
+  // "Editar manualmente" sigue intacto aparte -- en el teléfono, donde arrastrar no funciona,
+  // sigue siendo la única forma.
+  const dragMatch = (m) => (e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", m.id); };
+  const dropOnCell = (court, time) => (e) => {
+    e.preventDefault();
+    const matchId = e.dataTransfer.getData("text/plain");
+    const m = scheduled.find((x) => x.id === matchId);
+    if (!m || !isAdmin) return;
+    const target = { day, time, courtId: court.id };
+    if (m.day === target.day && m.time === target.time && m.courtId === target.courtId) return;
+    const res = checkMoveConflict(m, target, categories, occupiedKeys);
+    if (!res.ok) { setNotice({ type: "error", text: res.reason }); return; }
+    moveMatch(m.categoryId, m.id, target);
+    setNotice(res.warning ? { type: "warning", text: res.warning } : null);
+  };
+  const allowDrop = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; };
 
   const selectMatch = (m) => { setSelectedMatch(m); setMoveTarget({ day: m.day, time: m.time, courtId: m.courtId }); setMoveError(""); };
   const cancelMove = () => { setSelectedMatch(null); setMoveError(""); };
@@ -7587,6 +7646,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     if (!res.ok) { setMoveError(res.reason); return; }
     moveMatch(selectedMatch.categoryId, selectedMatch.id, moveTarget);
     setSelectedMatch(null); setMoveError("");
+    if (res.warning) setNotice({ type: "warning", text: res.warning });
   };
 
   return (
@@ -7706,33 +7766,59 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                   </button>
                 )}
               </div>
+              {notice && (
+                <div className="mb-3 text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5"
+                  style={{ background: notice.type === "error" ? "#FCE9E4" : "#FBF3E4", color: notice.type === "error" ? "#B23A1B" : "#8A5A16" }}>
+                  <AlertTriangle size={14} /> {notice.text}
+                </div>
+              )}
+              {isAdmin && tournamentCourts.length > 0 && (
+                <p className="text-[11px] text-gray-400 mb-2">En computador puedes arrastrar un partido a una casilla vacía. En el teléfono usa "Editar manualmente".</p>
+              )}
               {tournamentCourts.length === 0 ? (
                 <p className="text-sm text-gray-400">Agrega al menos una cancha en Club (o en Generalidades del torneo).</p>
               ) : (
                 <div className="overflow-x-auto pb-1">
                   <div className="flex gap-2.5" style={{ width: "max-content" }}>
                     {tournamentCourts.map((court) => {
-                      const list = dayMatchesByCourt[court.id] || [];
+                      const byTime = {};
+                      (dayMatchesByCourt[court.id] || []).forEach((m) => { byTime[m.time] = m; });
                       return (
                         <div key={court.id} className="shrink-0" style={{ width: 200 }}>
                           <div className="rounded-t-xl px-3 py-2 font-bold text-sm text-center" style={{ background: COLORS.court, color: "#fff" }}>{court.name}</div>
                           <div className="rounded-b-xl divide-y" style={{ border: `1px solid ${COLORS.line}`, borderTop: "none" }}>
-                            {list.map((m) => {
+                            {timeSlotOptions.map((t) => {
+                              const m = byTime[t];
+                              if (!m) {
+                                // Casilla vacía -- único destino válido para soltar un partido arrastrado
+                                // (una casilla con partido no recibe onDrop: no se soportan swaps de una).
+                                return (
+                                  <div key={t} onDragOver={isAdmin ? allowDrop : undefined} onDrop={isAdmin ? dropOnCell(court, t) : undefined}
+                                    className="px-2 flex items-center" style={{ minHeight: 26, background: "transparent" }}>
+                                    <span className="text-[9px] text-gray-300 mono">{formatTimeAmPm(t)}</span>
+                                  </div>
+                                );
+                              }
                               const isSelected = selectedMatch?.id === m.id;
                               const clickable = isAdmin && moveMode;
                               const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
+                              const conflictMsg = conflictByMatch[m.id];
                               return (
-                                <div key={m.id} onClick={clickable ? () => selectMatch(m) : undefined}
+                                <div key={m.id} draggable={isAdmin} onDragStart={isAdmin ? dragMatch(m) : undefined}
+                                  onClick={clickable ? () => selectMatch(m) : undefined}
                                   className="p-2 text-xs"
-                                  style={{ cursor: clickable ? "pointer" : "default", background: isSelected ? "#FBF3E4" : cc.bg }}>
+                                  style={{ cursor: isAdmin ? (clickable ? "pointer" : "grab") : "default", background: isSelected ? "#FBF3E4" : cc.bg }}>
                                   <div className="flex items-center justify-between gap-1">
                                     <span className="font-bold mono">{formatTimeAmPm(m.time)}</span>
-                                    {isAdmin && m.locked && (
-                                      <button type="button" onClick={(e) => { e.stopPropagation(); unlockMatch(m.categoryId, m.id); }}
-                                        title="Fijado -- clic para liberar" style={{ color: COLORS.clay }}>
-                                        <Lock size={11} />
-                                      </button>
-                                    )}
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      {conflictMsg && <span title={conflictMsg}><AlertCircle size={13} color="#D3242A" /></span>}
+                                      {isAdmin && m.locked && (
+                                        <button type="button" onClick={(e) => { e.stopPropagation(); unlockMatch(m.categoryId, m.id); }}
+                                          title="Fijado -- clic para liberar" style={{ color: COLORS.clay }}>
+                                          <Lock size={11} />
+                                        </button>
+                                      )}
+                                    </div>
                                   </div>
                                   <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: cc.text }}>{m.catName} · {roundTag(m)}</div>
                                   <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
@@ -7741,7 +7827,6 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                 </div>
                               );
                             })}
-                            {list.length === 0 && <p className="text-[11px] text-gray-400 p-3">Sin partidos este día.</p>}
                           </div>
                         </div>
                       );
