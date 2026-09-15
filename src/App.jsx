@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.74.2";
+const APP_VERSION = "2.74.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7710,27 +7710,44 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   // origen cierra el hueco que deja el partido movido (todo lo de después se corre un puesto
   // hacia arriba, nadie queda flotando a mitad del día sin motivo) y la de destino le abre
   // campo empujando hacia abajo todo lo que había desde el puesto elegido hasta el próximo
-  // hueco libre. Si no hay ningún hueco libre en esa dirección, no hay dónde meter el partido
-  // sin sacar a alguien del día por completo -- se rechaza (ok:false) en vez de hacerlo.
+  // hueco libre.
+  //
+  // v2.74.3: con un torneo de verdad (varias categorías compartiendo las mismas 4 canchas todo
+  // el día) casi nunca hay un hueco libre más abajo en la cancha destino -- exigirlo hacía que
+  // esta función rechazara CASI todos los movimientos entre canchas, justo lo que se estaba
+  // probando. Si no hay hueco, el partido que quedaría "sin casa" al final de la cancha
+  // destino se manda al puesto que el movimiento acaba de dejar libre en la cancha ORIGEN --
+  // como un intercambio en cadena entre las dos puntas, nadie se queda sin horario ese día.
   const reorderAcrossColumns = (m, sourceCourtId, sourceIndex, destCourt, destIndex) => {
     const sourceByTime = {};
     (dayMatchesByCourt[sourceCourtId] || []).forEach((x) => { sourceByTime[x.time] = x; });
     const sourceSlots = timeSlotOptions.map((t) => sourceByTime[t] || null);
     sourceSlots.splice(sourceIndex, 1);
-    sourceSlots.push(null);
+    sourceSlots.push(null); // el último puesto de origen queda libre -- ver `bumped` abajo
 
     const destByTime = {};
     (dayMatchesByCourt[destCourt.id] || []).forEach((x) => { destByTime[x.time] = x; });
     const destSlots = timeSlotOptions.map((t) => destByTime[t] || null);
     let freeAt = -1;
     for (let i = destIndex; i < destSlots.length; i++) { if (!destSlots[i]) { freeAt = i; break; } }
-    if (freeAt === -1) return { ok: false };
+
+    let bumped = null;
+    if (freeAt === -1) {
+      bumped = destSlots[destSlots.length - 1];
+      freeAt = destSlots.length - 1;
+    }
     for (let i = freeAt; i > destIndex; i--) destSlots[i] = destSlots[i - 1];
     destSlots[destIndex] = m;
 
+    if (bumped) {
+      const sourceFreeIndex = sourceSlots.length - 1;
+      if (sourceSlots[sourceFreeIndex]) return { ok: false }; // no debería pasar nunca, defensivo
+      sourceSlots[sourceFreeIndex] = bumped;
+    }
+
     const updates = [];
     sourceSlots.forEach((x, i) => {
-      if (x && x.time !== timeSlotOptions[i]) updates.push({ categoryId: x.categoryId, matchId: x.id, day, time: timeSlotOptions[i], courtId: sourceCourtId });
+      if (x && (x.time !== timeSlotOptions[i] || x.courtId !== sourceCourtId)) updates.push({ categoryId: x.categoryId, matchId: x.id, day, time: timeSlotOptions[i], courtId: sourceCourtId });
     });
     destSlots.forEach((x, i) => {
       if (!x) return;
@@ -7768,7 +7785,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     }
     // Cancha distinta -- empuja en cadena en las dos, ver reorderAcrossColumns arriba.
     const res = reorderAcrossColumns(m, m.courtId, fromIndex, court, index);
-    if (!res.ok) { setNotice({ type: "error", text: "No hay un horario libre en esa cancha para abrirle campo al partido -- todos los puestos de ahí en adelante están ocupados." }); return; }
+    if (!res.ok) { setNotice({ type: "error", text: "No se pudo mover el partido -- intenta de nuevo." }); return; }
     reorderColumn(res.updates);
     setNotice(null);
   };
