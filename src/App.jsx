@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.72.0";
+const APP_VERSION = "2.73.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2257,6 +2257,27 @@ export default function PickleballTournamentApp() {
       moveMatch(a.categoryId, a.id, bSlot);
       moveMatch(b.categoryId, b.id, aSlot);
     }
+  };
+  // Reordenar arrastrando DENTRO de la misma cancha (v2.73.0) -- a diferencia de swapMatches
+  // (que solo intercambia DOS), acá el partido soltado se inserta en el puesto elegido y TODOS
+  // los que quedaban entre su horario viejo y el nuevo se corren un puesto para abrirle campo
+  // -- el efecto de "empujar" que pidió el club, en vez de solo cambiarle el lugar a uno.
+  // `updates` ya viene armado por CalendarioTab (ver reorderWithinColumn ahí) como una lista
+  // plana de {categoryId, matchId, day, time, courtId}; acá solo se agrupa por categoría para
+  // que cada una se guarde en UN solo updateCategory (mismo motivo que swapMatches: dos
+  // updateCategory seguidos a la misma categoría se pisarían entre sí).
+  const reorderColumn = (updates) => {
+    const byCategory = {};
+    updates.forEach((u) => { (byCategory[u.categoryId] = byCategory[u.categoryId] || []).push(u); });
+    Object.entries(byCategory).forEach(([catId, ups]) => {
+      updateCategory(catId, (c) => {
+        c.matches = c.matches.map((m) => {
+          const u = ups.find((x) => x.matchId === m.id);
+          return u ? { ...m, day: u.day, time: u.time, courtId: u.courtId, locked: true } : m;
+        });
+        return c;
+      });
+    });
   };
   // "Limpiar este día" del panel Planificar (v2.69.0) -- vacía el horario de TODAS las
   // categorías del torneo activo para esa fecha puntual (incluidos los partidos fijados a
@@ -3540,7 +3561,7 @@ export default function PickleballTournamentApp() {
                 matchDuration={matchDuration} breakM={breakM}
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
-                occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} swapMatches={swapMatches}
+                occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} swapMatches={swapMatches} reorderColumn={reorderColumn}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
@@ -6071,7 +6092,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
-    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, swapMatches,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, swapMatches, reorderColumn,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab,
   } = props;
@@ -6177,7 +6198,7 @@ function TorneosSection(props) {
         <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} role={role}
           scheduleInfo={scheduleInfo} tournament={tournament} dates={dates}
           matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM}
-          occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} swapMatches={swapMatches} />
+          occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} swapMatches={swapMatches} reorderColumn={reorderColumn} />
       )}
 
       {subTab === "resultados" && (
@@ -7552,7 +7573,7 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
   );
 }
 
-function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, swapMatches, role }) {
+function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, swapMatches, reorderColumn, role }) {
   const isAdmin = role === "admin";
   // "Editar manualmente": modo tap-origen → tap-destino para reprogramar un partido ya
   // agendado. `selectedMatch` es el partido "origen" elegido; `moveTarget` el destino en
@@ -7636,53 +7657,86 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     return () => clearTimeout(t);
   }, [notice]);
 
-  // Arrastrar-y-soltar (v2.72.0) -- nativo del navegador (HTML5 drag & drop), sin librería
+  // Arrastrar-y-soltar (v2.73.0) -- nativo del navegador (HTML5 drag & drop), sin librería
   // nueva. El id del partido viaja en `dataTransfer` (el mecanismo real de HTML5 DnD para
   // pasar el "payload" de un drag), NO en un estado de React: un estado leído desde el closure
   // del onDrop puede quedar viejo si React todavía no volvió a renderizar entre el dragstart y
   // el drop. `dataTransfer` no tiene ese problema: el navegador lo entrega tal cual se guardó.
   //
-  // v2.72.0: ahora se puede soltar TAMBIÉN sobre otro partido, no solo en una casilla vacía --
-  // "meterlo entre los demás" -- y el que ya estaba ahí se va a ocupar el lugar que dejó el
-  // arrastrado (swapMatches, ver PickleballTournamentApp). `draggingId`/`overKey` son solo para
-  // el efecto visual (la tarjeta agarrada se atenúa, la casilla debajo del cursor se resalta) --
-  // sí pueden vivir en estado de React porque no participan en la lógica del drop en sí, que
-  // sigue leyendo todo de `dataTransfer`.
+  // v2.73.0: dentro de la MISMA cancha, soltar ya no es "intercambiar con uno solo" -- empuja a
+  // TODOS los que quedaban entre el horario viejo y el nuevo un puesto para abrirle campo
+  // (reorderWithinColumn/reorderColumn), y mientras arrastras se ve en vivo (las franjas de en
+  // medio se corren con una transición CSS antes de soltar siquiera, ver ROW_H/dragFrom/overPos
+  // más abajo). Entre canchas DISTINTAS se mantiene lo simple de v2.72.0: soltar sobre un
+  // partido lo intercambia con el arrastrado (swapMatches), soltar en una casilla vacía solo
+  // mueve (moveMatch). `draggingId` sigue siendo aparte de `dragFrom`/`overPos` porque a él le
+  // toca la tarjeta agarrada (atenuarla); estos dos le toca a las franjas de en medio (correrse).
   const [draggingId, setDraggingId] = useState(null);
-  const [overKey, setOverKey] = useState(null);
-  const dragMatch = (m) => (e) => {
+  const [dragFrom, setDragFrom] = useState(null); // { courtId, index }
+  const [overPos, setOverPos] = useState(null);   // { courtId, index }
+  const ROW_H = 78; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada.
+
+  const dragMatch = (m, index) => (e) => {
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", m.id);
     setDraggingId(m.id);
+    setDragFrom({ courtId: m.courtId, index });
   };
-  const dragEnd = () => { setDraggingId(null); setOverKey(null); };
-  const dropOnCell = (court, time) => (e) => {
+  const dragEnd = () => { setDraggingId(null); setDragFrom(null); setOverPos(null); };
+  const dragEnterRow = (court, index) => () => setOverPos({ courtId: court.id, index });
+
+  // Reordena DENTRO de una cancha: mueve el contenido del índice `from` al índice `to` (como
+  // un array.splice) y reparte el MISMO conjunto de horarios de esa cancha entre lo que quedó
+  // movido -- así "1-4" cae exactamente donde soltaste y todo lo que estaba entre medio se
+  // corrió un puesto, ni un hueco de más ni de menos.
+  const reorderWithinColumn = (court, byTimeForCourt, from, to) => {
+    if (from === to) return;
+    const slots = timeSlotOptions.map((t) => byTimeForCourt[t] || null);
+    const [moved] = slots.splice(from, 1);
+    slots.splice(to, 0, moved);
+    const updates = [];
+    slots.forEach((m, i) => {
+      if (m && m.time !== timeSlotOptions[i]) updates.push({ categoryId: m.categoryId, matchId: m.id, day, time: timeSlotOptions[i], courtId: court.id });
+    });
+    if (updates.length) reorderColumn(updates);
+  };
+
+  const dropOnRow = (court, index, byTimeForCourt) => (e) => {
     e.preventDefault();
-    setOverKey(null);
+    e.stopPropagation();
+    setOverPos(null);
     const matchId = e.dataTransfer.getData("text/plain");
+    if (!matchId || !isAdmin) return;
     const m = scheduled.find((x) => x.id === matchId);
-    if (!m || !isAdmin) return;
+    if (!m) return;
+    if (m.courtId === court.id) {
+      // Misma cancha -- empujar en cadena (dragFrom ya trae el índice de origen; por las
+      // dudas se recalcula acá también, dataTransfer es la única fuente de verdad real).
+      const fromIndex = timeSlotOptions.indexOf(m.time);
+      reorderWithinColumn(court, byTimeForCourt, fromIndex, index);
+      return;
+    }
+    // Cancha distinta: soltar sobre un partido lo intercambia; en una casilla vacía, solo mueve.
+    const time = timeSlotOptions[index];
+    const targetMatch = byTimeForCourt[time];
+    if (targetMatch) { swapMatches(m, targetMatch); setNotice(null); return; }
     const target = { day, time, courtId: court.id };
-    if (m.day === target.day && m.time === target.time && m.courtId === target.courtId) return;
     const res = checkMoveConflict(m, target, categories, occupiedKeys);
     if (!res.ok) { setNotice({ type: "error", text: res.reason }); return; }
     moveMatch(m.categoryId, m.id, target);
     setNotice(res.warning ? { type: "warning", text: res.warning } : null);
   };
-  // Soltar sobre un partido que YA está ahí: se intercambian de lugar (swapMatches) -- así se
-  // puede meter uno justo donde quieras entre los demás sin tener que vaciar nada primero.
-  const dropOnMatch = (target) => (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setOverKey(null);
-    const matchId = e.dataTransfer.getData("text/plain");
-    if (!matchId || matchId === target.id || !isAdmin) return;
-    const m = scheduled.find((x) => x.id === matchId);
-    if (!m) return;
-    swapMatches(m, target);
-    setNotice(null);
-  };
   const allowDrop = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; };
+  // Cuánto se debe "correr" (arriba/abajo) la franja `index` de ESTA cancha mientras el
+  // arrastre está en curso -- solo aplica dentro de la cancha de origen; cruzando canchas no
+  // hay cadena que empujar, cada una se queda quieta hasta que sueltes.
+  const previewShift = (courtId, index) => {
+    if (!dragFrom || !overPos || dragFrom.courtId !== courtId || overPos.courtId !== courtId) return 0;
+    const { index: fi } = dragFrom, oi = overPos.index;
+    if (fi < oi && index > fi && index <= oi) return -1;
+    if (fi > oi && index >= oi && index < fi) return 1;
+    return 0;
+  };
 
   const selectMatch = (m) => { setSelectedMatch(m); setMoveTarget({ day: m.day, time: m.time, courtId: m.courtId }); setMoveError(""); };
   const cancelMove = () => { setSelectedMatch(null); setMoveError(""); };
@@ -7819,7 +7873,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                 </div>
               )}
               {isAdmin && tournamentCourts.length > 0 && (
-                <p className="text-[11px] text-gray-400 mb-2">En computador puedes arrastrar un partido y soltarlo sobre otro (se intercambian) o en una casilla vacía. En el teléfono usa "Editar manualmente".</p>
+                <p className="text-[11px] text-gray-400 mb-2">En computador puedes arrastrar un partido: dentro de la misma cancha empuja a los demás para abrirle campo; a otra cancha se intercambia con el que esté ahí (o se mueve solo, si está vacía). En el teléfono usa "Editar manualmente".</p>
               )}
               {tournamentCourts.length === 0 ? (
                 <p className="text-sm text-gray-400">Agrega al menos una cancha en Club (o en Generalidades del torneo).</p>
@@ -7836,22 +7890,27 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                       return (
                         <div key={court.id} className="shrink-0" style={{ width: 200 }}>
                           <div className="rounded-t-xl px-3 py-2 font-bold text-sm text-center" style={{ background: COLORS.court, color: "#fff" }}>{court.name}</div>
-                          <div className="rounded-b-xl divide-y" style={{ border: `1px solid ${COLORS.line}`, borderTop: "none" }}>
-                            {timeSlotOptions.map((t) => {
+                          <div className="rounded-b-xl" style={{ border: `1px solid ${COLORS.line}`, borderTop: "none", overflow: "hidden" }}>
+                            {timeSlotOptions.map((t, index) => {
                               const m = byTime[t];
-                              const cellKey = `${court.id}|${t}`;
+                              const shift = previewShift(court.id, index);
+                              const rowStyle = {
+                                height: ROW_H, transition: "transform 150ms ease",
+                                transform: shift ? `translateY(${shift * ROW_H}px)` : "translateY(0)",
+                                position: "relative", zIndex: shift ? 3 : undefined,
+                              };
                               if (!m) {
                                 // Casilla vacía -- se resalta con un anillo azul apenas el arrastre pasa
-                                // por encima, para que quede claro que ahí SÍ se puede soltar.
-                                const isOver = overKey === cellKey;
+                                // por encima (solo tiene sentido cruzando de cancha; dentro de la misma
+                                // cancha el que se ve es el empuje de `previewShift`, ver arriba).
+                                const isOver = overPos?.courtId === court.id && overPos?.index === index && dragFrom?.courtId !== court.id;
                                 return (
                                   <div key={t}
                                     onDragOver={isAdmin ? allowDrop : undefined}
-                                    onDragEnter={isAdmin ? () => setOverKey(cellKey) : undefined}
-                                    onDragLeave={isAdmin ? (e) => { if (e.currentTarget === e.target) setOverKey((k) => (k === cellKey ? null : k)); } : undefined}
-                                    onDrop={isAdmin ? dropOnCell(court, t) : undefined}
-                                    className="px-2 flex items-center transition-all duration-150"
-                                    style={{ minHeight: 26, background: isOver ? "#DCEEFB" : "transparent", boxShadow: isOver ? "inset 0 0 0 2px #1B5FA0" : "none" }}>
+                                    onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
+                                    onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
+                                    className="px-2 flex items-center border-t"
+                                    style={{ ...rowStyle, borderColor: COLORS.line, background: isOver ? "#DCEEFB" : "#fff", boxShadow: isOver ? "inset 0 0 0 2px #1B5FA0" : "none" }}>
                                     <span className="text-[9px] text-gray-300 mono">{formatTimeAmPm(t)}</span>
                                   </div>
                                 );
@@ -7861,26 +7920,25 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                               const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
                               const conflictMsg = conflictByMatch[m.id];
                               const isDragging = draggingId === m.id;
-                              const isOver = overKey === m.id && draggingId !== m.id;
+                              const isOver = overPos?.courtId === court.id && overPos?.index === index && dragFrom?.courtId !== court.id;
                               return (
                                 <div key={m.id} draggable={isAdmin}
-                                  onDragStart={isAdmin ? dragMatch(m) : undefined}
+                                  onDragStart={isAdmin ? dragMatch(m, index) : undefined}
                                   onDragEnd={isAdmin ? dragEnd : undefined}
                                   onDragOver={isAdmin ? allowDrop : undefined}
-                                  onDragEnter={isAdmin ? () => setOverKey(m.id) : undefined}
-                                  onDragLeave={isAdmin ? (e) => { if (e.currentTarget === e.target) setOverKey((k) => (k === m.id ? null : k)); } : undefined}
-                                  onDrop={isAdmin ? dropOnMatch(m) : undefined}
+                                  onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
+                                  onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
                                   onClick={clickable ? () => selectMatch(m) : undefined}
-                                  className={`p-2 text-xs transition-all duration-150 ${conflictMsg ? "match-conflict" : ""}`}
+                                  className={`p-2 text-xs border-t overflow-hidden ${conflictMsg ? "match-conflict" : ""}`}
                                   style={{
+                                    ...rowStyle,
+                                    borderColor: COLORS.line,
                                     cursor: isAdmin ? (clickable ? "pointer" : "grab") : "default",
                                     background: conflictMsg ? "#FDEAEA" : (isSelected ? "#FBF3E4" : cc.bg),
                                     opacity: isDragging ? 0.35 : 1,
-                                    transform: isDragging ? "scale(0.96)" : isOver ? "scale(1.04)" : "scale(1)",
                                     boxShadow: isOver ? "0 4px 12px rgba(22,50,92,0.35), inset 0 0 0 2px #1B5FA0"
                                       : conflictMsg ? undefined // lo pone la animación conflictPulse
                                       : "none",
-                                    position: "relative", zIndex: isDragging || isOver ? 2 : 1,
                                   }}>
                                   {conflictMsg && (
                                     <div title={conflictMsg} className="flex items-center gap-1 mb-1 px-1.5 py-0.5 rounded font-extrabold"
