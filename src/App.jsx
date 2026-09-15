@@ -209,6 +209,15 @@ function isByeMatch(m) {
   return m.teamALabel === "BYE" || m.teamBLabel === "BYE";
 }
 
+// v2.75.0: buildSchedule() ya no deja partidos sin ubicar cuando se acaban las franjas dentro
+// de dailyStart/dailyEnd -- en vez de eso extiende el día más allá de la hora de cierre
+// configurada, para que NUNCA quede uno invisible. Esto es lo que le avisa al organizador,
+// tarjeta por tarjeta en el tablero, cuáles de esos partidos cayeron fuera de la franja que se
+// configuró en Generalidades -- el partido se agenda igual, pero con un aviso bien visible.
+function isOvertimeMatch(m, tournament) {
+  return !!(m.day && m.time && tournament?.dailyEnd && timeToMinutes(m.time) >= timeToMinutes(tournament.dailyEnd));
+}
+
 /* =========================================================================
    CLUB SCHEDULE HELPERS — turns opening hours + block length into the grid
    of bookable blocks, and builds a single "occupied" key so a block claimed
@@ -1262,8 +1271,23 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     return !allowed || allowed.length === 0 || allowed.includes(categoryId);
   };
 
+  // v2.75.0: si la cola se queda sin franjas dentro de dailyStart/dailyEnd, YA NO se deja
+  // ningún partido sin ubicar (ver incidente: quedaban invisibles, día que el club pidió
+  // corregir de raíz) -- en vez de eso se sigue extendiendo el ÚLTIMO día de esta corrida más
+  // allá de la hora de cierre configurada, con el mismo incremento de siempre, hasta que la
+  // cola se vacíe. `isOvertimeMatch()` (más arriba en el archivo) es quien marca esos partidos
+  // con el aviso "fuera de tu franja de horario" en el tablero -- acá no se distingue en nada,
+  // simplemente se les da un horario real como a cualquier otro.
   let slotIndex = 0;
-  while (queue.length > 0 && slotIndex < slots.length) {
+  let overtimeGuard = 0;
+  while (queue.length > 0) {
+    if (slotIndex >= slots.length) {
+      if (overtimeGuard++ > 2000) break; // nunca debería hacer falta -- red de seguridad contra un loop infinito
+      const prev = slots[slots.length - 1];
+      const date = prev ? prev.date : dates[dates.length - 1];
+      const timeMin = prev ? prev.timeMin + Number(matchDuration) + Number(breakM) : startM;
+      slots.push({ date, timeMin });
+    }
     const slot = slots[slotIndex];
     const usedPlayers = new Set(lockedPlayersBySlot[`${slot.date}|${slot.timeMin}`] || []);
     for (let c = 0; c < courts.length && queue.length > 0; c++) {
@@ -1413,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.74.5";
+const APP_VERSION = "2.75.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7625,14 +7649,21 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const catColorMap = useMemo(() => buildCategoryColorMap(categories), [categories]);
 
   // Franjas horarias válidas del día (mismo cálculo que usa buildSchedule para generarlas) --
-  // lista de opciones para el selector de "Hora" del destino manual.
+  // lista de opciones para el selector de "Hora" del destino manual, y también las filas que
+  // dibuja el tablero cancha por cancha.
   const timeSlotOptions = useMemo(() => {
     const opts = [];
     const startM = timeToMinutes(tournament.dailyStart), endM = timeToMinutes(tournament.dailyEnd);
     let t = startM;
     while (t + Number(matchDuration) <= endM) { opts.push(minutesToTime(t)); t += Number(matchDuration) + Number(breakM); }
+    // v2.75.0: buildSchedule() ahora puede agendar partidos MÁS ALLÁ de dailyEnd (empuja el
+    // día en vez de dejarlos sin ubicar, ver isOvertimeMatch) -- si esa franja no sigue
+    // apareciendo acá, el partido queda invisible en el tablero de nuevo, el mismo problema
+    // que ya se corrigió para los que no tenían NINGÚN horario.
+    const maxUsedMin = scheduled.reduce((max, m) => Math.max(max, timeToMinutes(m.time)), -1);
+    while (maxUsedMin >= t) { opts.push(minutesToTime(t)); t += Number(matchDuration) + Number(breakM); }
     return opts;
-  }, [tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM]);
+  }, [tournament.dailyStart, tournament.dailyEnd, matchDuration, breakM, scheduled]);
 
   const catById = {}; categories.forEach((c) => catById[c.id] = c);
   const teamLabel = (m, side) => {
@@ -7715,7 +7746,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const [draggingId, setDraggingId] = useState(null);
   const [dragFrom, setDragFrom] = useState(null); // { courtId, index }
   const [overPos, setOverPos] = useState(null);   // { courtId, index }
-  const ROW_H = 132; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada. Incluye el margen vertical (ROW_GAP) entre tarjetas -- la tarjeta visible vive DENTRO de esta franja, no ocupa toda su altura. Tiene que caber el partido más alto posible (con la franja roja de choque) + el margen o el contenido se corta -- medido en vivo: 95px sin choque, 119px con choque (antes de sumarle ROW_GAP).
+  const ROW_H = 152; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada. Incluye el margen vertical (ROW_GAP) entre tarjetas -- la tarjeta visible vive DENTRO de esta franja, no ocupa toda su altura. Tiene que caber el partido más alto posible (con las DOS franjas de aviso -- choque Y fuera de horario, v2.75.0 -- juntas) + el margen o el contenido se corta -- medido en vivo: 95px sin ningún aviso, 119px con uno solo, ~139px estimado con los dos (antes de sumarle ROW_GAP).
   const ROW_GAP = 8; // separación visual entre una tarjeta y la siguiente -- mitad arriba, mitad abajo de cada franja (padding del wrapper, no de la tarjeta).
 
   const dragMatch = (m, index) => (e) => {
@@ -8047,6 +8078,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                               const clickable = isAdmin && moveMode;
                               const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
                               const conflictMsg = conflictByMatch[m.id];
+                              const isOvertime = isOvertimeMatch(m, tournament);
                               const grp = groupTag(m);
                               const isDragging = draggingId === m.id;
                               const isOver = overPos?.courtId === court.id && overPos?.index === index && dragFrom?.courtId !== court.id;
@@ -8072,6 +8104,13 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                       <div title={conflictMsg} className="flex items-center gap-1 mb-1 px-1.5 py-0.5 rounded font-extrabold"
                                         style={{ background: "#D3242A", color: "#fff", fontSize: 9, letterSpacing: 0.3 }}>
                                         <AlertCircle size={12} /> CHOQUE DE HORARIO
+                                      </div>
+                                    )}
+                                    {isOvertime && (
+                                      <div title={`Este partido empieza después de las ${formatTimeAmPm(tournament.dailyEnd)}, la hora de cierre configurada en Generalidades.`}
+                                        className="flex items-center gap-1 mb-1 px-1.5 py-0.5 rounded font-extrabold"
+                                        style={{ background: "#C97A1B", color: "#fff", fontSize: 9, letterSpacing: 0.3 }}>
+                                        <AlertTriangle size={12} /> FUERA DE TU FRANJA DE HORARIO
                                       </div>
                                     )}
                                     <div className="flex items-center justify-between gap-1">
