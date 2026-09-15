@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.73.1";
+const APP_VERSION = "2.73.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7936,6 +7936,8 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                     cursor: isAdmin ? (clickable ? "pointer" : "grab") : "default",
                                     background: conflictMsg ? "#FDEAEA" : (isSelected ? "#FBF3E4" : cc.bg),
                                     opacity: isDragging ? 0.35 : 1,
+                                    userSelect: isAdmin ? "none" : undefined, // si el navegador arranca una selección de texto en vez del drag nativo (mousedown justo sobre el nombre de un jugador), el drop se rechaza con el cursor de "no permitido" -- ver incidente v2.73.2
+
                                     boxShadow: isOver ? "0 4px 12px rgba(22,50,92,0.35), inset 0 0 0 2px #1B5FA0"
                                       : conflictMsg ? undefined // lo pone la animación conflictPulse
                                       : "none",
