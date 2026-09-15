@@ -423,18 +423,29 @@ function categoryIsFull(cat) {
   return capacity !== null && countCategoryPlayers(cat.teams) >= capacity;
 }
 
+// Cuántas filas de `teams` son duplas de verdad COMPLETAS (2 jugadores) -- v2.67.0, separado de
+// countCategoryPlayers/categoryCountLabel porque llamar "1 dupla" a una fila con un solo
+// jugador esperando pareja es literalmente falso: todavía no hay dupla, hay una persona sola.
+// Usado donde hace falta distinguir "cuántas parejas ya se formaron" de "cuántas filas hay"
+// (que puede incluir gente esperando pareja, ver joinTeam/InscripcionTab).
+function countCompleteDuplas(teams) {
+  return (teams || []).filter((t) => (t.players || []).length === 2).length;
+}
+
 // Texto legible de cuántos hay anotados en una categoría, en la unidad correcta según
-// modalidad -- "X/Y jugadores" en individual (1 fila = 1 persona), "X duplas (Y/Z jugadores)"
-// en dobles, porque ahí una fila puede tener 1 o 2 jugadores y lo que de verdad importa para el
-// cupo es la cantidad de PERSONAS, no de filas (ver categoryMaxPlayers). Reemplaza los "X/Y
+// modalidad -- "X/Y jugadores" en individual (1 fila = 1 persona); en dobles, "X/Y jugadores
+// (N duplas formadas)" -- v2.67.0, antes decía "X duplas (Y/Z jugadores)" contando FILAS como
+// si cada una fuera ya una dupla completa (ver countCompleteDuplas arriba para el porqué eso
+// era incorrecto: una fila puede tener 1 solo jugador esperando pareja). Reemplaza los "X/Y
 // equipos" repetidos por toda la pantalla de inscripción/roster que asumían 1 fila = 1 persona.
 function categoryCountLabel(cat) {
-  const rows = cat.teams.length;
-  if (cat.modality === "individual") {
-    return `${rows}${cat.maxTeams ? `/${cat.maxTeams}` : ""} jugador${rows === 1 ? "" : "es"}`;
-  }
+  const players = countCategoryPlayers(cat.teams);
   const maxPlayers = categoryMaxPlayers(cat);
-  return `${rows} dupla${rows === 1 ? "" : "s"}${maxPlayers ? ` (${countCategoryPlayers(cat.teams)}/${maxPlayers} jugadores)` : ""}`;
+  if (cat.modality === "individual") {
+    return `${players}${maxPlayers ? `/${maxPlayers}` : ""} jugador${players === 1 ? "" : "es"}`;
+  }
+  const duplas = countCompleteDuplas(cat.teams);
+  return `${players}${maxPlayers ? `/${maxPlayers}` : ""} jugador${players === 1 ? "" : "es"} (${duplas} dupla${duplas === 1 ? "" : "s"} formada${duplas === 1 ? "" : "s"})`;
 }
 
 // Resolves a court's BASE price for a given time-of-day, honoring an optional list of
@@ -1308,7 +1319,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.66.1";
+const APP_VERSION = "2.67.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6083,27 +6094,40 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
           <Card>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <h3 className="disp text-2xl" style={{ color: COLORS.courtDark }}>{activeCat.name}</h3>
+                {/* v2.67.0: min/máx de duplas (o jugadores, en individual) al lado del nombre,
+                   a pedido del club -- antes solo se veía editando el cupo con el lápiz. */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="disp text-2xl" style={{ color: COLORS.courtDark }}>{activeCat.name}</h3>
+                  {(activeCat.minTeams > 0 || activeCat.maxTeams > 0) && (
+                    <span className="text-xs font-semibold" style={{ color: "#9AA6BC" }}>
+                      ({activeCat.minTeams > 0 ? `mín ${activeCat.minTeams}` : "sin mín"} – {activeCat.maxTeams > 0 ? `máx ${activeCat.maxTeams}` : "sin máx"} {activeCat.modality === "individual" ? "jugadores" : "duplas"})
+                    </span>
+                  )}
+                </div>
+                {/* v2.67.0: "X duplas" contando FILAS era incorrecto si alguna está esperando
+                   pareja (1 jugador, no una dupla completa todavía) -- ver countCompleteDuplas.
+                   Ahora son dos datos separados y honestos: cuántos JUGADORES hay inscritos en
+                   total (cuenta a cualquiera, esperando pareja o no) y, aparte, cuántas duplas
+                   ya están COMPLETAS de verdad. En individual el segundo badge no aplica (no
+                   hay concepto de "pareja" ahí). */}
                 <div className="flex flex-wrap gap-2 mt-3">
                   <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
                     {activeCat.format ? FORMAT_LABELS[activeCat.format] : "Formato por definir"}
                   </span>
-                  {/* v2.57.0: categoryCountLabel ya elige la unidad correcta (jugadores en
-                     individual, duplas + jugadores reales en dobles) -- ver su comentario. */}
                   <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
-                    {categoryCountLabel(activeCat)} inscrito{activeCat.teams.length === 1 ? "" : "s"}
+                    Jugadores inscritos: {countCategoryPlayers(activeCat.teams)}{categoryMaxPlayers(activeCat) ? `/${categoryMaxPlayers(activeCat)}` : ""}
                   </span>
+                  {activeCat.modality !== "individual" && (
+                    <span className="text-xs px-2.5 py-1 rounded-full font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                      Duplas conformadas: {countCompleteDuplas(activeCat.teams)}{activeCat.maxTeams ? `/${activeCat.maxTeams}` : ""}
+                    </span>
+                  )}
                   {activeCat.waitlist.length > 0 && (
                     <span className="text-xs px-2.5 py-1 rounded-full font-semibold flex items-center gap-1" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
                       <Hourglass size={11} /> {activeCat.waitlist.length} en lista de espera
                     </span>
                   )}
                 </div>
-                {activeCat.minTeams > 0 && (
-                  <p className="text-xs mt-2" style={{ color: "#6B7688" }}>
-                    Necesita al menos {activeCat.minTeams} {activeCat.modality === "individual" ? "jugador" + (activeCat.minTeams === 1 ? "" : "es") : "dupla" + (activeCat.minTeams === 1 ? "" : "s")} para jugarse.
-                  </p>
-                )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <button onClick={startEditCapacity} title="Editar cupo mínimo/máximo" className="text-gray-300 hover:text-gray-600"><Pencil size={16} /></button>
