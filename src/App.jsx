@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.73.2";
+const APP_VERSION = "2.73.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7674,7 +7674,8 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const [draggingId, setDraggingId] = useState(null);
   const [dragFrom, setDragFrom] = useState(null); // { courtId, index }
   const [overPos, setOverPos] = useState(null);   // { courtId, index }
-  const ROW_H = 122; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada. Tiene que caber el partido más alto posible (con la franja roja de choque) o el contenido se corta -- medido en vivo: 95px sin choque, 119px con choque.
+  const ROW_H = 132; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada. Incluye el margen vertical (ROW_GAP) entre tarjetas -- la tarjeta visible vive DENTRO de esta franja, no ocupa toda su altura. Tiene que caber el partido más alto posible (con la franja roja de choque) + el margen o el contenido se corta -- medido en vivo: 95px sin choque, 119px con choque (antes de sumarle ROW_GAP).
+  const ROW_GAP = 8; // separación visual entre una tarjeta y la siguiente -- mitad arriba, mitad abajo de cada franja (padding del wrapper, no de la tarjeta).
 
   const dragMatch = (m, index) => (e) => {
     e.dataTransfer.effectAllowed = "move";
@@ -7683,7 +7684,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     setDragFrom({ courtId: m.courtId, index });
   };
   const dragEnd = () => { setDraggingId(null); setDragFrom(null); setOverPos(null); };
-  const dragEnterRow = (court, index) => () => setOverPos({ courtId: court.id, index });
+  // Ojo: preventDefault() hace falta acá TAMBIÉN, no solo en dragover (allowDrop) -- si el
+  // navegador entra a una fila sin que dragenter lo prevenga, decide que esa fila no acepta
+  // drop y pinta el cursor de "no permitido" aunque el dragover que sigue sí lo prevenga.
+  // Este era el bug real detrás del "no suelta" reportado en v2.73.2.
+  const dragEnterRow = (court, index) => (e) => { e.preventDefault(); setOverPos({ courtId: court.id, index }); };
 
   // Reordena DENTRO de una cancha: mueve el contenido del índice `from` al índice `to` (como
   // un array.splice) y reparte el MISMO conjunto de horarios de esa cancha entre lo que quedó
@@ -7898,6 +7903,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                 height: ROW_H, transition: "transform 150ms ease",
                                 transform: shift ? `translateY(${shift * ROW_H}px)` : "translateY(0)",
                                 position: "relative", zIndex: shift ? 3 : undefined,
+                                padding: `${ROW_GAP / 2}px 6px`, // la tarjeta visible vive adentro de este padding -- así queda separada de la próxima franja
                               };
                               if (!m) {
                                 // Casilla vacía -- se resalta con un anillo azul apenas el arrastre pasa
@@ -7909,9 +7915,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                     onDragOver={isAdmin ? allowDrop : undefined}
                                     onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
                                     onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
-                                    className="px-2 flex items-center border-t"
-                                    style={{ ...rowStyle, borderColor: COLORS.line, background: isOver ? "#DCEEFB" : "#fff", boxShadow: isOver ? "inset 0 0 0 2px #1B5FA0" : "none" }}>
-                                    <span className="text-[9px] text-gray-300 mono">{formatTimeAmPm(t)}</span>
+                                    style={rowStyle}>
+                                    <div className="h-full rounded-lg flex items-center px-2 border border-dashed"
+                                      style={{ borderColor: isOver ? "#1B5FA0" : COLORS.line, background: isOver ? "#DCEEFB" : "#fff", boxShadow: isOver ? "inset 0 0 0 2px #1B5FA0" : "none" }}>
+                                      <span className="text-[9px] text-gray-300 mono">{formatTimeAmPm(t)}</span>
+                                    </div>
                                   </div>
                                 );
                               }
@@ -7929,40 +7937,41 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                   onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
                                   onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
                                   onClick={clickable ? () => selectMatch(m) : undefined}
-                                  className={`p-2 text-xs border-t overflow-hidden ${conflictMsg ? "match-conflict" : ""}`}
                                   style={{
                                     ...rowStyle,
-                                    borderColor: COLORS.line,
                                     cursor: isAdmin ? (clickable ? "pointer" : "grab") : "default",
-                                    background: conflictMsg ? "#FDEAEA" : (isSelected ? "#FBF3E4" : cc.bg),
-                                    opacity: isDragging ? 0.35 : 1,
                                     userSelect: isAdmin ? "none" : undefined, // si el navegador arranca una selección de texto en vez del drag nativo (mousedown justo sobre el nombre de un jugador), el drop se rechaza con el cursor de "no permitido" -- ver incidente v2.73.2
-
-                                    boxShadow: isOver ? "0 4px 12px rgba(22,50,92,0.35), inset 0 0 0 2px #1B5FA0"
-                                      : conflictMsg ? undefined // lo pone la animación conflictPulse
-                                      : "none",
                                   }}>
-                                  {conflictMsg && (
-                                    <div title={conflictMsg} className="flex items-center gap-1 mb-1 px-1.5 py-0.5 rounded font-extrabold"
-                                      style={{ background: "#D3242A", color: "#fff", fontSize: 9, letterSpacing: 0.3 }}>
-                                      <AlertCircle size={12} /> CHOQUE DE HORARIO
+                                  <div className={`h-full p-2 text-xs rounded-lg overflow-hidden ${conflictMsg ? "match-conflict" : ""}`}
+                                    style={{
+                                      background: conflictMsg ? "#FDEAEA" : (isSelected ? "#FBF3E4" : cc.bg),
+                                      opacity: isDragging ? 0.35 : 1,
+                                      boxShadow: isOver ? "0 4px 12px rgba(22,50,92,0.35), inset 0 0 0 2px #1B5FA0"
+                                        : conflictMsg ? undefined // lo pone la animación conflictPulse
+                                        : "0 1px 3px rgba(22,50,92,0.12)",
+                                    }}>
+                                    {conflictMsg && (
+                                      <div title={conflictMsg} className="flex items-center gap-1 mb-1 px-1.5 py-0.5 rounded font-extrabold"
+                                        style={{ background: "#D3242A", color: "#fff", fontSize: 9, letterSpacing: 0.3 }}>
+                                        <AlertCircle size={12} /> CHOQUE DE HORARIO
+                                      </div>
+                                    )}
+                                    <div className="flex items-center justify-between gap-1">
+                                      <span className="font-bold mono">{formatTimeAmPm(m.time)}</span>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        {isAdmin && m.locked && (
+                                          <button type="button" onClick={(e) => { e.stopPropagation(); unlockMatch(m.categoryId, m.id); }}
+                                            title="Fijado -- clic para liberar" style={{ color: COLORS.clay }}>
+                                            <Lock size={11} />
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
-                                  )}
-                                  <div className="flex items-center justify-between gap-1">
-                                    <span className="font-bold mono">{formatTimeAmPm(m.time)}</span>
-                                    <div className="flex items-center gap-1 shrink-0">
-                                      {isAdmin && m.locked && (
-                                        <button type="button" onClick={(e) => { e.stopPropagation(); unlockMatch(m.categoryId, m.id); }}
-                                          title="Fijado -- clic para liberar" style={{ color: COLORS.clay }}>
-                                          <Lock size={11} />
-                                        </button>
-                                      )}
-                                    </div>
+                                    <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: cc.text }}>{m.catName} · {roundTag(m)}</div>
+                                    <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
+                                    <div className="text-gray-400 text-[10px] leading-tight">vs</div>
+                                    <div className="font-medium leading-tight truncate">{teamLabel(m, "B")}</div>
                                   </div>
-                                  <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: cc.text }}>{m.catName} · {roundTag(m)}</div>
-                                  <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
-                                  <div className="text-gray-400 text-[10px] leading-tight">vs</div>
-                                  <div className="font-medium leading-tight truncate">{teamLabel(m, "B")}</div>
                                 </div>
                               );
                             })}
