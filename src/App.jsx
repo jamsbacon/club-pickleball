@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.75.2";
+const APP_VERSION = "2.75.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7854,7 +7854,15 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const dropOnColumn = (court, byTimeForCourt) => (e) => {
     e.preventDefault();
     e.stopPropagation();
-    setOverPos(null);
+    // Limpiar acá mismo, no solo esperar a onDragEnd (v2.75.3) -- cuando el partido soltado
+    // viene de "Sin programar", el drop lo saca de esa lista y lo mete en el tablero en el
+    // mismo tick: React desmonta la tarjeta que se estaba arrastrando ANTES de que el
+    // navegador llegue a dispararle su propio dragend, así que ese evento nunca corre y
+    // `draggingId` se queda pegado en ese partido para siempre -- lo que sea que renderice con
+    // ese id (ahora ya en el tablero) queda atenuado (opacity 0.35) para siempre, aunque nadie
+    // lo esté arrastrando. Limpiando el estado apenas se procesa el drop, sin depender de que
+    // el navegador avise, esto no puede volver a pasar.
+    setOverPos(null); setDraggingId(null); setDragFrom(null);
     const matchId = e.dataTransfer.getData("text/plain");
     if (!matchId || !isAdmin) return;
     const m = allMatches.find((x) => x.id === matchId); // allMatches, no `scheduled` -- este drop también recibe partidos de "Sin programar", que no tienen día todavía
