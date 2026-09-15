@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.73.3";
+const APP_VERSION = "2.74.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7625,6 +7625,18 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     if (m.phase === "bracket_lb") return `Llave B R${m.round + 1}`;
     return "";
   };
+  // Etiqueta de color por GRUPO (no por categoría -- esa ya tinta toda la tarjeta, ver
+  // catColorMap) -- así, con varios grupos en paralelo el mismo día, se distingue de un
+  // vistazo "Grupo A" de "Grupo B" sin tener que leer los nombres de los jugadores.
+  const groupTag = (m) => {
+    if (m.phase !== "group" || !m.groupId) return null;
+    const cat = catById[m.categoryId];
+    if (!cat) return null;
+    const idx = cat.groups.findIndex((g) => g.id === m.groupId);
+    const g = cat.groups[idx];
+    if (!g) return null;
+    return { name: g.name, color: CATEGORY_PALETTE[idx % CATEGORY_PALETTE.length] };
+  };
 
   const dayMatchesByCourt = {};
   scheduled.filter((m) => m.day === day).forEach((m) => {
@@ -7927,6 +7939,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                               const clickable = isAdmin && moveMode;
                               const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
                               const conflictMsg = conflictByMatch[m.id];
+                              const grp = groupTag(m);
                               const isDragging = draggingId === m.id;
                               const isOver = overPos?.courtId === court.id && overPos?.index === index && dragFrom?.courtId !== court.id;
                               return (
@@ -7967,7 +7980,12 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                         )}
                                       </div>
                                     </div>
-                                    <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: cc.text }}>{m.catName} · {roundTag(m)}</div>
+                                    <div className="flex items-center gap-1 mt-0.5">
+                                      <span className="text-[9px] uppercase font-bold tracking-wide truncate" style={{ color: cc.text }}>{m.catName}{grp ? "" : ` · ${roundTag(m)}`}</span>
+                                      {grp && (
+                                        <span className="shrink-0 px-1.5 rounded-full font-extrabold" style={{ fontSize: 8, lineHeight: "13px", letterSpacing: 0.3, background: grp.color.text, color: "#fff" }}>{grp.name}</span>
+                                      )}
+                                    </div>
                                     <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
                                     <div className="text-gray-400 text-[10px] leading-tight">vs</div>
                                     <div className="font-medium leading-tight truncate">{teamLabel(m, "B")}</div>
