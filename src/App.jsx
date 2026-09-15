@@ -1189,17 +1189,30 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     ];
   };
 
-  // Partidos fijados a mano: se dejan tal cual (no se resetean, no vuelven a la cola).
-  // Todo lo demás sí se resetea, como antes.
+  // `plan.categoryIds`/`plan.roundKeys` (v2.69.0) acotan qué entra a la cola de ESTA corrida --
+  // ver más abajo dónde se usan para armar la cola. Se calculan acá arriba (antes del reset)
+  // porque el reset de abajo también los necesita: un partido de una categoría/ronda FUERA de
+  // la selección actual no debe resetearse solo porque no esté fijado -- eso rompía un caso
+  // real: planificar la categoría A limpiaba en silencio el horario sin fijar de la categoría
+  // B (o de otra ronda de la propia A que no se había seleccionado esta vez), aunque nadie la
+  // hubiera tocado. Sin `plan` (nadie llama así hoy fuera del panel Planificar), todo cuenta
+  // como "dentro de la selección" y el comportamiento es el de siempre.
+  const inSelection = (cat) => !plan?.categoryIds?.length || plan.categoryIds.includes(cat.id);
+  const roundAllowed = (cat, m) => roundSetHas(plan?.roundKeys?.[cat.id], roundKeyOf(m));
+
+  // Partidos fijados a mano O fuera de la selección de esta corrida: se dejan tal cual (no se
+  // resetean, no vuelven a la cola, y sí cuentan como ocupados para no chocar con lo que SÍ se
+  // va a agendar ahora). Solo lo que está adentro de la selección y sin fijar se resetea.
   const preOccupied = new Set(occupiedKeys);
   const lockedPlayersBySlot = {}; // "date|timeMin" -> Set(jugador)
   categories.forEach((c) => c.matches.forEach((m) => {
-    if (m.locked && m.day && m.time && m.courtId) {
+    const keepAsIs = m.locked || !inSelection(c) || !roundAllowed(c, m);
+    if (keepAsIs && m.day && m.time && m.courtId) {
       preOccupied.add(blockKey(m.courtId, m.day, timeToMinutes(m.time)));
       const key = `${m.day}|${timeToMinutes(m.time)}`;
       const set = (lockedPlayersBySlot[key] = lockedPlayersBySlot[key] || new Set());
       playersOf(m).forEach((p) => set.add(p));
-    } else {
+    } else if (!keepAsIs) {
       m.day = null; m.time = null; m.courtId = null;
     }
   }));
@@ -1208,19 +1221,13 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   // cola de este run (las demás quedan tal cual, sus partidos sin tocar). Sin `categoryIds`
   // (nadie lo manda hoy fuera del panel nuevo) el comportamiento es el de siempre: todas.
   const orderedCats = (() => {
-    const base = plan?.categoryIds?.length ? categories.filter((c) => plan.categoryIds.includes(c.id)) : categories;
+    const base = categories.filter((c) => inSelection(c));
     if (plan?.mode === "byCategory" && plan.categoryOrder?.length) {
       const rank = {}; plan.categoryOrder.forEach((id, i) => (rank[id] = i));
       return [...base].sort((a, b) => (rank[a.id] ?? 999) - (rank[b.id] ?? 999));
     }
     return base;
   })();
-
-  // `plan.roundKeys[cat.id]` (Set o array de "group"/"bracket:N"/...) filtra CUÁLES rondas de
-  // esa categoría entran esta corrida -- así "Planificar" puede meter solo la fase de grupos
-  // hoy y dejar cuartos/semis/final para otro día, sin tocarlos. Sin entrada para esa
-  // categoría, pasan todas sus rondas (mismo comportamiento de siempre).
-  const roundAllowed = (cat, m) => roundSetHas(plan?.roundKeys?.[cat.id], roundKeyOf(m));
 
   // Cola propia de cada categoría: grupos (tal cual se crearon) + bracket agrupado
   // por ronda/seq y ordenado ascendente -- exactamente el mismo criterio que usaba
@@ -1399,7 +1406,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.69.0";
+const APP_VERSION = "2.70.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1415,6 +1422,38 @@ const COLORS = {
   line: "#E2E6EE",         // warm hairline border
   card: "#FFFFFF",
 };
+
+// Paleta de colores pastel por categoría (v2.70.0) -- Calendario tiene muchas categorías
+// mezcladas en el mismo tablero (una tarjeta de partido junto a otra en la misma cancha) y
+// hasta ahora todas se veían iguales salvo por el texto; esto les da una identidad visual
+// para diferenciarlas de un vistazo, sin que el admin tenga que asignar colores a mano.
+// `buildCategoryColorMap` asigna por posición en la lista (ver más abajo) -- la MISMA
+// categoría siempre cae en el mismo color, en cualquier pantalla, sin guardar nada nuevo en
+// la base de datos.
+const CATEGORY_PALETTE = [
+  { bg: "#FCE7EC", text: "#B23A5C" }, // rosa
+  { bg: "#FDEBD9", text: "#B2621B" }, // durazno
+  { bg: "#FBF3D2", text: "#8A6D1B" }, // ámbar
+  { bg: "#EEF7DA", text: "#5A7A1B" }, // lima
+  { bg: "#DFF5EA", text: "#1B7A4F" }, // menta
+  { bg: "#DAF3F1", text: "#1B7A78" }, // aguamarina
+  { bg: "#DCEEFB", text: "#1B5FA0" }, // cielo
+  { bg: "#E3E4FB", text: "#4A3FA0" }, // índigo
+  { bg: "#EDE0FA", text: "#6B32A0" }, // violeta
+  { bg: "#F7E0F6", text: "#9C2E96" }, // orquídea
+  { bg: "#FDE2DE", text: "#B2401F" }, // coral
+  { bg: "#E7EAF0", text: "#3D4A66" }, // pizarra
+];
+// Por índice (no por hash del id) -- así, mientras el torneo tenga 12 categorías o menos
+// (el caso normal), CADA UNA saca un color distinto garantizado. Un hash del id es estable
+// pero puede chocar entre dos categorías cualquiera (probado: con 9 categorías reales pasó);
+// el orden en que llegan (por created_at, no cambia solo) hace que ir por posición sea
+// igual de estable en la práctica y sin el riesgo de choque mientras entren en la paleta.
+function buildCategoryColorMap(categories) {
+  const map = {};
+  categories.forEach((c, i) => { map[c.id] = CATEGORY_PALETTE[i % CATEGORY_PALETTE.length]; });
+  return map;
+}
 
 const FORMAT_LABELS = {
   liga: "Liga (todos contra todos)",
@@ -7296,7 +7335,7 @@ function PodiumSlot({ place, label }) {
 // queda `locked` (ver buildSchedule/plan.lockAfterSchedule) -- planificar el domingo nunca
 // reordena lo que ya se dejó listo el sábado. "Editar manualmente" (tap-origen → tap-destino)
 // se conserva igual que antes, solo que ahora se dispara desde una tarjeta del tablero.
-function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament, matchDuration, breakM, occupiedKeys, runScheduler, clearDaySchedule }) {
+function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament, matchDuration, breakM, occupiedKeys, runScheduler, clearDaySchedule, catColorMap }) {
   const catsWithDraw = categories.filter((c) => c.drawGenerated);
   const [catIds, setCatIds] = useState([]); // orden de selección = orden para "Por categoría completa"
   const [roundKeys, setRoundKeys] = useState({}); // { [catId]: Set(roundKey) }
@@ -7371,6 +7410,7 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
           {catsWithDraw.map((c) => (
             <label key={c.id} className="flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg cursor-pointer" style={{ background: catIds.includes(c.id) ? "#EAF0F8" : "transparent" }}>
               <input type="checkbox" checked={catIds.includes(c.id)} onChange={() => toggleCat(c)} />
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: (catColorMap[c.id] || CATEGORY_PALETTE[0]).text }}></span>
               {c.name}
             </label>
           ))}
@@ -7499,6 +7539,10 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const allMatches = categories.flatMap((c) => c.matches.map((m) => ({ ...m, catName: c.name })));
   const scheduled = allMatches.filter((m) => m.day);
   const conflicts = useMemo(() => findScheduleConflicts(categories), [categories]);
+  // Un color pastel distinto por categoría (v2.70.0) -- mismo mapa para el tablero y para el
+  // panel Planificar, así el punto de color junto a una categoría en Planificar es EL MISMO
+  // color que sus tarjetas en el tablero.
+  const catColorMap = useMemo(() => buildCategoryColorMap(categories), [categories]);
 
   // Franjas horarias válidas del día (mismo cálculo que usa buildSchedule para generarlas) --
   // lista de opciones para el selector de "Hora" del destino manual.
@@ -7676,10 +7720,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                             {list.map((m) => {
                               const isSelected = selectedMatch?.id === m.id;
                               const clickable = isAdmin && moveMode;
+                              const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
                               return (
                                 <div key={m.id} onClick={clickable ? () => selectMatch(m) : undefined}
                                   className="p-2 text-xs"
-                                  style={{ cursor: clickable ? "pointer" : "default", background: isSelected ? "#FBF3E4" : "transparent" }}>
+                                  style={{ cursor: clickable ? "pointer" : "default", background: isSelected ? "#FBF3E4" : cc.bg }}>
                                   <div className="flex items-center justify-between gap-1">
                                     <span className="font-bold mono">{formatTimeAmPm(m.time)}</span>
                                     {isAdmin && m.locked && (
@@ -7689,7 +7734,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                       </button>
                                     )}
                                   </div>
-                                  <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: COLORS.court }}>{m.catName} · {roundTag(m)}</div>
+                                  <div className="text-[9px] uppercase font-bold tracking-wide mt-0.5" style={{ color: cc.text }}>{m.catName} · {roundTag(m)}</div>
                                   <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
                                   <div className="text-gray-400 text-[10px] leading-tight">vs</div>
                                   <div className="font-medium leading-tight truncate">{teamLabel(m, "B")}</div>
@@ -7709,7 +7754,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
             {isAdmin && (
               <PlanificarPanel categories={categories} tournamentCourts={tournamentCourts} selectedDay={day}
                 tournament={tournament} matchDuration={matchDuration} breakM={breakM} occupiedKeys={occupiedKeys}
-                runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} />
+                runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} catColorMap={catColorMap} />
             )}
           </div>
         </>
