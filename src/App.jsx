@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.74.3";
+const APP_VERSION = "2.74.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7567,6 +7567,14 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 
   const allMatches = categories.flatMap((c) => c.matches.map((m) => ({ ...m, catName: c.name })));
   const scheduled = allMatches.filter((m) => m.day);
+  // Partidos SIN horario asignado (v2.74.4) -- buildSchedule() deja `day/time/courtId` en null
+  // cuando la cola se queda sin franjas (ver "capacityExceeded"/"unscheduledGroup" ahí), y ese
+  // partido no vuelve a aparecer en NINGÚN lado del tablero -- ni siquiera el aviso de "quedaron
+  // X sin ubicar" sobrevive un refresh de página, porque vive en `scheduleInfo` (estado
+  // efímero, se resetea solo). Se calcula acá directo de `categories` (dato real, persistente)
+  // en vez de depender de ese estado, para que la lista JAMÁS desaparezca mientras el partido
+  // siga sin horario -- incluida una ronda que todavía no se ha planificado ni una sola vez.
+  const unscheduledMatches = allMatches.filter((m) => !m.day && !isByeMatch(m));
   const conflicts = useMemo(() => findScheduleConflicts(categories), [categories]);
   // Un color pastel distinto por categoría (v2.70.0) -- mismo mapa para el tablero y para el
   // panel Planificar, así el punto de color junto a una categoría en Planificar es EL MISMO
@@ -7832,6 +7840,25 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
         </Card>
       )}
 
+      {isAdmin && unscheduledMatches.length > 0 && (
+        <div className="text-xs px-3 py-2.5 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B", border: "1px solid #F0AE9B" }}>
+          <p className="font-bold flex items-center gap-1.5">
+            <AlertTriangle size={14} /> {unscheduledMatches.length} partido(s) sin horario asignado -- no aparecen en el tablero de ningún día. Usa Planificar para ubicarlos.
+          </p>
+          <ul className="mt-1.5 space-y-1 max-h-40 overflow-y-auto">
+            {unscheduledMatches.map((m) => {
+              const grp = groupTag(m);
+              return (
+                <li key={m.id} className="flex items-center gap-1.5 flex-wrap">
+                  <span className="shrink-0 px-1.5 py-0.5 rounded font-extrabold" style={{ background: "#B23A1B", color: "#fff", fontSize: 9, letterSpacing: 0.3 }}>SIN HORARIO</span>
+                  <span><b>{m.catName}</b> · {grp ? grp.name : roundTag(m)} — {teamLabel(m, "A")} vs {teamLabel(m, "B")}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
       {dates.length === 0 ? (
         <Card><p className="text-sm text-gray-400">Define fecha de inicio y fin del torneo en Generalidades primero.</p></Card>
       ) : (
@@ -7845,18 +7872,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
             ))}
           </div>
 
-          {scheduleInfo && (
+          {scheduleInfo?.start && scheduleInfo?.end && (
             <div className="flex flex-wrap gap-3">
-              {scheduleInfo.start && scheduleInfo.end && (
-                <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-                  Última corrida: {formatDateHuman(scheduleInfo.start.day)} {formatTimeAmPm(scheduleInfo.start.time)} → {formatDateHuman(scheduleInfo.end.day)} {formatTimeAmPm(scheduleInfo.end.time)}
-                </div>
-              )}
-              {scheduleInfo.capacityExceeded && (
-                <div className="text-xs px-3 py-2 rounded-lg flex items-center gap-1.5" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
-                  <AlertTriangle size={14} /> No alcanzan los horarios disponibles ({scheduleInfo.unscheduledGroup} partido(s) sin ubicar).
-                </div>
-              )}
+              <div className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                Última corrida: {formatDateHuman(scheduleInfo.start.day)} {formatTimeAmPm(scheduleInfo.start.time)} → {formatDateHuman(scheduleInfo.end.day)} {formatTimeAmPm(scheduleInfo.end.time)}
+              </div>
             </div>
           )}
 
