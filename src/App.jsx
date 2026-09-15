@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.74.4";
+const APP_VERSION = "2.74.5";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7364,7 +7364,7 @@ function PodiumSlot({ place, label }) {
 // queda `locked` (ver buildSchedule/plan.lockAfterSchedule) -- planificar el domingo nunca
 // reordena lo que ya se dejó listo el sábado. "Editar manualmente" (tap-origen → tap-destino)
 // se conserva igual que antes, solo que ahora se dispara desde una tarjeta del tablero.
-function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament, matchDuration, breakM, occupiedKeys, runScheduler, clearDaySchedule, catColorMap }) {
+function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament, matchDuration, breakM, occupiedKeys, runScheduler, clearDaySchedule, catColorMap, teamLabel, roundTag, groupTag }) {
   const catsWithDraw = categories.filter((c) => c.drawGenerated);
   const [catIds, setCatIds] = useState([]); // orden de selección = orden para "Por categoría completa"
   const [roundKeys, setRoundKeys] = useState({}); // { [catId]: Set(roundKey) }
@@ -7423,6 +7423,23 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
     });
     return n;
   }, [categories, catIds, roundKeys, selectedDay]);
+  // Lista real (no solo el conteo) de los partidos de la selección actual que TODAVÍA no
+  // tienen horario en ningún día (v2.74.5, a pedido del club) -- antes de correr Planificar,
+  // el organizador puede ver cada tarjeta puntual en vez de confiar solo en el contador
+  // "X/Y", para que ninguna quede pasada por alto entre medio de una categoría grande.
+  const unplannedInSelection = useMemo(() => {
+    if (!catIds.length) return [];
+    const list = [];
+    categories.forEach((c) => {
+      if (!catIds.includes(c.id)) return;
+      c.matches.forEach((m) => {
+        if (isByeMatch(m) || m.day) return;
+        if (!roundSetHas(roundKeys[c.id], roundKeyOf(m))) return;
+        list.push({ ...m, catName: c.name });
+      });
+    });
+    return list;
+  }, [categories, catIds, roundKeys]);
 
   const handlePlanificar = () => {
     if (!selectedDay || preview.queued === 0) return;
@@ -7474,6 +7491,32 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
               );
             })}
           </div>
+        </div>
+      )}
+
+      {catIds.length > 0 && (
+        <div className="mt-3">
+          <Label>Partidos sin planificar en esta selección ({unplannedInSelection.length})</Label>
+          {unplannedInSelection.length === 0 ? (
+            <p className="text-xs text-gray-400">Ninguno -- todos los partidos de esta selección ya tienen horario en algún día.</p>
+          ) : (
+            <ul className="max-h-56 overflow-y-auto space-y-1 pr-1">
+              {unplannedInSelection.map((m) => {
+                const grp = groupTag(m);
+                return (
+                  <li key={m.id} className="flex items-center gap-1.5 flex-wrap text-xs px-2 py-1.5 rounded-lg" style={{ background: "#F5F6F9" }}>
+                    {catIds.length > 1 && <b>{m.catName}</b>}
+                    {grp ? (
+                      <span className="shrink-0 px-1.5 rounded-full font-extrabold" style={{ fontSize: 8, lineHeight: "13px", letterSpacing: 0.3, background: grp.color.text, color: "#fff" }}>{grp.name}</span>
+                    ) : (
+                      <span className="text-gray-400">{roundTag(m)}</span>
+                    )}
+                    <span>{teamLabel(m, "A")} vs {teamLabel(m, "B")}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       )}
 
@@ -8067,7 +8110,8 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
             {isAdmin && (
               <PlanificarPanel categories={categories} tournamentCourts={tournamentCourts} selectedDay={day}
                 tournament={tournament} matchDuration={matchDuration} breakM={breakM} occupiedKeys={occupiedKeys}
-                runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} catColorMap={catColorMap} />
+                runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} catColorMap={catColorMap}
+                teamLabel={teamLabel} roundTag={roundTag} groupTag={groupTag} />
             )}
           </div>
         </>
