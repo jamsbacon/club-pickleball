@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.74.1";
+const APP_VERSION = "2.74.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7674,11 +7674,21 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     setDragFrom({ courtId: m.courtId, index });
   };
   const dragEnd = () => { setDraggingId(null); setDragFrom(null); setOverPos(null); };
-  // Ojo: preventDefault() hace falta acá TAMBIÉN, no solo en dragover (allowDrop) -- si el
-  // navegador entra a una fila sin que dragenter lo prevenga, decide que esa fila no acepta
-  // drop y pinta el cursor de "no permitido" aunque el dragover que sigue sí lo prevenga.
-  // Este era el bug real detrás del "no suelta" reportado en v2.73.2.
-  const dragEnterRow = (court, index) => (e) => { e.preventDefault(); setOverPos({ courtId: court.id, index }); };
+  // v2.74.2: los handlers de drag&drop viven en la CANCHA entera (un solo listener por
+  // columna), no en cada fila -- antes cada fila tenía su propio onDragOver/onDragEnter/onDrop,
+  // pero la vista previa de "empuje" (previewShift) mueve las filas con CSS transform sin
+  // sacarlas del flujo normal del documento, así que la fila que se corre hacia arriba queda
+  // pintada ENCIMA de la fila de origen (con z-index) pero el hueco que deja atrás no lo cubre
+  // nadie -- ahí no hay ningún elemento con onDragOver, así que soltar justo en esa franja
+  // vacía no dispara ningún drop y el navegador simplemente termina el arrastre sin cambiar
+  // nada (el "vuelve a lo que estaba" que reportó el club). Calculando el índice a partir de la
+  // posición Y del cursor dentro de la columna, en cambio, toda la columna es un solo target
+  // continuo sin huecos -- no importa sobre qué fila esté pintado algo en ese instante.
+  const indexFromClientY = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const raw = Math.floor((e.clientY - rect.top) / ROW_H);
+    return Math.max(0, Math.min(timeSlotOptions.length - 1, raw));
+  };
 
   // Reordena DENTRO de una cancha: mueve el contenido del índice `from` al índice `to` (como
   // un array.splice) y reparte el MISMO conjunto de horarios de esa cancha entre lo que quedó
@@ -7731,7 +7741,16 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     return { ok: true, updates };
   };
 
-  const dropOnRow = (court, index, byTimeForCourt) => (e) => {
+  // Un solo par dragOver/drop por COLUMNA (ver comentario de indexFromClientY arriba) -- el
+  // índice de destino se calcula de la posición Y del cursor, no de sobre qué fila cayó el
+  // evento.
+  const columnDragEnter = (e) => e.preventDefault(); // idem dragover -- el navegador decide si acepta drop apenas entra, antes del primer dragover
+  const columnDragOver = (court) => (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setOverPos({ courtId: court.id, index: indexFromClientY(e) });
+  };
+  const dropOnColumn = (court, byTimeForCourt) => (e) => {
     e.preventDefault();
     e.stopPropagation();
     setOverPos(null);
@@ -7739,6 +7758,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     if (!matchId || !isAdmin) return;
     const m = scheduled.find((x) => x.id === matchId);
     if (!m) return;
+    const index = indexFromClientY(e);
     const fromIndex = timeSlotOptions.indexOf(m.time);
     if (m.courtId === court.id) {
       // Misma cancha -- empujar en cadena (dragFrom ya trae el índice de origen; por las
@@ -7752,7 +7772,6 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     reorderColumn(res.updates);
     setNotice(null);
   };
-  const allowDrop = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; };
   // Cuánto se debe "correr" (arriba/abajo) la franja `index` de ESTA cancha mientras el
   // arrastre está en curso -- solo aplica dentro de la cancha de origen; cruzando canchas no
   // hay cadena que empujar, cada una se queda quieta hasta que sueltes.
@@ -7899,7 +7918,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                 </div>
               )}
               {isAdmin && tournamentCourts.length > 0 && (
-                <p className="text-[11px] text-gray-400 mb-2">En computador puedes arrastrar un partido: dentro de la misma cancha empuja a los demás para abrirle campo; a otra cancha se intercambia con el que esté ahí (o se mueve solo, si está vacía). En el teléfono usa "Editar manualmente".</p>
+                <p className="text-[11px] text-gray-400 mb-2">En computador puedes arrastrar un partido: empuja a los demás para abrirle campo, tanto dentro de la misma cancha como al soltarlo en otra. En el teléfono usa "Editar manualmente".</p>
               )}
               {tournamentCourts.length === 0 ? (
                 <p className="text-sm text-gray-400">Agrega al menos una cancha en Club (o en Generalidades del torneo).</p>
@@ -7916,7 +7935,11 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                       return (
                         <div key={court.id} className="shrink-0" style={{ width: 200 }}>
                           <div className="rounded-t-xl px-3 py-2 font-bold text-sm text-center" style={{ background: COLORS.court, color: "#fff" }}>{court.name}</div>
-                          <div className="rounded-b-xl" style={{ border: `1px solid ${COLORS.line}`, borderTop: "none", overflow: "hidden" }}>
+                          <div className="rounded-b-xl"
+                            onDragEnter={isAdmin ? columnDragEnter : undefined}
+                            onDragOver={isAdmin ? columnDragOver(court) : undefined}
+                            onDrop={isAdmin ? dropOnColumn(court, byTime) : undefined}
+                            style={{ border: `1px solid ${COLORS.line}`, borderTop: "none", overflow: "hidden" }}>
                             {timeSlotOptions.map((t, index) => {
                               const m = byTime[t];
                               const shift = previewShift(court.id, index);
@@ -7932,11 +7955,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                 // cancha el que se ve es el empuje de `previewShift`, ver arriba).
                                 const isOver = overPos?.courtId === court.id && overPos?.index === index && dragFrom?.courtId !== court.id;
                                 return (
-                                  <div key={t}
-                                    onDragOver={isAdmin ? allowDrop : undefined}
-                                    onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
-                                    onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
-                                    style={rowStyle}>
+                                  <div key={t} style={rowStyle}>
                                     <div className="h-full rounded-lg flex items-center px-2 border border-dashed"
                                       style={{ borderColor: isOver ? "#1B5FA0" : COLORS.line, background: isOver ? "#DCEEFB" : "#fff", boxShadow: isOver ? "inset 0 0 0 2px #1B5FA0" : "none" }}>
                                       <span className="text-[9px] text-gray-300 mono">{formatTimeAmPm(t)}</span>
@@ -7955,9 +7974,6 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
                                 <div key={m.id} draggable={isAdmin}
                                   onDragStart={isAdmin ? dragMatch(m, index) : undefined}
                                   onDragEnd={isAdmin ? dragEnd : undefined}
-                                  onDragOver={isAdmin ? allowDrop : undefined}
-                                  onDragEnter={isAdmin ? dragEnterRow(court, index) : undefined}
-                                  onDrop={isAdmin ? dropOnRow(court, index, byTime) : undefined}
                                   onClick={clickable ? () => selectMatch(m) : undefined}
                                   style={{
                                     ...rowStyle,
