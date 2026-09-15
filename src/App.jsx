@@ -1413,7 +1413,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.73.0";
+const APP_VERSION = "2.73.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7674,7 +7674,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const [draggingId, setDraggingId] = useState(null);
   const [dragFrom, setDragFrom] = useState(null); // { courtId, index }
   const [overPos, setOverPos] = useState(null);   // { courtId, index }
-  const ROW_H = 78; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada.
+  const ROW_H = 122; // alto fijo de CADA franja (vacía u ocupada) -- ver el <div style={{height:ROW_H}}> de cada una. Tiene que ser el mismo para las dos o la vista previa de "empujar" queda descuadrada. Tiene que caber el partido más alto posible (con la franja roja de choque) o el contenido se corta -- medido en vivo: 95px sin choque, 119px con choque.
 
   const dragMatch = (m, index) => (e) => {
     e.dataTransfer.effectAllowed = "move";
