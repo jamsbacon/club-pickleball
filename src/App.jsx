@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.66.0";
+const APP_VERSION = "2.66.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2371,6 +2371,44 @@ export default function PickleballTournamentApp() {
     return result?.error ? { error: result.error } : {};
   };
 
+  // Deshace un emparejamiento -- separa al segundo jugador de una dupla completa de vuelta en
+  // su propio cupo "esperando pareja" (v2.66.1, inverso de mergeIntoTeam justo arriba: mismo
+  // shape, mismo criterio de blindaje). Solo tiene sentido cuando ese segundo jugador tiene SU
+  // PROPIO pago guardado (paymentStatus !== undefined -- vino de mergeIntoTeam o de un join real
+  // por link): un equipo completo anotado a mano por el organizador (TeamRegistration, ambos
+  // nombres juntos, sin checkout) no tiene de dónde sacar un pago propio para el segundo, así
+  // que ahí no aplica -- se bloquea antes de intentarlo en vez de inventar un pago que no
+  // existió. Nunca toca el pago de nadie -- cada quien se queda con el suyo, solo se separan en
+  // dos filas de nuevo.
+  const splitTeam = async (catId, teamId) => {
+    const cat = categories.find((c) => c.id === catId);
+    if (!cat) return { error: "Esta categoría ya no existe." };
+    const matches = (cat.teams || []).filter((t) => t.id === teamId);
+    if (matches.length > 1) {
+      return { error: `Hay más de un equipo con el mismo identificador en "${cat.name}" (dato corrupto) -- no se separó nada para no arriesgarse a tocar al equipo equivocado. Avísale al admin de la app para revisarlo a mano.` };
+    }
+    const team = matches[0];
+    if (!team) return { error: "Este equipo ya no existe." };
+    const partner = team.players?.[1];
+    if (!partner || partner.paymentStatus === undefined) {
+      return { error: "Este equipo no se puede separar -- el segundo jugador no tiene un pago propio guardado." };
+    }
+    const newTeam = {
+      id: uid("team"), name: partner.name,
+      players: [{ name: partner.name, ranking: partner.ranking || 0, ...(partner.userId ? { userId: partner.userId } : {}) }],
+      paymentMethod: partner.paymentMethod, priceUsd: partner.priceUsd, priceBs: partner.priceBs,
+      reference: partner.reference, proofName: partner.proofName, paymentStatus: partner.paymentStatus,
+      createdAt: partner.joinedAt || Date.now(), userName: partner.name,
+      ...(partner.userId ? { userId: partner.userId } : {}),
+    };
+    const result = await updateCategory(catId, (c) => {
+      c.teams = c.teams.map((t) => (t.id === teamId ? { ...t, players: t.players.slice(0, 1), name: t.players[0].name } : t));
+      c.teams = [...c.teams, newTeam];
+      return c;
+    });
+    return result?.error ? { error: result.error } : {};
+  };
+
   // Recalcula el precio de las categorías SIN VERIFICAR que le quedan a una persona en un
   // torneo, justo después de quitarle una (v2.55.0). Mismo reparto parejo que usa el checkout
   // (tournamentRegPrice(tournament, N) / N), aplicado de nuevo con la N que le queda de verdad.
@@ -3290,7 +3328,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
-                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} mergeIntoTeam={mergeIntoTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -5825,7 +5863,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -5915,7 +5953,7 @@ function TorneosSection(props) {
         <DuplasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           addTeam={addTeam} suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
           setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
-          mergeIntoTeam={mergeIntoTeam} users={users} />
+          mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} users={users} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -6429,7 +6467,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 
 // Arma equipos y revisa quién está inscrito -- de solo lectura desde v2.50.0 (ya no borra, ver
 // comentario en TORNEO_SUB_ITEMS): el borrado vive únicamente en Inscritos.
-function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus, mergeIntoTeam, users }) {
+function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus, mergeIntoTeam, splitTeam, users }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -6438,7 +6476,7 @@ function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRa
         {activeCat ? (
           <TeamRegistration cat={activeCat} addTeam={addTeam}
             suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
-            setPlayerPaymentStatus={setPlayerPaymentStatus} mergeIntoTeam={mergeIntoTeam} users={users} />
+            setPlayerPaymentStatus={setPlayerPaymentStatus} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} users={users} />
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus duplas.</p></Card>
         )}
@@ -6603,7 +6641,7 @@ function PlayerField({ label, name, setName }) {
 // borra a nadie (v2.50.0) -- ni equipo ni lista de espera; el borrado se centralizó en
 // Inscritos (InscritosTab), por PERSONA y de una vez en todas sus categorías, no por equipo
 // suelto acá. Ver el comentario en TORNEO_SUB_ITEMS para el porqué.
-function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, users }) {
+function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, splitTeam, users }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -6650,6 +6688,21 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, users
     setPairing(false);
     if (result?.error) { setPairError(result.error); return; }
     setPairTarget(null);
+  };
+
+  // Desemparejar -- inverso de "Emparejar con...", ver splitTeam en el componente principal
+  // para el porqué y las condiciones (solo si el segundo jugador tiene su propio pago
+  // guardado). `splitTarget` es la dupla a separar (o null si el popup está cerrado).
+  const [splitTarget, setSplitTarget] = useState(null); // { catId, teamId, name1, name2 }
+  const [splitting, setSplitting] = useState(false);
+  const [splitError, setSplitError] = useState("");
+  const confirmSplit = async () => {
+    if (!splitTarget || splitting) return;
+    setSplitting(true); setSplitError("");
+    const result = await splitTeam(splitTarget.catId, splitTarget.teamId);
+    setSplitting(false);
+    if (result?.error) { setSplitError(result.error); return; }
+    setSplitTarget(null);
   };
 
   return (
@@ -6723,6 +6776,15 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, users
                     {compatiblePartners(t).map((o) => <option key={o.id} value={o.id}>{o.players[0].name}</option>)}
                   </select>
                 )}
+                {/* v2.66.1: inverso de "Emparejar con..." -- solo si el segundo jugador tiene
+                   pago propio guardado (ver splitTeam), si no no hay nada que separar de
+                   verdad. */}
+                {splitTeam && (t.players || []).length === 2 && t.players[1]?.paymentStatus !== undefined && (
+                  <button onClick={() => setSplitTarget({ catId: cat.id, teamId: t.id, name1: t.players[0].name, name2: t.players[1].name })}
+                    className="ml-2 text-[11px] font-semibold rounded-full px-2 py-0.5" style={{ background: "#FBEAE3", color: COLORS.clay, border: "none" }}>
+                    Desemparejar
+                  </button>
+                )}
               </div>
               <span className="mono text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
             </div>
@@ -6752,9 +6814,17 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, users
       {pairTarget && (
         <ConfirmDeleteModal
           title={`¿Emparejar a ${pairTarget.targetName} con ${pairTarget.sourceName}?`}
-          message={pairError || "Quedan como una sola dupla -- cada quien conserva su propio pago, no se toca nada de lo que ya pagaron. Esta acción no se puede deshacer."}
+          message={pairError || "Quedan como una sola dupla -- cada quien conserva su propio pago, no se toca nada de lo que ya pagaron. Si te equivocas, puedes deshacerlo después con \"Desemparejar\"."}
           options={[{ label: pairing ? "Emparejando…" : "Emparejar", variant: "danger", onClick: confirmPair }]}
           onCancel={() => { setPairTarget(null); setPairError(""); }} />
+      )}
+
+      {splitTarget && (
+        <ConfirmDeleteModal
+          title={`¿Separar a ${splitTarget.name1} de ${splitTarget.name2}?`}
+          message={splitError || `Vuelven a quedar como dos inscripciones sueltas, cada uno "esperando pareja" -- ninguno pierde su pago.`}
+          options={[{ label: splitting ? "Separando…" : "Desemparejar", variant: "danger", onClick: confirmSplit }]}
+          onCancel={() => { setSplitTarget(null); setSplitError(""); }} />
       )}
     </Card>
   );
