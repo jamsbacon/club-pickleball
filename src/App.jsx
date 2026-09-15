@@ -8,7 +8,7 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye, Download
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -1319,7 +1319,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.67.0";
+const APP_VERSION = "2.68.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -5988,7 +5988,7 @@ function TorneosSection(props) {
 
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
-          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} />
+          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} />
       )}
     </div>
   );
@@ -8017,11 +8017,15 @@ function chronoSort(matches, courtOrder) {
   });
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament }) {
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
   // Filtrar a una categoría puntual (con sus tablas/bracket) sigue disponible como antes.
   const [catId, setCatId] = useState("all");
+  // v2.68.0: planillas descargables -- ver PrintScoreSheets. `printing` solo controla que el
+  // bloque imprimible exista en el DOM (se monta al pulsar el botón, se desmonta solo al
+  // cerrar el diálogo de impresión vía el evento "afterprint").
+  const [printing, setPrinting] = useState(false);
   const cat = catId === "all" ? null : categories.find((c) => c.id === catId) || null;
   const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
 
@@ -8040,12 +8044,25 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </div>
   );
 
+  // Botón compartido por las dos vistas (Todas / una categoría) -- descarga justo los
+  // partidos que se están viendo en pantalla en ese momento (respeta el filtro activo).
+  const downloadButton = (printMatches) => (
+    <button onClick={() => setPrinting(true)} disabled={printMatches.length === 0}
+      style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}`, opacity: printMatches.length === 0 ? 0.4 : 1 }}
+      className="px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5">
+      <Download size={13} /> Descargar planillas
+    </button>
+  );
+
   if (catId === "all") {
     const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
     const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m)).map((m) => ({ ...m, __cat: c }))), courtOrder);
     return (
       <div className="mt-2 space-y-5">
-        {catChips}
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          {catChips}
+          {downloadButton(allPlayable)}
+        </div>
         <Card>
           <SectionTitle sub="Todos los partidos jugables de todas las categorías, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.">Cargar resultados</SectionTitle>
           <div className="space-y-3">
@@ -8057,6 +8074,10 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
             {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">Genera primero el draw de alguna categoría.</p>}
           </div>
         </Card>
+        {printing && (
+          <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={tournament?.name}
+            onClose={() => setPrinting(false)} />
+        )}
       </div>
     );
   }
@@ -8066,12 +8087,16 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
   const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m)), courtOrder);
+  const printMatches = playableMatches.map((m) => ({ ...m, __cat: cat }));
   const isDouble = cat.format === "doble_eliminacion";
   const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
 
   return (
     <div className="mt-2 space-y-5">
-      {catChips}
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        {catChips}
+        {downloadButton(printMatches)}
+      </div>
 
       {cat.groups.map((g) => (
         <Card key={g.id}>
@@ -8112,6 +8137,85 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">Genera primero el draw de esta categoría.</p>}
         </div>
       </Card>
+      {printing && (
+        <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={tournament?.name}
+          onClose={() => setPrinting(false)} />
+      )}
+    </div>
+  );
+}
+
+// Planillas de resultados en papel (v2.68.0) -- "descargar" acá es imprimir: se abre el
+// diálogo de impresión del navegador y desde ahí el admin elige "Guardar como PDF" (o
+// imprimirlas de verdad para llevarlas a cancha). Se prefirió esto a generar un PDF de
+// verdad porque no hace falta sumar ninguna librería nueva al proyecto (nada de jsPDF) y
+// funciona sin conexión, igual que el resto del flujo de Torneo -- ver la nota de
+// resiliencia sin internet en loadCache/saveCache más arriba en el archivo.
+//
+// El truco de CSS es el clásico "ocultar todo menos el bloque a imprimir": en @media print
+// TODO se vuelve invisible excepto #print-sheets y sus hijos, que además se reposicionan a
+// pantalla completa -- así no hace falta desmontar el resto de la app (sidebar, tabs, etc.)
+// para imprimir solo esto. El bloque completo (botones, tabs...) tiene la clase
+// "no-print" como refuerzo, aunque con el truco de visibility ya alcanzaría solo.
+function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(() => window.print(), 80);
+    const onAfterPrint = () => onClose();
+    window.addEventListener("afterprint", onAfterPrint);
+    return () => { clearTimeout(t); window.removeEventListener("afterprint", onAfterPrint); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div id="print-sheets" className="no-print">
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          #print-sheets, #print-sheets * { visibility: visible; }
+          #print-sheets { position: absolute; left: 0; top: 0; width: 100%; padding: 16px; }
+          .print-sheet-card { break-inside: avoid; page-break-inside: avoid; }
+        }
+        @media screen { #print-sheets { display: none; } }
+      `}</style>
+      <p className="text-lg font-bold">{tournamentName || "Torneo"}</p>
+      <p className="text-xs text-gray-500 mb-4">Planillas de resultados -- generadas el {formatDateFull(new Date().toISOString().slice(0, 10))}</p>
+      <div className="grid grid-cols-2 gap-3">
+        {matches.map((m) => {
+          const labelA = m.teamALabel || m.__cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
+          const labelB = m.teamBLabel || m.__cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
+          const bestOf = m.__cat.bestOf || 3;
+          const court = courtById[m.courtId]?.name || "Cancha por definir";
+          const when = m.day ? `${formatDateHuman(m.day)} · ${formatTimeAmPm(m.time)}` : "Horario por definir";
+          return (
+            <div key={m.id} className="print-sheet-card rounded-lg p-2.5" style={{ border: "1.5px solid #000" }}>
+              <p className="text-[9px] font-extrabold uppercase tracking-wide">{m.__cat.name}</p>
+              <p className="text-[10px] text-gray-600 mb-1.5">{court} · {when}</p>
+              <table className="w-full text-xs" style={{ borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th className="text-left font-semibold pb-1" style={{ width: "46%" }}></th>
+                    {Array.from({ length: bestOf }, (_, i) => (
+                      <th key={i} className="text-center font-semibold pb-1 text-[9px]">Set {i + 1}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[labelA, labelB].map((label, r) => (
+                    <tr key={r}>
+                      <td className="text-[11px] font-semibold py-1 pr-1 truncate">{label}</td>
+                      {Array.from({ length: bestOf }, (_, i) => (
+                        <td key={i} className="p-0.5">
+                          <div style={{ border: "1px solid #000", height: 26, borderRadius: 3 }}></div>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
