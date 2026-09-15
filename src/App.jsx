@@ -1308,7 +1308,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.65.0";
+const APP_VERSION = "2.66.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2322,6 +2322,55 @@ export default function PickleballTournamentApp() {
     return {};
   };
 
+  // Une dos inscripciones sueltas "esperando pareja" de la MISMA categoría en una sola dupla
+  // (v2.66.0, pestaña Duplas) -- a pedido del club: hasta ahora la única forma de completar un
+  // cupo era que la propia pareja abriera el link de invitación y pagara por su cuenta; si el
+  // admin ya sabe quién va con quién (dos personas que se registraron cada una por su lado), no
+  // había manera de juntarlas sin borrar una de las dos inscripciones y perder su pago.
+  // `targetTeamId` es la fila que SOBREVIVE (el otro jugador entra ahí como players[1], con SU
+  // PROPIO pago -- mismo shape que deja joinTeam cuando alguien se une por el link real, así el
+  // resto de la app -- buildTournamentParticipants, Pagos, Inscritos -- no necesita tratarlo
+  // distinto); `sourceTeamId` es la fila que desaparece. Nunca toca ningún pago -- cada quien se
+  // queda con el suyo, solo se combinan en una fila. Mismo blindaje de IDs duplicados que
+  // removePersonFromCategory (ver su comentario) y misma regla de género en categorías mixtas
+  // que joinTeam (nunca dos del mismo género, ver ese comentario para el porqué).
+  const mergeIntoTeam = async (catId, targetTeamId, sourceTeamId) => {
+    const cat = categories.find((c) => c.id === catId);
+    if (!cat) return { error: "Esta categoría ya no existe." };
+    const matchesTarget = (cat.teams || []).filter((t) => t.id === targetTeamId);
+    const matchesSource = (cat.teams || []).filter((t) => t.id === sourceTeamId);
+    if (matchesTarget.length > 1 || matchesSource.length > 1) {
+      return { error: "Hay equipos con el mismo identificador en esta categoría (dato corrupto) -- no se unió nada para no arriesgarse a mezclar al equipo equivocado. Avísale al admin de la app para revisarlo a mano." };
+    }
+    const target = matchesTarget[0];
+    const source = matchesSource[0];
+    if (!target || !source) return { error: "Uno de los dos cupos ya no existe -- puede que ya se haya emparejado o borrado." };
+    if ((target.players || []).length !== 1 || (source.players || []).length !== 1) {
+      return { error: "Alguno de los dos cupos ya no está esperando pareja." };
+    }
+    if (cat.gender === "mixto") {
+      const g1 = users.find((u) => u.id === target.players[0].userId)?.gender;
+      const g2 = users.find((u) => u.id === source.players[0].userId)?.gender;
+      if (g1 && g2 && g1 === g2) {
+        return { error: "Esta categoría es mixta -- necesita 1 hombre y 1 mujer, no puedes emparejar a dos del mismo género." };
+      }
+    }
+    const mergedPlayer = {
+      ...source.players[0], priceUsd: source.priceUsd, priceBs: source.priceBs,
+      paymentMethod: source.paymentMethod, reference: source.reference, proofName: source.proofName,
+      paymentStatus: source.paymentStatus, joinedAt: source.createdAt,
+    };
+    const result = await updateCategory(catId, (c) => {
+      c.teams = c.teams.filter((t) => t.id !== sourceTeamId).map((t) => {
+        if (t.id !== targetTeamId) return t;
+        const players = [...t.players, mergedPlayer];
+        return { ...t, players, name: players.map((p) => p.name).join(" / ") };
+      });
+      return c;
+    });
+    return result?.error ? { error: result.error } : {};
+  };
+
   // Recalcula el precio de las categorías SIN VERIFICAR que le quedan a una persona en un
   // torneo, justo después de quitarle una (v2.55.0). Mismo reparto parejo que usa el checkout
   // (tournamentRegPrice(tournament, N) / N), aplicado de nuevo con la N que le queda de verdad.
@@ -3241,7 +3290,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
-                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} mergeIntoTeam={mergeIntoTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -5776,7 +5825,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch,
@@ -5865,7 +5914,8 @@ function TorneosSection(props) {
       {subTab === "duplas" && role === "admin" && (
         <DuplasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           addTeam={addTeam} suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
-          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} />
+          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+          mergeIntoTeam={mergeIntoTeam} users={users} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -6379,7 +6429,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 
 // Arma equipos y revisa quién está inscrito -- de solo lectura desde v2.50.0 (ya no borra, ver
 // comentario en TORNEO_SUB_ITEMS): el borrado vive únicamente en Inscritos.
-function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus }) {
+function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus, mergeIntoTeam, users }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -6388,7 +6438,7 @@ function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRa
         {activeCat ? (
           <TeamRegistration cat={activeCat} addTeam={addTeam}
             suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
-            setPlayerPaymentStatus={setPlayerPaymentStatus} />
+            setPlayerPaymentStatus={setPlayerPaymentStatus} mergeIntoTeam={mergeIntoTeam} users={users} />
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus duplas.</p></Card>
         )}
@@ -6553,7 +6603,7 @@ function PlayerField({ label, name, setName }) {
 // borra a nadie (v2.50.0) -- ni equipo ni lista de espera; el borrado se centralizó en
 // Inscritos (InscritosTab), por PERSONA y de una vez en todas sus categorías, no por equipo
 // suelto acá. Ver el comentario en TORNEO_SUB_ITEMS para el porqué.
-function TeamRegistration({ cat, addTeam, suggestedRanking }) {
+function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, users }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -6571,6 +6621,35 @@ function TeamRegistration({ cat, addTeam, suggestedRanking }) {
     const result = await addTeam(cat.id, players);
     if (result?.error) { setError("No se pudo guardar -- revisa tu conexión e intenta de nuevo."); return; }
     setP1(""); setP2("");
+  };
+
+  // Emparejar a mano dos inscripciones sueltas "esperando pareja" (v2.66.0) -- ver el
+  // comentario de mergeIntoTeam en el componente principal para el porqué. `pairTarget` es la
+  // pareja elegida (o null si el popup de confirmación está cerrado); `compatiblePartners`
+  // descarta como opción a cualquiera del mismo género en categorías mixtas (mismo criterio de
+  // "si no se conoce el género, no se filtra" que ya usa el resto de la app) -- mergeIntoTeam
+  // vuelve a chequear esto igual del lado del guardado, esto es solo para no mostrar una opción
+  // que de todos modos va a fallar.
+  const compatiblePartners = (t) => {
+    const candidates = (cat.teams || []).filter((o) => o.id !== t.id && (o.players || []).length === 1);
+    if (cat.gender !== "mixto") return candidates;
+    const myGender = users?.find((u) => u.id === t.players[0]?.userId)?.gender;
+    if (!myGender) return candidates;
+    return candidates.filter((o) => {
+      const otherGender = users?.find((u) => u.id === o.players[0]?.userId)?.gender;
+      return !otherGender || otherGender !== myGender;
+    });
+  };
+  const [pairTarget, setPairTarget] = useState(null); // { catId, targetId, targetName, sourceId, sourceName }
+  const [pairing, setPairing] = useState(false);
+  const [pairError, setPairError] = useState("");
+  const confirmPair = async () => {
+    if (!pairTarget || pairing) return;
+    setPairing(true); setPairError("");
+    const result = await mergeIntoTeam(pairTarget.catId, pairTarget.targetId, pairTarget.sourceId);
+    setPairing(false);
+    if (result?.error) { setPairError(result.error); return; }
+    setPairTarget(null);
   };
 
   return (
@@ -6635,6 +6714,15 @@ function TeamRegistration({ cat, addTeam, suggestedRanking }) {
                     <Hourglass size={9} /> Esperando pareja
                   </span>
                 )}
+                {waitingPartner && mergeIntoTeam && compatiblePartners(t).length > 0 && (
+                  <select value="" onChange={(e) => {
+                    const source = compatiblePartners(t).find((o) => o.id === e.target.value);
+                    if (source) setPairTarget({ catId: cat.id, targetId: t.id, targetName: t.players[0].name, sourceId: source.id, sourceName: source.players[0].name });
+                  }} className="ml-2 text-[11px] font-semibold rounded-full pl-2 pr-1 py-0.5" style={{ background: "#EAF0F8", color: COLORS.courtDark, border: "none" }}>
+                    <option value="">Emparejar con…</option>
+                    {compatiblePartners(t).map((o) => <option key={o.id} value={o.id}>{o.players[0].name}</option>)}
+                  </select>
+                )}
               </div>
               <span className="mono text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
             </div>
@@ -6659,6 +6747,14 @@ function TeamRegistration({ cat, addTeam, suggestedRanking }) {
             ))}
           </div>
         </div>
+      )}
+
+      {pairTarget && (
+        <ConfirmDeleteModal
+          title={`¿Emparejar a ${pairTarget.targetName} con ${pairTarget.sourceName}?`}
+          message={pairError || "Quedan como una sola dupla -- cada quien conserva su propio pago, no se toca nada de lo que ya pagaron. Esta acción no se puede deshacer."}
+          options={[{ label: pairing ? "Emparejando…" : "Emparejar", variant: "danger", onClick: confirmPair }]}
+          onCancel={() => { setPairTarget(null); setPairError(""); }} />
       )}
     </Card>
   );
