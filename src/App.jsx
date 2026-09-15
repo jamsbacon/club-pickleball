@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.76.0";
+const APP_VERSION = "2.76.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8865,6 +8865,28 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
 // pantalla completa -- así no hace falta desmontar el resto de la app (sidebar, tabs, etc.)
 // para imprimir solo esto. El bloque completo (botones, tabs...) tiene la clase
 // "no-print" como refuerzo, aunque con el truco de visibility ya alcanzaría solo.
+// v2.76.1: rediseñada a pedido del club, siguiendo el formato de una planilla de otra liga que
+// mandaron de ejemplo -- una fila compacta por partido (hora, cancha, equipos, categoría/fase)
+// en vez de una tarjeta grande por partido, con dos agregados propios: un número de índice
+// corrido al principio de cada fila (la referencia no traía ninguno) y, en el bloque de
+// puntaje del medio, tantos pares de casillas como sets tenga que jugarse ESE partido según
+// `bestOf` de su categoría (la referencia siempre traía dos casillas fijas, sin importar el
+// formato) -- así una casilla por set le sirve a cualquier categoría, sea al mejor de 1, 3 o 5.
+// Mismo criterio que el roundTag de CalendarioTab, pero como función suelta -- PrintScoreSheets
+// vive fuera de ese componente y ya trae la categoría de cada partido pegada en `m.__cat`.
+function printRoundTag(m) {
+  const cat = m.__cat;
+  if (!cat) return "";
+  if (m.phase === "group") return "Grupos";
+  if (m.phase === "bracket") {
+    const total = new Set(cat.matches.filter((x) => x.phase === "bracket").map((x) => x.round)).size;
+    return roundLabel(m.round, total);
+  }
+  if (m.phase === "bracket_wr") return `Llave A R${m.round + 1}`;
+  if (m.phase === "bracket_lb") return `Llave B R${m.round + 1}`;
+  return "";
+}
+
 function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
   useEffect(() => {
     const t = setTimeout(() => window.print(), 80);
@@ -8881,49 +8903,55 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
           body * { visibility: hidden; }
           #print-sheets, #print-sheets * { visibility: visible; }
           #print-sheets { position: absolute; left: 0; top: 0; width: 100%; padding: 16px; }
-          .print-sheet-card { break-inside: avoid; page-break-inside: avoid; }
+          .print-sheet-row { break-inside: avoid; page-break-inside: avoid; }
+          .print-sheet-table thead { display: table-header-group; }
         }
         @media screen { #print-sheets { display: none; } }
       `}</style>
       <p className="text-lg font-bold">{tournamentName || "Torneo"}</p>
-      <p className="text-xs text-gray-500 mb-4">Planillas de resultados -- generadas el {formatDateFull(new Date().toISOString().slice(0, 10))}</p>
-      <div className="grid grid-cols-2 gap-3">
-        {matches.map((m) => {
-          const labelA = m.teamALabel || m.__cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
-          const labelB = m.teamBLabel || m.__cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
-          const bestOf = m.__cat.bestOf || 3;
-          const court = courtById[m.courtId]?.name || "Cancha por definir";
-          const when = m.day ? `${formatDateHuman(m.day)} · ${formatTimeAmPm(m.time)}` : "Horario por definir";
-          return (
-            <div key={m.id} className="print-sheet-card rounded-lg p-2.5" style={{ border: "1.5px solid #000" }}>
-              <p className="text-[9px] font-extrabold uppercase tracking-wide">{m.__cat.name}</p>
-              <p className="text-[10px] text-gray-600 mb-1.5">{court} · {when}</p>
-              <table className="w-full text-xs" style={{ borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th className="text-left font-semibold pb-1" style={{ width: "46%" }}></th>
-                    {Array.from({ length: bestOf }, (_, i) => (
-                      <th key={i} className="text-center font-semibold pb-1 text-[9px]">Set {i + 1}</th>
+      <p className="text-xs text-gray-500 mb-4">Programa de partidos -- generado el {formatDateFull(new Date().toISOString().slice(0, 10))}</p>
+      <table className="print-sheet-table w-full text-xs" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "2px solid #000" }}>
+            <th className="text-left font-semibold pb-1.5 pr-2">#</th>
+            <th className="text-left font-semibold pb-1.5 pr-2">Hora</th>
+            <th className="text-left font-semibold pb-1.5 pr-2">Cancha</th>
+            <th className="text-right font-semibold pb-1.5 pr-2">Equipo A</th>
+            <th className="text-center font-semibold pb-1.5 px-1">Sets</th>
+            <th className="text-left font-semibold pb-1.5 pl-2">Equipo B</th>
+            <th className="text-left font-semibold pb-1.5 pl-2">Categoría · Fase</th>
+          </tr>
+        </thead>
+        <tbody>
+          {matches.map((m, i) => {
+            const labelA = m.teamALabel || m.__cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
+            const labelB = m.teamBLabel || m.__cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
+            const bestOf = m.__cat.bestOf || 3;
+            const court = courtById[m.courtId]?.name || "Por definir";
+            const when = m.day ? formatTimeAmPm(m.time) : "Por definir";
+            return (
+              <tr key={m.id} className="print-sheet-row" style={{ borderBottom: "1px solid #000" }}>
+                <td className="py-2 pr-2 font-semibold">{i + 1}</td>
+                <td className="py-2 pr-2 mono" style={{ whiteSpace: "nowrap" }}>{when}</td>
+                <td className="py-2 pr-2">{court}</td>
+                <td className="py-2 pr-2 text-right font-semibold">{labelA}</td>
+                <td className="py-2 px-1">
+                  <div className="flex justify-center gap-1">
+                    {Array.from({ length: bestOf }, (_, s) => (
+                      <div key={s} className="flex" style={{ border: "1px solid #000", borderRadius: 3 }} title={`Set ${s + 1}`}>
+                        <div style={{ width: 22, height: 24, borderRight: "1px solid #000" }}></div>
+                        <div style={{ width: 22, height: 24 }}></div>
+                      </div>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {[labelA, labelB].map((label, r) => (
-                    <tr key={r}>
-                      <td className="text-[11px] font-semibold py-1 pr-1 truncate">{label}</td>
-                      {Array.from({ length: bestOf }, (_, i) => (
-                        <td key={i} className="p-0.5">
-                          <div style={{ border: "1px solid #000", height: 26, borderRadius: 3 }}></div>
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        })}
-      </div>
+                  </div>
+                </td>
+                <td className="py-2 pl-2 font-semibold">{labelB}</td>
+                <td className="py-2 pl-2 text-gray-600" style={{ whiteSpace: "nowrap" }}>{m.__cat.name} · {printRoundTag(m)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
