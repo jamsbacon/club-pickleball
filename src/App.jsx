@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.75.3";
+const APP_VERSION = "2.76.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1495,7 +1495,7 @@ const FORMAT_LABELS = {
 };
 
 const MODALITY_LABELS = { individual: "Individual (single)", dobles: "Dobles" };
-const GENDER_LABELS = { masculino: "Masculino", femenino: "Femenino", mixto: "Mixto" };
+const GENDER_LABELS = { masculino: "Masculino", femenino: "Femenino", mixto: "Mixto", libre: "Libre" };
 // "Master (+50)" (v2.42.1) es una categoría por edad, no por nivel de habilidad -- convive acá
 // porque LEVEL_OPTIONS es la misma lista que arma el nombre de categoría de torneo
 // (NewCategoryForm) y el "nivel recomendado" de Open Play/Clase; se agrega al final para no
@@ -3860,7 +3860,7 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
     if ((c.matches || []).length > 0) return false;
     const already = [...(c.teams || []), ...(c.waitlist || [])].some((t) => (t.players || []).some((p) => p.userId === currentUser.id));
     if (already) return false;
-    if (currentUser.gender && c.gender !== "mixto" && c.gender !== currentUser.gender) return false;
+    if (currentUser.gender && c.gender !== "mixto" && c.gender !== "libre" && c.gender !== currentUser.gender) return false;
     return true;
   });
   const selectedExtras = extraEligible.filter((c) => extraIds.includes(c.id));
@@ -6834,7 +6834,10 @@ function NewCategoryForm({ onCreate, onCancel }) {
           <div>
             <Label>2. Género</Label>
             <Segmented value={gender} onChange={setGender}
-              options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }]} />
+              options={[{ value: "masculino", label: "Masculino" }, { value: "femenino", label: "Femenino" }, { value: "mixto", label: "Mixto", disabled: modality === "individual" }, { value: "libre", label: "Libre" }]} />
+            {gender === "libre" && (
+              <p className="text-xs text-gray-400 mt-1.5">Sin restricción de género -- duplas masculinas, femeninas y mixtas compiten todas juntas en esta misma categoría.</p>
+            )}
           </div>
         </div>
         <div>
@@ -8313,7 +8316,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   const isSelf = !!registrant && registrant.userId === currentUser.id;
 
   // ---- Player self-registration: only categories still open to the person being registered
-  // (y que correspondan a su género -- una categoría 'mixto' es visible para cualquiera), no
+  // (y que correspondan a su género -- 'mixto' y 'libre' son visibles para cualquiera), no
   // free-text name for themselves, a searched/invited partner for doubles, and a real checkout
   // step. Si no se conoce el género (perfil incompleto, o invitado sin cuenta) no se puede
   // filtrar -- se muestran todas. ----
@@ -8323,7 +8326,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     const alreadyIn = [...c.teams, ...c.waitlist].some((t) => t.players.some((p) =>
       registrant.userId ? p.userId === registrant.userId : p.name.trim().toLowerCase() === registrant.name.trim().toLowerCase()));
     if (alreadyIn) return false;
-    if (registrant.gender && c.gender !== "mixto" && c.gender !== registrant.gender) return false;
+    if (registrant.gender && c.gender !== "mixto" && c.gender !== "libre" && c.gender !== registrant.gender) return false;
     return true;
   }) : [];
 
