@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.75.1";
+const APP_VERSION = "2.75.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7583,6 +7583,10 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
   const [moveError, setMoveError] = useState("");
   const [selectedDay, setSelectedDay] = useState("");
   const day = dates.includes(selectedDay) ? selectedDay : (dates[0] || "");
+  // v2.75.2: el panel de la derecha alterna entre el formulario de Planificar y la lista de
+  // tarjetas "Sin programar" (arrastrables directo a una cancha) -- son dos vistas del mismo
+  // espacio, no dos secciones separadas, igual que en la app de referencia que mostró el club.
+  const [rightPanelTab, setRightPanelTab] = useState("planificar");
 
   // Generalidades deja acotar el torneo a un subconjunto de canchas del club -- el tablero
   // solo debe mostrar columnas de esas, igual criterio que runScheduler.
@@ -7711,6 +7715,16 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     setDraggingId(m.id);
     setDragFrom({ courtId: m.courtId, index });
   };
+  // Arrastrar desde la lista "Sin programar" (v2.75.2) -- a diferencia de dragMatch, este
+  // partido nunca tuvo cancha/horario, así que no hay `dragFrom` que empujar en cadena (por
+  // eso null): previewShift y el resaltado "isOver" de cruce de cancha ya manejan un
+  // dragFrom nulo sin romperse, tal cual estaban escritos para el caso entre-canchas.
+  const dragUnscheduledMatch = (m) => (e) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", m.id);
+    setDraggingId(m.id);
+    setDragFrom(null);
+  };
   const dragEnd = () => { setDraggingId(null); setDragFrom(null); setOverPos(null); };
   // v2.74.2: los handlers de drag&drop viven en la CANCHA entera (un solo listener por
   // columna), no en cada fila -- antes cada fila tenía su propio onDragOver/onDragEnter/onDrop,
@@ -7796,6 +7810,38 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     return { ok: true, updates };
   };
 
+  // Soltar un partido que viene de "Sin programar" (v2.75.2) -- nunca tuvo cancha ni horario,
+  // así que no hay columna de origen que cerrar (a diferencia de reorderAcrossColumns): solo
+  // hace falta abrirle campo en la columna DESTINO, empujando hacia abajo lo que había desde
+  // el puesto elegido. Si no queda ningún hueco libre, se extiende el día un puesto más (mismo
+  // criterio que buildSchedule -- nunca se deja sin ubicar, ver isOvertimeMatch) en vez de
+  // rechazar el movimiento.
+  const placeUnscheduledMatch = (m, destCourt, destIndex) => {
+    const destByTime = {};
+    (dayMatchesByCourt[destCourt.id] || []).forEach((x) => { destByTime[x.time] = x; });
+    const destSlots = timeSlotOptions.map((t) => destByTime[t] || null);
+    const destTimes = [...timeSlotOptions];
+    let freeAt = -1;
+    for (let i = destIndex; i < destSlots.length; i++) { if (!destSlots[i]) { freeAt = i; break; } }
+    if (freeAt === -1) {
+      const lastMin = timeToMinutes(destTimes[destTimes.length - 1]);
+      destTimes.push(minutesToTime(lastMin + Number(matchDuration) + Number(breakM)));
+      destSlots.push(null);
+      freeAt = destSlots.length - 1;
+    }
+    for (let i = freeAt; i > destIndex; i--) destSlots[i] = destSlots[i - 1];
+    destSlots[destIndex] = m;
+
+    const updates = [];
+    destSlots.forEach((x, i) => {
+      if (!x) return;
+      if (x.id === m.id || x.time !== destTimes[i] || x.courtId !== destCourt.id) {
+        updates.push({ categoryId: x.categoryId, matchId: x.id, day, time: destTimes[i], courtId: destCourt.id });
+      }
+    });
+    reorderColumn(updates);
+  };
+
   // Un solo par dragOver/drop por COLUMNA (ver comentario de indexFromClientY arriba) -- el
   // índice de destino se calcula de la posición Y del cursor, no de sobre qué fila cayó el
   // evento.
@@ -7811,9 +7857,14 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
     setOverPos(null);
     const matchId = e.dataTransfer.getData("text/plain");
     if (!matchId || !isAdmin) return;
-    const m = scheduled.find((x) => x.id === matchId);
+    const m = allMatches.find((x) => x.id === matchId); // allMatches, no `scheduled` -- este drop también recibe partidos de "Sin programar", que no tienen día todavía
     if (!m) return;
     const index = indexFromClientY(e);
+    if (!m.day || !m.courtId) {
+      // Viene de "Sin programar" -- nunca tuvo cancha, no hay columna de origen que cerrar.
+      placeUnscheduledMatch(m, court, index);
+      return;
+    }
     const fromIndex = timeSlotOptions.indexOf(m.time);
     if (m.courtId === court.id) {
       // Misma cancha -- empujar en cadena (dragFrom ya trae el índice de origen; por las
@@ -8103,9 +8154,59 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
             </Card>
 
             {isAdmin && (
-              <PlanificarPanel categories={categories} tournamentCourts={tournamentCourts} selectedDay={day}
-                tournament={tournament} matchDuration={matchDuration} breakM={breakM} occupiedKeys={occupiedKeys}
-                runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} catColorMap={catColorMap} />
+              <div>
+                <div className="flex gap-1.5 mb-2">
+                  <button type="button" onClick={() => setRightPanelTab("planificar")}
+                    className="flex-1 px-3 py-2 rounded-xl text-sm font-bold"
+                    style={{ background: rightPanelTab === "planificar" ? COLORS.court : "#EAEEF5", color: rightPanelTab === "planificar" ? "#fff" : COLORS.ink }}>
+                    Planificar
+                  </button>
+                  <button type="button" onClick={() => setRightPanelTab("sinProgramar")}
+                    className="flex-1 px-3 py-2 rounded-xl text-sm font-bold"
+                    style={{ background: rightPanelTab === "sinProgramar" ? COLORS.court : "#EAEEF5", color: rightPanelTab === "sinProgramar" ? "#fff" : COLORS.ink }}>
+                    Sin programar {unscheduledMatches.length > 0 ? `(${unscheduledMatches.length})` : ""}
+                  </button>
+                </div>
+                {rightPanelTab === "planificar" ? (
+                  <PlanificarPanel categories={categories} tournamentCourts={tournamentCourts} selectedDay={day}
+                    tournament={tournament} matchDuration={matchDuration} breakM={breakM} occupiedKeys={occupiedKeys}
+                    runScheduler={runScheduler} clearDaySchedule={clearDaySchedule} catColorMap={catColorMap} />
+                ) : (
+                  <Card>
+                    <SectionTitle sub="Arrastra cualquiera de estas tarjetas directo a una casilla del tablero -- misma cancha o cualquier otra -- para darle horario. Ninguna se pierde de vista hasta que quede agendada.">
+                      Sin programar
+                    </SectionTitle>
+                    {unscheduledMatches.length === 0 ? (
+                      <p className="text-sm text-gray-400 mt-2">Ninguno -- todos los partidos ya tienen horario en algún día.</p>
+                    ) : (
+                      <div className="mt-3 space-y-2 max-h-[520px] overflow-y-auto pr-1">
+                        {unscheduledMatches.map((m) => {
+                          const cc = catColorMap[m.categoryId] || CATEGORY_PALETTE[0];
+                          const grp = groupTag(m);
+                          const isDragging = draggingId === m.id;
+                          return (
+                            <div key={m.id} draggable
+                              onDragStart={dragUnscheduledMatch(m)}
+                              onDragEnd={dragEnd}
+                              className="p-2 text-xs rounded-lg cursor-grab"
+                              style={{ background: cc.bg, opacity: isDragging ? 0.35 : 1, boxShadow: "0 1px 3px rgba(22,50,92,0.12)" }}>
+                              <div className="flex items-center gap-1">
+                                <span className="text-[9px] uppercase font-bold tracking-wide truncate" style={{ color: cc.text }}>{m.catName}{grp ? "" : ` · ${roundTag(m)}`}</span>
+                                {grp && (
+                                  <span className="shrink-0 px-1.5 rounded-full font-extrabold" style={{ fontSize: 8, lineHeight: "13px", letterSpacing: 0.3, background: grp.color.text, color: "#fff" }}>{grp.name}</span>
+                                )}
+                              </div>
+                              <div className="font-medium leading-tight mt-0.5 truncate">{teamLabel(m, "A")}</div>
+                              <div className="text-gray-400 text-[10px] leading-tight">vs</div>
+                              <div className="font-medium leading-tight truncate">{teamLabel(m, "B")}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
+                )}
+              </div>
             )}
           </div>
         </>
