@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.76.2";
+const APP_VERSION = "2.76.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8872,6 +8872,20 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
 // puntaje del medio, tantos pares de casillas como sets tenga que jugarse ESE partido según
 // `bestOf` de su categoría (la referencia siempre traía dos casillas fijas, sin importar el
 // formato) -- así una casilla por set le sirve a cualquier categoría, sea al mejor de 1, 3 o 5.
+// Código corto de categoría para la planilla impresa (v2.76.3, a pedido del club) -- el nombre
+// completo ("Dobles Masculino Open") no cabía sin ensanchar la columna, así que se abrevia a
+// "nivel-modalidad+género" (ej. "O-DM", "+50-DF", "3.5-DMX"). Los niveles numéricos (3.0...5.0+)
+// ya son cortos y pasan tal cual; "Open" y "Master (+50)" son los dos que de verdad hacía
+// falta acortar.
+const CATEGORY_LEVEL_CODES = { "Principiante": "P", "Open": "O", "Master (+50)": "+50" };
+const CATEGORY_GENDER_CODES = { masculino: "M", femenino: "F", mixto: "MX", libre: "L" };
+function categoryCode(cat) {
+  const levelCode = CATEGORY_LEVEL_CODES[cat.level] ?? cat.level;
+  const modalityCode = cat.modality === "individual" ? "I" : "D";
+  const genderCode = CATEGORY_GENDER_CODES[cat.gender] ?? "";
+  return `${levelCode}-${modalityCode}${genderCode}`;
+}
+
 // Mismo criterio que el roundTag de CalendarioTab, pero como función suelta -- PrintScoreSheets
 // vive fuera de ese componente y ya trae la categoría de cada partido pegada en `m.__cat`.
 function printRoundTag(m) {
@@ -8919,8 +8933,7 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
             <th className="text-right font-semibold pb-1 pr-2">Equipo A</th>
             <th className="text-center font-semibold pb-1 px-1" style={{ width: 26 * 3 + 8 }}>Sets</th>
             <th className="text-left font-semibold pb-1 pl-2">Equipo B</th>
-            <th className="text-left font-semibold pb-1 pl-2" style={{ width: 130 }}>Categoría · Fase</th>
-            <th className="text-center font-semibold pb-1 pl-2" style={{ width: 70 }}>Firma</th>
+            <th className="text-left font-semibold pb-1 pl-2" style={{ width: 100 }}>Categoría · Fase</th>
           </tr>
         </thead>
         <tbody>
@@ -8948,10 +8961,7 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
                   </div>
                 </td>
                 <td className="py-1 pl-2 font-semibold" style={ellipsis}>{labelB}</td>
-                <td className="py-1 pl-2 text-gray-600" style={ellipsis}>{m.__cat.name} · {printRoundTag(m)}</td>
-                <td className="py-1 pl-2">
-                  <div style={{ borderBottom: "1px solid #000", height: 16 }}></div>
-                </td>
+                <td className="py-1 pl-2 text-gray-600" style={ellipsis}>{categoryCode(m.__cat)} · {printRoundTag(m)}</td>
               </tr>
             );
           })}
