@@ -186,7 +186,8 @@ function filterDatesByPlayDays(dates, playDays) {
 function formatDateHuman(iso) {
   if (!iso) return "";
   const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("es-ES", { weekday: "short", day: "2-digit", month: "short" });
+  const s = d.toLocaleDateString("es-ES", { weekday: "short", day: "2-digit", month: "short" });
+  return s.charAt(0).toUpperCase() + s.slice(1); // "sáb." -> "Sáb." -- toLocaleDateString siempre lo da en minúscula
 }
 // Full "jueves, 14 de agosto" label — used where the day of week needs to stand out
 // (the reservation date picker, event forms) rather than the compact abbreviated form above.
@@ -1437,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.77.0";
+const APP_VERSION = "2.77.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1514,6 +1515,19 @@ function makeCategoryName(modality, gender, level) {
 // cambia.
 function catBadgeLabel(cat) {
   return `${cat.level} ${MODALITY_LABELS[cat.modality]} ${GENDER_LABELS[cat.gender]}`.replace("Individual (single)", "Individual");
+}
+
+// Orden compartido por Resultados y Clasificación (v2.77.0/v2.77.1) -- nivel primero (mismo
+// orden que LEVEL_OPTIONS), después modalidad y género, en vez del orden de creación.
+function sortCategoriesByLevel(categories) {
+  const levelRank = {}; LEVEL_OPTIONS.forEach((l, i) => { levelRank[l] = i; });
+  return [...categories].sort((a, b) => {
+    const byLevel = (levelRank[a.level] ?? 999) - (levelRank[b.level] ?? 999);
+    if (byLevel !== 0) return byLevel;
+    const byModality = a.modality.localeCompare(b.modality);
+    if (byModality !== 0) return byModality;
+    return a.gender.localeCompare(b.gender);
+  });
 }
 
 /* =========================================================================
@@ -5959,6 +5973,9 @@ const TORNEO_SUB_ITEMS = [
   { id: "inscripcion", label: "Inscripción", roles: ["admin", "cliente"] },
   { id: "calendario", label: "Calendario", roles: ["admin", "cliente"] },
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
+  // v2.77.1: antes había que entrar a Resultados y filtrar categoría por categoría para ver
+  // cómo iba cada una -- acá se ven todas juntas de una, sin la carga de marcador de por medio.
+  { id: "clasificacion", label: "Clasificación", roles: ["admin", "cliente"] },
 ];
 
 // Pantalla de aterrizaje de "Torneos"/"Mis Torneos" (ver NAV_ITEMS): el admin gestiona TODOS
@@ -6213,6 +6230,10 @@ function TorneosSection(props) {
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates} />
+      )}
+
+      {subTab === "clasificacion" && (
+        <ClasificacionTab categories={categories} />
       )}
     </div>
   );
@@ -8734,6 +8755,63 @@ function chronoSort(matches, courtOrder) {
   });
 }
 
+// v2.77.1: vista de solo lectura con las clasificaciones de TODAS las categorías a la vez --
+// antes había que entrar a Resultados y filtrar categoría por categoría para ver una tabla de
+// posiciones o un cuadro de eliminación puntual. Reutiliza StandingsTable/BracketView/
+// DoubleEliminationView tal cual (mismo cálculo de pie que ya usa Resultados, computeStandings
+// sobre `cat.matches`), sin la carga de marcador ni el botón de "cerrar fase de grupos" -- eso
+// sigue viviendo en Resultados, esto es solo para mirar cómo va cada categoría de un vistazo.
+function ClasificacionTab({ categories }) {
+  if (categories.length === 0) {
+    return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
+  }
+
+  const withDraw = sortCategoriesByLevel(categories).filter((c) => c.drawGenerated);
+
+  if (withDraw.length === 0) {
+    return <Card className="mt-2"><p className="text-sm text-gray-400">Todavía ninguna categoría tiene un draw generado -- las clasificaciones aparecen acá apenas empiecen los partidos.</p></Card>;
+  }
+
+  return (
+    <div className="mt-2 space-y-5">
+      {withDraw.map((cat) => {
+        const isDouble = cat.format === "doble_eliminacion";
+        const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
+        return (
+          <Card key={cat.id}>
+            <SectionTitle>{cat.name}</SectionTitle>
+            {cat.groups.length > 0 && (
+              <div className="space-y-4 mt-2">
+                {cat.groups.map((g) => (
+                  <div key={g.id}>
+                    <p className="text-sm font-bold mb-1.5" style={{ color: COLORS.courtDark }}>{g.name}</p>
+                    <StandingsTable rows={computeStandings(cat.teams, g.teamIds, cat.matches.filter((m) => m.groupId === g.id))} qualifiers={g.qualifiers} />
+                  </div>
+                ))}
+              </div>
+            )}
+            {isDouble && (
+              <div className="mt-4">
+                <p className="text-sm font-bold mb-1.5" style={{ color: COLORS.courtDark }}>Cuadro de eliminación</p>
+                <DoubleEliminationView cat={cat} />
+              </div>
+            )}
+            {!isDouble && hasSingleBracket && (
+              <div className="mt-4">
+                <p className="text-sm font-bold mb-1.5" style={{ color: COLORS.courtDark }}>Cuadro de eliminación</p>
+                <BracketView cat={cat} />
+              </div>
+            )}
+            {cat.groups.length === 0 && !isDouble && !hasSingleBracket && (
+              <p className="text-xs text-gray-400 italic mt-2">Sin partidos agendados todavía.</p>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates }) {
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -8762,14 +8840,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // v2.77.0: categorías ordenadas por nivel (mismo orden que LEVEL_OPTIONS) y luego por
   // modalidad/género -- antes salían en el orden en que se crearon, "sueltas" sin ningún
   // criterio visible.
-  const levelRank = {}; LEVEL_OPTIONS.forEach((l, i) => { levelRank[l] = i; });
-  const sortedCategories = [...categories].sort((a, b) => {
-    const byLevel = (levelRank[a.level] ?? 999) - (levelRank[b.level] ?? 999);
-    if (byLevel !== 0) return byLevel;
-    const byModality = a.modality.localeCompare(b.modality);
-    if (byModality !== 0) return byModality;
-    return a.gender.localeCompare(b.gender);
-  });
+  const sortedCategories = sortCategoriesByLevel(categories);
 
   const catChips = (
     <div className="flex flex-wrap gap-2">
