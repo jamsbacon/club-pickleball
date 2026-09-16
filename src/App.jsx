@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.76.1";
+const APP_VERSION = "2.76.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8910,16 +8910,17 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
       `}</style>
       <p className="text-lg font-bold">{tournamentName || "Torneo"}</p>
       <p className="text-xs text-gray-500 mb-4">Programa de partidos -- generado el {formatDateFull(new Date().toISOString().slice(0, 10))}</p>
-      <table className="print-sheet-table w-full text-xs" style={{ borderCollapse: "collapse" }}>
+      <table className="print-sheet-table w-full text-xs" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
         <thead>
           <tr style={{ borderBottom: "2px solid #000" }}>
-            <th className="text-left font-semibold pb-1.5 pr-2">#</th>
-            <th className="text-left font-semibold pb-1.5 pr-2">Hora</th>
-            <th className="text-left font-semibold pb-1.5 pr-2">Cancha</th>
-            <th className="text-right font-semibold pb-1.5 pr-2">Equipo A</th>
-            <th className="text-center font-semibold pb-1.5 px-1">Sets</th>
-            <th className="text-left font-semibold pb-1.5 pl-2">Equipo B</th>
-            <th className="text-left font-semibold pb-1.5 pl-2">Categoría · Fase</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 22 }}>#</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 56 }}>Hora</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 52 }}>Cancha</th>
+            <th className="text-right font-semibold pb-1 pr-2">Equipo A</th>
+            <th className="text-center font-semibold pb-1 px-1" style={{ width: 26 * 3 + 8 }}>Sets</th>
+            <th className="text-left font-semibold pb-1 pl-2">Equipo B</th>
+            <th className="text-left font-semibold pb-1 pl-2" style={{ width: 130 }}>Categoría · Fase</th>
+            <th className="text-center font-semibold pb-1 pl-2" style={{ width: 70 }}>Firma</th>
           </tr>
         </thead>
         <tbody>
@@ -8929,24 +8930,28 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
             const bestOf = m.__cat.bestOf || 3;
             const court = courtById[m.courtId]?.name || "Por definir";
             const when = m.day ? formatTimeAmPm(m.time) : "Por definir";
+            const ellipsis = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
             return (
               <tr key={m.id} className="print-sheet-row" style={{ borderBottom: "1px solid #000" }}>
-                <td className="py-2 pr-2 font-semibold">{i + 1}</td>
-                <td className="py-2 pr-2 mono" style={{ whiteSpace: "nowrap" }}>{when}</td>
-                <td className="py-2 pr-2">{court}</td>
-                <td className="py-2 pr-2 text-right font-semibold">{labelA}</td>
-                <td className="py-2 px-1">
+                <td className="py-1 pr-2 font-semibold">{i + 1}</td>
+                <td className="py-1 pr-2 mono" style={ellipsis}>{when}</td>
+                <td className="py-1 pr-2" style={ellipsis}>{court}</td>
+                <td className="py-1 pr-2 text-right font-semibold" style={ellipsis}>{labelA}</td>
+                <td className="py-1 px-1">
                   <div className="flex justify-center gap-1">
                     {Array.from({ length: bestOf }, (_, s) => (
                       <div key={s} className="flex" style={{ border: "1px solid #000", borderRadius: 3 }} title={`Set ${s + 1}`}>
-                        <div style={{ width: 22, height: 24, borderRight: "1px solid #000" }}></div>
-                        <div style={{ width: 22, height: 24 }}></div>
+                        <div style={{ width: 18, height: 18, borderRight: "1px solid #000" }}></div>
+                        <div style={{ width: 18, height: 18 }}></div>
                       </div>
                     ))}
                   </div>
                 </td>
-                <td className="py-2 pl-2 font-semibold">{labelB}</td>
-                <td className="py-2 pl-2 text-gray-600" style={{ whiteSpace: "nowrap" }}>{m.__cat.name} · {printRoundTag(m)}</td>
+                <td className="py-1 pl-2 font-semibold" style={ellipsis}>{labelB}</td>
+                <td className="py-1 pl-2 text-gray-600" style={ellipsis}>{m.__cat.name} · {printRoundTag(m)}</td>
+                <td className="py-1 pl-2">
+                  <div style={{ borderBottom: "1px solid #000", height: 16 }}></div>
+                </td>
               </tr>
             );
           })}
