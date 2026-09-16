@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.76.4";
+const APP_VERSION = "2.77.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1505,6 +1505,15 @@ const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open
 
 function makeCategoryName(modality, gender, level) {
   return `${MODALITY_LABELS[modality]} ${GENDER_LABELS[gender]} ${level}`.replace("Individual (single)", "Individual");
+}
+
+// Etiqueta de la tarjeta en "Cargar resultados" (v2.77.0, a pedido del club) -- mismos tres
+// datos que makeCategoryName pero en el orden que pidieron: nivel primero, modalidad+género
+// después (ej. "Open Dobles Mixto", "3.5 Dobles Masculino"). Es solo para esta etiqueta puntual
+// -- el nombre real de la categoría (cat.name, usado en Categorías/Calendario/Inscripción) no
+// cambia.
+function catBadgeLabel(cat) {
+  return `${cat.level} ${MODALITY_LABELS[cat.modality]} ${GENDER_LABELS[cat.gender]}`.replace("Individual (single)", "Individual");
 }
 
 /* =========================================================================
@@ -6203,7 +6212,7 @@ function TorneosSection(props) {
 
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
-          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} />
+          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates} />
       )}
     </div>
   );
@@ -8725,35 +8734,68 @@ function chronoSort(matches, courtOrder) {
   });
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates }) {
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
   // Filtrar a una categoría puntual (con sus tablas/bracket) sigue disponible como antes.
   const [catId, setCatId] = useState("all");
+  // v2.77.0: filtro por día, mismo patrón que CalendarioTab -- "Cargar resultados" mezclaba
+  // todos los días del torneo en una sola lista larga; el club pidió poder ver un día a la vez,
+  // igual que ya se puede en Calendario.
+  const [selectedDay, setSelectedDay] = useState("");
+  const day = dates.includes(selectedDay) ? selectedDay : (dates[0] || "");
   // v2.68.0: planillas descargables -- ver PrintScoreSheets. `printing` solo controla que el
   // bloque imprimible exista en el DOM (se monta al pulsar el botón, se desmonta solo al
   // cerrar el diálogo de impresión vía el evento "afterprint").
   const [printing, setPrinting] = useState(false);
   const cat = catId === "all" ? null : categories.find((c) => c.id === catId) || null;
   const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
+  // Mismo mapa de colores por categoría que usa el tablero de Calendario (misma `categories`,
+  // mismo orden -- ver buildCategoryColorMap) para que la etiqueta de acá pegue con el color
+  // que el club ya asocia a esa categoría en el calendario.
+  const catColorMap = useMemo(() => buildCategoryColorMap(categories), [categories]);
 
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
   }
 
+  // v2.77.0: categorías ordenadas por nivel (mismo orden que LEVEL_OPTIONS) y luego por
+  // modalidad/género -- antes salían en el orden en que se crearon, "sueltas" sin ningún
+  // criterio visible.
+  const levelRank = {}; LEVEL_OPTIONS.forEach((l, i) => { levelRank[l] = i; });
+  const sortedCategories = [...categories].sort((a, b) => {
+    const byLevel = (levelRank[a.level] ?? 999) - (levelRank[b.level] ?? 999);
+    if (byLevel !== 0) return byLevel;
+    const byModality = a.modality.localeCompare(b.modality);
+    if (byModality !== 0) return byModality;
+    return a.gender.localeCompare(b.gender);
+  });
+
   const catChips = (
     <div className="flex flex-wrap gap-2">
       <button onClick={() => setCatId("all")} className="px-3 py-1.5 rounded-full text-xs font-semibold"
         style={{ background: catId === "all" ? COLORS.court : "#EAEEF5", color: catId === "all" ? "#fff" : COLORS.ink }}>Todas</button>
-      {categories.map((c) => (
+      {sortedCategories.map((c) => (
         <button key={c.id} onClick={() => setCatId(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
           style={{ background: catId === c.id ? COLORS.court : "#EAEEF5", color: catId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
       ))}
     </div>
   );
 
+  const dayTabs = dates.length > 0 && (
+    <div className="flex flex-wrap gap-2">
+      {dates.map((d) => (
+        <button key={d} onClick={() => setSelectedDay(d)} className="px-3.5 py-2 rounded-xl text-sm font-bold"
+          style={{ background: d === day ? COLORS.court : "#EAEEF5", color: d === day ? "#fff" : COLORS.ink }}>
+          {formatDateHuman(d)}
+        </button>
+      ))}
+    </div>
+  );
+
   // Botón compartido por las dos vistas (Todas / una categoría) -- descarga justo los
-  // partidos que se están viendo en pantalla en ese momento (respeta el filtro activo).
+  // partidos que se están viendo en pantalla en ese momento (respeta el filtro activo, día
+  // incluido -- v2.77.0: antes bajaba TODOS los días juntos en una sola planilla).
   const downloadButton = (printMatches) => (
     <button onClick={() => setPrinting(true)} disabled={printMatches.length === 0}
       style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}`, opacity: printMatches.length === 0 ? 0.4 : 1 }}
@@ -8762,28 +8804,31 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </button>
   );
 
+  const printTitle = tournament?.name && day ? `${tournament.name} -- ${formatDateHuman(day)}` : (tournament?.name || "Torneo");
+
   if (catId === "all") {
     const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
-    const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m)).map((m) => ({ ...m, __cat: c }))), courtOrder);
+    const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day).map((m) => ({ ...m, __cat: c }))), courtOrder);
     return (
       <div className="mt-2 space-y-5">
+        {dayTabs}
         <div className="flex items-center justify-between flex-wrap gap-2">
           {catChips}
           {downloadButton(allPlayable)}
         </div>
         <Card>
-          <SectionTitle sub="Todos los partidos jugables de todas las categorías, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.">Cargar resultados</SectionTitle>
+          <SectionTitle sub={`Partidos jugables de ${day ? formatDateHuman(day) : "este torneo"}, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.`}>Cargar resultados</SectionTitle>
           <div className="space-y-3">
             {allPlayable.map((m) => (
-              <MatchRow key={m.id} m={m} cat={m.__cat} catName={m.__cat.name} courtById={courtById}
+              <MatchRow key={m.id} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
                 teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
                 onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
             ))}
-            {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">Genera primero el draw de alguna categoría.</p>}
+            {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">{day ? "No hay partidos programados para este día." : "Genera primero el draw de alguna categoría."}</p>}
           </div>
         </Card>
         {printing && (
-          <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={tournament?.name}
+          <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={printTitle}
             onClose={() => setPrinting(false)} />
         )}
       </div>
@@ -8794,13 +8839,14 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
 
   const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
-  const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m)), courtOrder);
+  const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m) && m.day === day), courtOrder);
   const printMatches = playableMatches.map((m) => ({ ...m, __cat: cat }));
   const isDouble = cat.format === "doble_eliminacion";
   const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
 
   return (
     <div className="mt-2 space-y-5">
+      {dayTabs}
       <div className="flex items-center justify-between flex-wrap gap-2">
         {catChips}
         {downloadButton(printMatches)}
@@ -8836,17 +8882,17 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
       )}
 
       <Card>
-        <SectionTitle sub="Selecciona un partido y carga el marcador (se admite más de un set). Los BYE no se muestran porque no se juegan.">Cargar resultados</SectionTitle>
+        <SectionTitle sub={`Selecciona un partido y carga el marcador (se admite más de un set). Partidos de ${day ? formatDateHuman(day) : "este torneo"} -- los BYE no se muestran porque no se juegan.`}>Cargar resultados</SectionTitle>
         <div className="space-y-3">
           {playableMatches.map((m) => (
-            <MatchRow key={m.id} m={m} cat={cat} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
+            <MatchRow key={m.id} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
               onSubmit={(sets) => submitScore(cat.id, m.id, sets)} />
           ))}
-          {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">Genera primero el draw de esta categoría.</p>}
+          {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
         </div>
       </Card>
       {printing && (
-        <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={tournament?.name}
+        <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={printTitle}
           onClose={() => setPrinting(false)} />
       )}
     </div>
@@ -9007,7 +9053,7 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, courtById, teamName, bestOf, onSubmit }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit }) {
   const [open, setOpen] = useState(false);
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
@@ -9015,6 +9061,7 @@ function MatchRow({ m, cat, catName, courtById, teamName, bestOf, onSubmit }) {
   const labelA = m.teamALabel || teamName(m.teamAId) || "Por definir";
   const labelB = m.teamBLabel || teamName(m.teamBId) || "Por definir";
   const playable = m.teamAId && m.teamBId;
+  const cc = catColor || CATEGORY_PALETTE[0];
 
   const save = () => {
     const cleaned = sets.filter((s) => s.a !== "" && s.b !== "");
@@ -9024,14 +9071,21 @@ function MatchRow({ m, cat, catName, courtById, teamName, bestOf, onSubmit }) {
   };
 
   return (
-    <div className="rounded-xl p-3" style={{ background: m.winnerId ? "#EEF1F7" : "#FAFAF7", border: `1px solid ${COLORS.line}` }}>
+    // v2.77.0: fondo naranja pastel (mismo "durazno" de CATEGORY_PALETTE) cuando ya tiene
+    // resultado cargado -- antes era un azul apagado, poco visible como "ya está listo".
+    <div className="rounded-xl p-3" style={{ background: m.winnerId ? "#FDEBD9" : "#FAFAF7", border: `1px solid ${COLORS.line}` }}>
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="text-sm">
-          {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide mr-2 align-middle" style={{ background: "#EAF0F8", color: COLORS.court }}>{catName}</span>}
-          <span className={m.winnerId === m.teamAId ? "font-bold" : ""}>{labelA}</span>
-          <span className="text-gray-400 mx-1.5">vs</span>
-          <span className={m.winnerId === m.teamBId ? "font-bold" : ""}>{labelB}</span>
-          {m.day && <span className="mono text-xs text-gray-400 ml-3">{formatDateHuman(m.day)} {formatTimeAmPm(m.time)} · {courtById[m.courtId]?.name}</span>}
+        {/* v2.77.0: orden pedido -- hora, cancha, nombre de los jugadores (antes esos datos
+            iban al final, después de los equipos). La etiqueta de categoría es aparte, con el
+            mismo color que ya usa esa categoría en el tablero de Calendario. */}
+        <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
+          {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide align-middle" style={{ background: cc.bg, color: cc.text }}>{catName}</span>}
+          {m.day && <span className="mono text-xs text-gray-400">{formatTimeAmPm(m.time)} · {courtById[m.courtId]?.name}</span>}
+          <span>
+            <span className={m.winnerId === m.teamAId ? "font-bold" : ""}>{labelA}</span>
+            <span className="text-gray-400 mx-1.5">vs</span>
+            <span className={m.winnerId === m.teamBId ? "font-bold" : ""}>{labelB}</span>
+          </span>
         </div>
         <div className="flex items-center gap-2">
           {m.winnerId && <span className="text-xs mono px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
