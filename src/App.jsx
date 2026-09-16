@@ -1437,7 +1437,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.76.3";
+const APP_VERSION = "2.76.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8927,19 +8927,21 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
       <table className="print-sheet-table w-full text-xs" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
         <thead>
           <tr style={{ borderBottom: "2px solid #000" }}>
-            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 22 }}>#</th>
-            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 56 }}>Hora</th>
-            <th className="text-left font-semibold pb-1 pr-2" style={{ width: 52 }}>Cancha</th>
-            <th className="text-right font-semibold pb-1 pr-2">Equipo A</th>
-            <th className="text-center font-semibold pb-1 px-1" style={{ width: 26 * 3 + 8 }}>Sets</th>
-            <th className="text-left font-semibold pb-1 pl-2">Equipo B</th>
-            <th className="text-left font-semibold pb-1 pl-2" style={{ width: 100 }}>Categoría · Fase</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: "3%", whiteSpace: "nowrap" }}>#</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: "8%", whiteSpace: "nowrap" }}>Hora</th>
+            <th className="text-left font-semibold pb-1 pr-2" style={{ width: "10%", whiteSpace: "nowrap" }}>Cancha</th>
+            <th className="text-right font-semibold pb-1 pr-2" style={{ width: "20%", whiteSpace: "nowrap" }}>Equipo A</th>
+            <th className="text-center font-semibold pb-1 px-1" style={{ width: "15%", whiteSpace: "nowrap" }}>Sets</th>
+            <th className="text-left font-semibold pb-1 pl-2" style={{ width: "20%", whiteSpace: "nowrap" }}>Equipo B</th>
+            <th className="text-left font-semibold pb-1 pl-2" style={{ width: "24%", whiteSpace: "nowrap" }}>Categoría · Fase</th>
           </tr>
         </thead>
         <tbody>
           {matches.map((m, i) => {
             const labelA = m.teamALabel || m.__cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
             const labelB = m.teamBLabel || m.__cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
+            const linesA = labelA.split(" / ");
+            const linesB = labelB.split(" / ");
             const bestOf = m.__cat.bestOf || 3;
             const court = courtById[m.courtId]?.name || "Por definir";
             const when = m.day ? formatTimeAmPm(m.time) : "Por definir";
@@ -8949,18 +8951,22 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
                 <td className="py-1 pr-2 font-semibold">{i + 1}</td>
                 <td className="py-1 pr-2 mono" style={ellipsis}>{when}</td>
                 <td className="py-1 pr-2" style={ellipsis}>{court}</td>
-                <td className="py-1 pr-2 text-right font-semibold" style={ellipsis}>{labelA}</td>
+                <td className="py-1 pr-2 text-right font-semibold" style={{ lineHeight: "10px" }}>
+                  {linesA.map((line, li) => <div key={li} style={{ ...ellipsis, fontSize: 9 }}>{line}</div>)}
+                </td>
                 <td className="py-1 px-1">
-                  <div className="flex justify-center gap-1">
+                  <div className="flex justify-center gap-1" style={{ height: 18 }}>
                     {Array.from({ length: bestOf }, (_, s) => (
-                      <div key={s} className="flex" style={{ border: "1px solid #000", borderRadius: 3 }} title={`Set ${s + 1}`}>
-                        <div style={{ width: 18, height: 18, borderRight: "1px solid #000" }}></div>
-                        <div style={{ width: 18, height: 18 }}></div>
+                      <div key={s} className="flex" style={{ border: "1px solid #000", borderRadius: 3, flex: "1 1 0", maxWidth: 40 }} title={`Set ${s + 1}`}>
+                        <div style={{ flex: 1, borderRight: "1px solid #000" }}></div>
+                        <div style={{ flex: 1 }}></div>
                       </div>
                     ))}
                   </div>
                 </td>
-                <td className="py-1 pl-2 font-semibold" style={ellipsis}>{labelB}</td>
+                <td className="py-1 pl-2 font-semibold" style={{ lineHeight: "10px" }}>
+                  {linesB.map((line, li) => <div key={li} style={{ ...ellipsis, fontSize: 9 }}>{line}</div>)}
+                </td>
                 <td className="py-1 pl-2 text-gray-600" style={ellipsis}>{categoryCode(m.__cat)} · {printRoundTag(m)}</td>
               </tr>
             );
