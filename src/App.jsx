@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.79.0";
+const APP_VERSION = "2.79.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2277,6 +2277,19 @@ export default function PickleballTournamentApp() {
   const unlockMatch = (categoryId, matchId) => {
     updateCategory(categoryId, (c) => {
       c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, locked: false } : m));
+      return c;
+    });
+  };
+  // "En cancha" (v2.79.1, a pedido del club) -- todo partido arranca sin `checkedIn` (falsy por
+  // default, ningún match-creation site lo tiene que setear a mano) hasta que mesa técnica
+  // confirma en el panel "En cancha ahora" que los jugadores YA entraron a la cancha de
+  // verdad -- antes de eso se muestra resaltado, con un botón "En cancha" en vez de "Cargar
+  // marcador", para que no se olvide anunciar el partido y verificar que entren. Persiste (vía
+  // updateCategory) para que cualquier dispositivo/refresh de la mesa técnica vea el mismo
+  // estado -- no es un estado local del componente.
+  const markMatchOnCourt = (categoryId, matchId) => {
+    updateCategory(categoryId, (c) => {
+      c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, checkedIn: true } : m));
       return c;
     });
   };
@@ -3585,6 +3598,7 @@ export default function PickleballTournamentApp() {
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
+                markMatchOnCourt={markMatchOnCourt}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
@@ -6118,7 +6132,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
-    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab,
   } = props;
@@ -6230,7 +6244,7 @@ function TorneosSection(props) {
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates}
-          moveMatch={moveMatch} role={role} />
+          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} role={role} />
       )}
 
       {subTab === "clasificacion" && (
@@ -8899,7 +8913,7 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, role }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -8990,7 +9004,28 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         {nextCalls.map(({ court, current, next, borrowed }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
-            {current ? (
+            {current && !current.checkedIn ? (
+              // v2.79.1: recién promovido, todavía sin confirmar que los jugadores entraron a
+              // la cancha -- se resalta distinto (ámbar, no el crema normal de MatchRow) y el
+              // botón dice "En cancha" en vez de "Cargar marcador" para que a mesa técnica no
+              // se le olvide anunciarlo y verificar antes de darlo por "en juego" de verdad.
+              <div className="rounded-xl p-3" style={{ background: "#FBF3E4", border: `1px solid ${COLORS.line}` }}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
+                    {matchIndex.get(current.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(current.id)}</span>}
+                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[current.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[current.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(current.__cat)}</span>
+                    <span className="mono text-xs text-gray-400">{formatTimeAmPm(current.time)} · {courtById[current.courtId]?.name}</span>
+                    <span>{teamLabelOf(current, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(current, "B")}</span>
+                  </div>
+                  {isAdmin && (
+                    <button onClick={() => markMatchOnCourt(current.__cat.id, current.id)}
+                      style={{ background: "#C97A1B", color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+                      En cancha
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : current ? (
               <MatchRow key={current.id} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
                 matchNumber={matchIndex.get(current.id)}
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
