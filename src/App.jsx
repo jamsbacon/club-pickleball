@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.77.1";
+const APP_VERSION = "2.78.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6229,7 +6229,8 @@ function TorneosSection(props) {
 
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
-          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates} />
+          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates}
+          moveMatch={moveMatch} role={role} />
       )}
 
       {subTab === "clasificacion" && (
@@ -8755,6 +8756,75 @@ function chronoSort(matches, courtOrder) {
   });
 }
 
+// Mismo criterio de normalización que playersOf() dentro de buildSchedule -- nombre recortado
+// y en minúscula, para que comparar jugadores entre partidos no falle por mayúsculas/espacios.
+function matchPlayerNames(m, cat) {
+  const a = cat.teams.find((t) => t.id === m.teamAId);
+  const b = cat.teams.find((t) => t.id === m.teamBId);
+  return [
+    ...(a ? a.players.map((p) => p.name.trim().toLowerCase()) : []),
+    ...(b ? b.players.map((p) => p.name.trim().toLowerCase()) : []),
+  ];
+}
+
+// "Mesa técnica" (v2.78.0, a pedido del club) -- para cada cancha, calcula quién está jugando
+// AHORA MISMO y a quién llamar apenas se libere, sin arriesgarse a llamar a alguien que sigue
+// en otra cancha. No hay ningún reloj en vivo en esta app -- "en cancha ahora" se deduce de los
+// datos que ya existen: es, para cada cancha, el partido de HOY sin resultado más temprano
+// (`winnerId` nulo) según el horario ya planificado. Mientras esa suposición se sostenga (los
+// partidos de una cancha se juegan en el orden en que se planificaron, uno detrás de otro,
+// que es como de verdad opera el club), no hace falta agregar ningún campo nuevo a `matches`.
+//
+// "Ocupados" es la unión de jugadores de TODOS los partidos "en cancha ahora" (cualquier
+// cancha). El siguiente turno de cada cancha es, primero, SU PROPIO próximo partido en cola --
+// pero si ese choca con alguien ocupado, se lo salta y busca en la cola COMPLETA de hoy (de
+// cualquier cancha, ver `pool`) el más próximo en el orden original sin choques -- ese
+// préstamo es el "ajuste de cancha" que pidió el club. Cada partido se reclama (`claimed`) en
+// cuanto se le asigna a una cancha para que dos canchas nunca se disputen el mismo próximo
+// turno en la misma pasada.
+function computeNextCalls(categories, courts, day) {
+  const todays = categories.flatMap((c) => c.matches
+    .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId)
+    .map((m) => ({ ...m, __cat: c })));
+
+  const byCourt = {};
+  todays.forEach((m) => { (byCourt[m.courtId] = byCourt[m.courtId] || []).push(m); });
+  Object.values(byCourt).forEach((list) => list.sort((a, b) => a.time.localeCompare(b.time)));
+
+  const currentByCourt = {};
+  Object.entries(byCourt).forEach(([courtId, list]) => {
+    const current = list.find((m) => !m.winnerId);
+    if (current) currentByCourt[courtId] = current;
+  });
+
+  const busy = new Set();
+  Object.values(currentByCourt).forEach((m) => matchPlayerNames(m, m.__cat).forEach((p) => busy.add(p)));
+
+  const currentIds = new Set(Object.values(currentByCourt).map((m) => m.id));
+  const courtOrder = {}; courts.forEach((c, i) => (courtOrder[c.id] = i));
+  const pool = chronoSort(todays.filter((m) => !m.winnerId && !currentIds.has(m.id)), courtOrder);
+  const claimed = new Set();
+
+  return courts.map((court) => {
+    const current = currentByCourt[court.id] || null;
+    // A los jugadores del partido actual de ESTA cancha no hay que tratarlos como "ocupados"
+    // para elegir el siguiente de esta misma cancha -- son justo los que están a punto de
+    // quedar libres apenas se cargue este resultado.
+    const busyForThisCourt = new Set(busy);
+    if (current) matchPlayerNames(current, current.__cat).forEach((p) => busyForThisCourt.delete(p));
+
+    const own = (byCourt[court.id] || []).find((m) => !m.winnerId && m.id !== current?.id);
+    let next = null;
+    if (own && !claimed.has(own.id) && matchPlayerNames(own, own.__cat).every((p) => !busyForThisCourt.has(p))) {
+      next = own;
+    } else {
+      next = pool.find((m) => !claimed.has(m.id) && matchPlayerNames(m, m.__cat).every((p) => !busyForThisCourt.has(p))) || null;
+    }
+    if (next) claimed.add(next.id);
+    return { court, current, next, borrowed: !!(next && next.courtId !== court.id) };
+  });
+}
+
 // v2.77.1: vista de solo lectura con las clasificaciones de TODAS las categorías a la vez --
 // antes había que entrar a Resultados y filtrar categoría por categoría para ver una tabla de
 // posiciones o un cuadro de eliminación puntual. Reutiliza StandingsTable/BracketView/
@@ -8812,7 +8882,8 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, role }) {
+  const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
   // Filtrar a una categoría puntual (con sus tablas/bracket) sigue disponible como antes.
@@ -8832,6 +8903,10 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // mismo orden -- ver buildCategoryColorMap) para que la etiqueta de acá pegue con el color
   // que el club ya asocia a esa categoría en el calendario.
   const catColorMap = useMemo(() => buildCategoryColorMap(categories), [categories]);
+  // v2.78.0: "mesa técnica" -- siempre sobre TODAS las categorías del día (no respeta el chip
+  // de categoría activo), porque las canchas se comparten entre categorías y el llamado tiene
+  // que tener en cuenta a todo el mundo, no solo a la categoría que se está mirando ahora mismo.
+  const nextCalls = useMemo(() => computeNextCalls(categories, courts, day), [categories, courts, day]);
 
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
@@ -8864,6 +8939,57 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </div>
   );
 
+  // v2.78.0: panel "Próximos a llamar" -- una fila por cancha, siempre visible arriba de la
+  // lista. `borrowed` marca un partido que se le "prestó" a esta cancha desde la cola de otra
+  // (ver computeNextCalls) -- confirmar el ajuste reasigna la cancha DE VERDAD (moveMatch),
+  // tomando el horario del partido que se está por liberar en esta cancha (`current`) para no
+  // chocar con lo que ya tenga planificado esta cancha más adelante.
+  const teamLabelOf = (m, side) => {
+    const cat = m.__cat;
+    if (side === "A") return m.teamALabel || cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
+    return m.teamBLabel || cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
+  };
+  const nextCallsPanel = day && (
+    <Card>
+      <SectionTitle sub="Quién está en cada cancha ahora mismo y a quién llamar apenas se cargue ese resultado -- ajustado solo para no llamar a un jugador que sigue jugando en otra cancha.">Próximos a llamar</SectionTitle>
+      <div className="space-y-2 mt-2">
+        {nextCalls.map(({ court, current, next, borrowed }) => (
+          <div key={court.id} className="flex items-center justify-between flex-wrap gap-2 rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
+            <div className="text-sm">
+              <b>{court.name}</b>{" "}
+              <span className="text-xs text-gray-400">
+                {current ? `en juego: ${teamLabelOf(current, "A")} vs ${teamLabelOf(current, "B")}` : "libre ahora"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {next ? (
+                <>
+                  {borrowed && (
+                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Ajuste</span>
+                  )}
+                  <span className="text-sm font-semibold">
+                    Sigue: {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}
+                    {borrowed && <span className="text-xs text-gray-400 font-normal"> (estaba en {courts.find((c) => c.id === next.courtId)?.name})</span>}
+                  </span>
+                  {borrowed && isAdmin && (
+                    <button
+                      onClick={() => moveMatch(next.__cat.id, next.id, { day, time: current ? current.time : next.time, courtId: court.id })}
+                      style={{ background: COLORS.court, color: "#fff" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                      Confirmar cambio de cancha
+                    </button>
+                  )}
+                </>
+              ) : (
+                <span className="text-xs text-gray-400 italic">Sin partidos pendientes</span>
+              )}
+            </div>
+          </div>
+        ))}
+        {nextCalls.length === 0 && <p className="text-xs text-gray-400 italic">Este torneo no tiene canchas asignadas.</p>}
+      </div>
+    </Card>
+  );
+
   // Botón compartido por las dos vistas (Todas / una categoría) -- descarga justo los
   // partidos que se están viendo en pantalla en ese momento (respeta el filtro activo, día
   // incluido -- v2.77.0: antes bajaba TODOS los días juntos en una sola planilla).
@@ -8883,6 +9009,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     return (
       <div className="mt-2 space-y-5">
         {dayTabs}
+        {nextCallsPanel}
         <div className="flex items-center justify-between flex-wrap gap-2">
           {catChips}
           {downloadButton(allPlayable)}
@@ -8918,6 +9045,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   return (
     <div className="mt-2 space-y-5">
       {dayTabs}
+      {nextCallsPanel}
       <div className="flex items-center justify-between flex-wrap gap-2">
         {catChips}
         {downloadButton(printMatches)}
