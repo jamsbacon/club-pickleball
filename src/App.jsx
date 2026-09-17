@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.78.2";
+const APP_VERSION = "2.78.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8950,9 +8950,10 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // cancha más adelante.
   //
   // v2.78.1: el partido "en juego" se carga ACÁ MISMO -- se reusa MatchRow tal cual (mismo
-  // formulario de sets, mismo submitScore) en vez de duplicar esa lógica, con defaultOpen para
-  // no obligar a un clic extra en un panel que existe justo para cargar resultado rápido.
-  // Guardar ese resultado le pone winnerId al partido, `categories` cambia, nextCalls se
+  // formulario de sets, mismo submitScore) en vez de duplicar esa lógica. v2.78.3: arranca
+  // cerrado igual que en la lista de abajo (a pedido del club, que prefiere presionar "Cargar
+  // marcador" a propósito antes de ver los campos de sets) -- se sacó el `defaultOpen` que
+  // lo abría solo. Guardar ese resultado le pone winnerId al partido, `categories` cambia, nextCalls se
   // recalcula solo (useMemo de arriba) y el que seguía sube a "en juego" -- sin ningún estado
   // propio de este panel que haya que empujar a mano. El siguiente partido se ve chico y
   // atenuado (opacity), a propósito, para que no compita visualmente con el que sí hay que
@@ -8972,7 +8973,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
             {current ? (
               <MatchRow key={current.id} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
-                onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} defaultOpen />
+                onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} />
             ) : (
               <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
             )}
@@ -9263,11 +9264,8 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit, defaultOpen = false }) {
-  // v2.78.1: `defaultOpen` -- el panel "En cancha ahora" reusa este mismo componente para el
-  // partido en juego, y ahí el formulario de sets debería verse de una vez, sin un clic extra
-  // en "Cargar marcador" (la lista larga de abajo sigue arrancando cerrada, sin tocar nada).
-  const [open, setOpen] = useState(defaultOpen);
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit }) {
+  const [open, setOpen] = useState(false);
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
 
