@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.78.1";
+const APP_VERSION = "2.78.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8940,11 +8940,14 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </div>
   );
 
-  // v2.78.0/v2.78.1: panel "Próximos a llamar" -- una fila por cancha, siempre visible arriba
-  // de la lista. `borrowed` marca un partido que se le "prestó" a esta cancha desde la cola de
-  // otra (ver computeNextCalls) -- confirmar el ajuste reasigna la cancha DE VERDAD (moveMatch),
-  // tomando el horario del partido que se está por liberar en esta cancha (`current`) para no
-  // chocar con lo que ya tenga planificado esta cancha más adelante.
+  // v2.78.0/v2.78.1/v2.78.2: panel "En cancha ahora" (se llamó "Próximos a llamar" hasta
+  // v2.78.1, pero lo grande y prominente de cada fila es el partido ACTIVO, no el siguiente --
+  // el club lo notó, el título quedaba al revés de lo que en realidad se ve primero) -- una
+  // fila por cancha, siempre visible arriba de la lista. `borrowed` marca un partido que se le
+  // "prestó" a esta cancha desde la cola de otra (ver computeNextCalls) -- confirmar el ajuste
+  // reasigna la cancha DE VERDAD (moveMatch), tomando el horario del partido que se está por
+  // liberar en esta cancha (`current`) para no chocar con lo que ya tenga planificado esta
+  // cancha más adelante.
   //
   // v2.78.1: el partido "en juego" se carga ACÁ MISMO -- se reusa MatchRow tal cual (mismo
   // formulario de sets, mismo submitScore) en vez de duplicar esa lógica, con defaultOpen para
@@ -8961,7 +8964,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   };
   const nextCallsPanel = day && (
     <Card>
-      <SectionTitle sub="El partido en juego se carga acá mismo -- apenas guardes el resultado, la cancha pasa sola al que sigue.">Próximos a llamar</SectionTitle>
+      <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
       <div className="space-y-3 mt-2">
         {nextCalls.map(({ court, current, next, borrowed }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
@@ -9261,7 +9264,7 @@ function StandingsTable({ rows, qualifiers }) {
 }
 
 function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit, defaultOpen = false }) {
-  // v2.78.1: `defaultOpen` -- el panel "Próximos a llamar" reusa este mismo componente para el
+  // v2.78.1: `defaultOpen` -- el panel "En cancha ahora" reusa este mismo componente para el
   // partido en juego, y ahí el formulario de sets debería verse de una vez, sin un clic extra
   // en "Cargar marcador" (la lista larga de abajo sigue arrancando cerrada, sin tocar nada).
   const [open, setOpen] = useState(defaultOpen);
