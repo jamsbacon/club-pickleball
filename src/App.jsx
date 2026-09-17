@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.78.3";
+const APP_VERSION = "2.79.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8756,6 +8756,23 @@ function chronoSort(matches, courtOrder) {
   });
 }
 
+// Número de partido único por día (v2.79.0, a pedido del club) -- el MISMO número tiene que
+// verse en la planilla impresa que llevan los supervisores de cancha, en la lista "Cargar
+// resultados" y en "En cancha ahora", sea cual sea la categoría que se esté mirando en
+// pantalla en ese momento. Por eso NO se numera 1..N sobre la lista ya filtrada de cada vista
+// (eso le daría un número distinto al mismo partido según si se está viendo "Todas" o una sola
+// categoría) -- se numera UNA vez sobre TODOS los partidos jugables del día (todas las
+// categorías juntas, mismo chronoSort que ya usa el tablero de Calendario) y cada vista busca
+// el número de cada partido puntual en este mapa en vez de recontar desde cero.
+function buildMatchIndex(categories, courts, day) {
+  const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
+  const todays = categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day));
+  const sorted = chronoSort(todays, courtOrder);
+  const map = new Map();
+  sorted.forEach((m, i) => map.set(m.id, i + 1));
+  return map;
+}
+
 // Mismo criterio de normalización que playersOf() dentro de buildSchedule -- nombre recortado
 // y en minúscula, para que comparar jugadores entre partidos no falle por mayúsculas/espacios.
 function matchPlayerNames(m, cat) {
@@ -8908,6 +8925,9 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // de categoría activo), porque las canchas se comparten entre categorías y el llamado tiene
   // que tener en cuenta a todo el mundo, no solo a la categoría que se está mirando ahora mismo.
   const nextCalls = useMemo(() => computeNextCalls(categories, courts, day), [categories, courts, day]);
+  // v2.79.0: número de partido único por día, igual en la planilla impresa, en esta lista y en
+  // "En cancha ahora" -- ver buildMatchIndex.
+  const matchIndex = useMemo(() => buildMatchIndex(categories, courts, day), [categories, courts, day]);
 
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
@@ -8972,6 +8992,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
             {current ? (
               <MatchRow key={current.id} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
+                matchNumber={matchIndex.get(current.id)}
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
                 onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} />
             ) : (
@@ -8980,7 +9001,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
             {next ? (
               <div className="mt-1.5 pl-0.5" style={{ opacity: 0.55 }}>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[11px]">Sigue: {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}</span>
+                  <span className="text-[11px]">Sigue: #{matchIndex.get(next.id)} -- {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}</span>
                   {borrowed && (
                     <span className="text-[8px] font-extrabold px-1 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Ajuste</span>
                   )}
@@ -9032,6 +9053,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           <div className="space-y-3">
             {allPlayable.map((m) => (
               <MatchRow key={m.id} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
+                matchNumber={matchIndex.get(m.id)}
                 teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
                 onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
             ))}
@@ -9039,7 +9061,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           </div>
         </Card>
         {printing && (
-          <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={printTitle}
+          <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={printTitle} matchIndex={matchIndex}
             onClose={() => setPrinting(false)} />
         )}
       </div>
@@ -9097,13 +9119,14 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         <div className="space-y-3">
           {playableMatches.map((m) => (
             <MatchRow key={m.id} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
+              matchNumber={matchIndex.get(m.id)}
               onSubmit={(sets) => submitScore(cat.id, m.id, sets)} />
           ))}
           {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
         </div>
       </Card>
       {printing && (
-        <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={printTitle}
+        <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={printTitle} matchIndex={matchIndex}
           onClose={() => setPrinting(false)} />
       )}
     </div>
@@ -9158,7 +9181,7 @@ function printRoundTag(m) {
   return "";
 }
 
-function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
+function PrintScoreSheets({ matches, courtById, tournamentName, onClose, matchIndex }) {
   useEffect(() => {
     const t = setTimeout(() => window.print(), 80);
     const onAfterPrint = () => onClose();
@@ -9203,9 +9226,15 @@ function PrintScoreSheets({ matches, courtById, tournamentName, onClose }) {
             const court = courtById[m.courtId]?.name || "Por definir";
             const when = m.day ? formatTimeAmPm(m.time) : "Por definir";
             const ellipsis = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+            // v2.79.0: número del día entero (buildMatchIndex), no i+1 -- si esto imprime SOLO
+            // una categoría, cada partido conserva el mismo número que tendría en la planilla
+            // de "Todas", en vez de renumerarse 1..N sobre el subconjunto filtrado. `matchIndex`
+            // es opcional (nadie más que ResultadosTab lo manda hoy) -- sin él, cae de vuelta a
+            // i+1 para no romper si algún día se llama esto desde otro lado.
+            const number = matchIndex ? matchIndex.get(m.id) : i + 1;
             return (
               <tr key={m.id} className="print-sheet-row" style={{ borderBottom: "1px solid #000" }}>
-                <td className="py-1 pr-2 font-semibold">{i + 1}</td>
+                <td className="py-1 pr-2 font-semibold">{number}</td>
                 <td className="py-1 pr-2 mono" style={ellipsis}>{when}</td>
                 <td className="py-1 pr-2" style={ellipsis}>{court}</td>
                 <td className="py-1 pr-2 text-right font-semibold" style={{ lineHeight: "10px" }}>
@@ -9264,7 +9293,7 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit, matchNumber }) {
   const [open, setOpen] = useState(false);
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
@@ -9290,6 +9319,10 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSu
             iban al final, después de los equipos). La etiqueta de categoría es aparte, con el
             mismo color que ya usa esa categoría en el tablero de Calendario. */}
         <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
+          {/* v2.79.0: mismo número que trae la planilla impresa para este partido (ver
+              buildMatchIndex) -- para que el supervisor de cancha, con el papel en la mano,
+              pueda ubicar acá el partido correcto sin tener que leer nombres. */}
+          {matchNumber != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchNumber}</span>}
           {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide align-middle" style={{ background: cc.bg, color: cc.text }}>{catName}</span>}
           {m.day && <span className="mono text-xs text-gray-400">{formatTimeAmPm(m.time)} · {courtById[m.courtId]?.name}</span>}
           <span>
