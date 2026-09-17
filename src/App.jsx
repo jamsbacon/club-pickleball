@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.78.0";
+const APP_VERSION = "2.78.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8899,6 +8899,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   const [printing, setPrinting] = useState(false);
   const cat = catId === "all" ? null : categories.find((c) => c.id === catId) || null;
   const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
+  const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
   // Mismo mapa de colores por categoría que usa el tablero de Calendario (misma `categories`,
   // mismo orden -- ver buildCategoryColorMap) para que la etiqueta de acá pegue con el color
   // que el club ya asocia a esa categoría en el calendario.
@@ -8939,11 +8940,20 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </div>
   );
 
-  // v2.78.0: panel "Próximos a llamar" -- una fila por cancha, siempre visible arriba de la
-  // lista. `borrowed` marca un partido que se le "prestó" a esta cancha desde la cola de otra
-  // (ver computeNextCalls) -- confirmar el ajuste reasigna la cancha DE VERDAD (moveMatch),
+  // v2.78.0/v2.78.1: panel "Próximos a llamar" -- una fila por cancha, siempre visible arriba
+  // de la lista. `borrowed` marca un partido que se le "prestó" a esta cancha desde la cola de
+  // otra (ver computeNextCalls) -- confirmar el ajuste reasigna la cancha DE VERDAD (moveMatch),
   // tomando el horario del partido que se está por liberar en esta cancha (`current`) para no
   // chocar con lo que ya tenga planificado esta cancha más adelante.
+  //
+  // v2.78.1: el partido "en juego" se carga ACÁ MISMO -- se reusa MatchRow tal cual (mismo
+  // formulario de sets, mismo submitScore) en vez de duplicar esa lógica, con defaultOpen para
+  // no obligar a un clic extra en un panel que existe justo para cargar resultado rápido.
+  // Guardar ese resultado le pone winnerId al partido, `categories` cambia, nextCalls se
+  // recalcula solo (useMemo de arriba) y el que seguía sube a "en juego" -- sin ningún estado
+  // propio de este panel que haya que empujar a mano. El siguiente partido se ve chico y
+  // atenuado (opacity), a propósito, para que no compita visualmente con el que sí hay que
+  // jugar ahora.
   const teamLabelOf = (m, side) => {
     const cat = m.__cat;
     if (side === "A") return m.teamALabel || cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
@@ -8951,38 +8961,38 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   };
   const nextCallsPanel = day && (
     <Card>
-      <SectionTitle sub="Quién está en cada cancha ahora mismo y a quién llamar apenas se cargue ese resultado -- ajustado solo para no llamar a un jugador que sigue jugando en otra cancha.">Próximos a llamar</SectionTitle>
-      <div className="space-y-2 mt-2">
+      <SectionTitle sub="El partido en juego se carga acá mismo -- apenas guardes el resultado, la cancha pasa sola al que sigue.">Próximos a llamar</SectionTitle>
+      <div className="space-y-3 mt-2">
         {nextCalls.map(({ court, current, next, borrowed }) => (
-          <div key={court.id} className="flex items-center justify-between flex-wrap gap-2 rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
-            <div className="text-sm">
-              <b>{court.name}</b>{" "}
-              <span className="text-xs text-gray-400">
-                {current ? `en juego: ${teamLabelOf(current, "A")} vs ${teamLabelOf(current, "B")}` : "libre ahora"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {next ? (
-                <>
+          <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
+            <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
+            {current ? (
+              <MatchRow key={current.id} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
+                teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
+                onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} defaultOpen />
+            ) : (
+              <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
+            )}
+            {next ? (
+              <div className="mt-1.5 pl-0.5" style={{ opacity: 0.55 }}>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px]">Sigue: {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}</span>
                   {borrowed && (
-                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Ajuste</span>
+                    <span className="text-[8px] font-extrabold px-1 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Ajuste</span>
                   )}
-                  <span className="text-sm font-semibold">
-                    Sigue: {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}
-                    {borrowed && <span className="text-xs text-gray-400 font-normal"> (estaba en {courts.find((c) => c.id === next.courtId)?.name})</span>}
-                  </span>
-                  {borrowed && isAdmin && (
-                    <button
-                      onClick={() => moveMatch(next.__cat.id, next.id, { day, time: current ? current.time : next.time, courtId: court.id })}
-                      style={{ background: COLORS.court, color: "#fff" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
-                      Confirmar cambio de cancha
-                    </button>
-                  )}
-                </>
-              ) : (
-                <span className="text-xs text-gray-400 italic">Sin partidos pendientes</span>
-              )}
-            </div>
+                </div>
+                {borrowed && <p className="text-[10px]">Estaba en {courts.find((c) => c.id === next.courtId)?.name}</p>}
+              </div>
+            ) : (
+              <p className="text-[11px] text-gray-400 italic mt-1.5">Sin partidos pendientes.</p>
+            )}
+            {next && borrowed && isAdmin && (
+              <button
+                onClick={() => moveMatch(next.__cat.id, next.id, { day, time: current ? current.time : next.time, courtId: court.id })}
+                style={{ color: COLORS.court }} className="text-[11px] font-bold underline mt-1">
+                Confirmar cambio de cancha
+              </button>
+            )}
           </div>
         ))}
         {nextCalls.length === 0 && <p className="text-xs text-gray-400 italic">Este torneo no tiene canchas asignadas.</p>}
@@ -9004,7 +9014,6 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   const printTitle = tournament?.name && day ? `${tournament.name} -- ${formatDateHuman(day)}` : (tournament?.name || "Torneo");
 
   if (catId === "all") {
-    const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
     const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day).map((m) => ({ ...m, __cat: c }))), courtOrder);
     return (
       <div className="mt-2 space-y-5">
@@ -9035,7 +9044,6 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
 
   if (!cat) return <Card className="mt-2"><p className="text-sm text-gray-400">Categoría no encontrada.</p></Card>;
 
-  const courtById = {}; courts.forEach((c) => (courtById[c.id] = c));
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
   const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m) && m.day === day), courtOrder);
   const printMatches = playableMatches.map((m) => ({ ...m, __cat: cat }));
@@ -9252,8 +9260,11 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit }) {
-  const [open, setOpen] = useState(false);
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit, defaultOpen = false }) {
+  // v2.78.1: `defaultOpen` -- el panel "Próximos a llamar" reusa este mismo componente para el
+  // partido en juego, y ahí el formulario de sets debería verse de una vez, sin un clic extra
+  // en "Cargar marcador" (la lista larga de abajo sigue arrancando cerrada, sin tocar nada).
+  const [open, setOpen] = useState(defaultOpen);
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
 
