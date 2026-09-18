@@ -1515,7 +1515,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.7";
+const APP_VERSION = "2.81.8";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2050,6 +2050,10 @@ export default function PickleballTournamentApp() {
   const mapTournamentRow = (r) => ({
     id: r.id, name: r.name, status: r.status || "draft", startDate: r.start_date || "", endDate: r.end_date || "",
     dailyStart: r.daily_start, dailyEnd: r.daily_end, playDays: r.play_days || [],
+    // v2.81.8 -- ver migración tournament_match_duration: nunca guardados antes de esto, así
+    // que una fila vieja sencillamente no tiene el campo -- ?? 35/10 son los MISMOS defaults
+    // que ya tenía el useState() de antes, ningún torneo existente cambia de comportamiento.
+    matchDuration: r.match_duration_min ?? 35, breakM: r.break_min ?? 10,
     presaleStart: r.presale_start || "", presaleEnd: r.presale_end || "",
     presalePrice1: r.presale_price_1 ?? "", presalePrice2: r.presale_price_2 ?? "", presalePrice3: r.presale_price_3 ?? "",
     regStart: r.reg_start || "", regEnd: r.reg_end || "",
@@ -2145,6 +2149,8 @@ export default function PickleballTournamentApp() {
     if ("endDate" in patch) dbPatch.end_date = patch.endDate || null;
     if ("dailyStart" in patch) dbPatch.daily_start = patch.dailyStart;
     if ("dailyEnd" in patch) dbPatch.daily_end = patch.dailyEnd;
+    if ("matchDuration" in patch) dbPatch.match_duration_min = Number(patch.matchDuration) || null;
+    if ("breakM" in patch) dbPatch.break_min = Number(patch.breakM) || null;
     if ("playDays" in patch) dbPatch.play_days = patch.playDays;
     if ("presaleStart" in patch) dbPatch.presale_start = patch.presaleStart || null;
     if ("presaleEnd" in patch) dbPatch.presale_end = patch.presaleEnd || null;
@@ -2187,8 +2193,20 @@ export default function PickleballTournamentApp() {
     }
   };
 
-  const [matchDuration, setMatchDuration] = useState(35);
-  const [breakM, setBreakM] = useState(10);
+  // v2.81.8 -- INCIDENTE REAL: esto era un useState(35)/useState(10) SUELTO, nunca guardado en
+  // ningún lado -- cada dispositivo/pestaña/recarga arrancaba de cero sin importar qué se
+  // había configurado antes. Como la grilla de Calendario (`timeSlotOptions`) se arma con estos
+  // dos números, un desfase entre el valor "vigente ahora" y el que de verdad se usó para
+  // agendar los partidos hacía que un partido ya agendado no calzara en ninguna fila de la
+  // grilla nueva y pareciera desaparecido -- justo lo que reportó el club ("desde el celular me
+  // muestra otro calendario", "al cambiar la duración los partidos se separan"). Ahora vive en
+  // el propio torneo (mismo criterio que dailyStart/dailyEnd) -- todo dispositivo/sesión ve
+  // siempre el mismo valor real. `set*` sigue viéndose igual desde afuera (una función que
+  // recibe el valor nuevo) para no tocar ningún llamador existente.
+  const matchDuration = tournament?.matchDuration ?? 35;
+  const breakM = tournament?.breakM ?? 10;
+  const setMatchDuration = (v) => updateTournament({ matchDuration: v });
+  const setBreakM = (v) => updateTournament({ breakM: v });
 
   const mapCategoryRow = (r) => ({
     id: r.id, tournamentId: r.tournament_id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
@@ -3680,6 +3698,53 @@ export default function PickleballTournamentApp() {
     });
   };
 
+  // v2.81.8, a pedido del club: cambiar la duración/intervalo NO debe dejar huecos entre
+  // partidos ya agendados -- deberían "recogerse hacia arriba", uno detrás de otro, con la
+  // duración nueva. Antes de esto no existía ninguna acción para eso: cambiar el número solo
+  // afectaba corridas FUTURAS de "Planificar" (buildSchedule), los partidos que ya tenían
+  // horario se quedaban con su hora vieja -- que ya no calza con la franja nueva que dibuja el
+  // tablero (ver comentario de matchDuration/breakM más arriba), ahí es donde aparecían los
+  // huecos/separaciones que reportó el club. Este botón SÍ retoca los partidos ya agendados:
+  // agrupa por (día, cancha) -- varias categorías pueden compartir cancha el mismo día -- los
+  // ordena por su hora ACTUAL (conserva el orden real, no reordena por categoría/nombre) y les
+  // vuelve a repartir horarios consecutivos desde dailyStart con la duración/intervalo VIGENTES
+  // ahora mismo. Un partido `locked` (fijado a mano) nunca se toca, pero si comparte cancha/día
+  // con otros sin fijar, ese grupo entero se salta por completo -- reflowear alrededor de un
+  // horario fijo podría chocarlo contra el que le tocaría después, más vale no tocar nada ahí
+  // y dejar que el admin lo acomode a mano (Editar manualmente).
+  const reflowSchedule = async () => {
+    if (!tournament) return;
+    const cats = categories.filter((c) => c.tournamentId === tournament.id);
+    const groups = {}; // "day|courtId" -> [{catId, matchId, time, locked}]
+    cats.forEach((c) => c.matches.forEach((m) => {
+      if (!m.day || !m.time || !m.courtId) return;
+      const key = `${m.day}|${m.courtId}`;
+      (groups[key] = groups[key] || []).push({ catId: c.id, matchId: m.id, time: m.time, locked: !!m.locked });
+    }));
+    const startM = timeToMinutes(tournament.dailyStart);
+    const step = Number(matchDuration) + Number(breakM);
+    const updatesByCategory = {}; // catId -> Map(matchId -> nuevo time)
+    Object.values(groups).forEach((list) => {
+      if (list.some((item) => item.locked)) return; // ver comentario -- grupo con algo fijado, no se toca
+      list.sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+      let t = startM;
+      list.forEach((item) => {
+        const newTime = minutesToTime(t);
+        if (newTime !== item.time) {
+          (updatesByCategory[item.catId] = updatesByCategory[item.catId] || new Map()).set(item.matchId, newTime);
+        }
+        t += step;
+      });
+    });
+    for (const catId of Object.keys(updatesByCategory)) {
+      const changes = updatesByCategory[catId];
+      await updateCategory(catId, (c) => {
+        c.matches = c.matches.map((m) => (changes.has(m.id) ? { ...m, time: changes.get(m.id) } : m));
+        return c;
+      });
+    }
+  };
+
   const stats = {
     courts: courts.length,
     bookings: bookings.filter((b) => b.status !== "cancelada").length,
@@ -3852,7 +3917,7 @@ export default function PickleballTournamentApp() {
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
                 matchDuration={matchDuration} breakM={breakM}
-                runScheduler={runScheduler} scheduleInfo={scheduleInfo}
+                runScheduler={runScheduler} scheduleInfo={scheduleInfo} reflowSchedule={reflowSchedule}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
                 markMatchOnCourt={markMatchOnCourt}
@@ -6496,7 +6561,7 @@ function TorneosSection(props) {
       )}
 
       {subTab === "calendario" && (
-        <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} role={role}
+        <CalendarioTab categories={categories} courts={courts} runScheduler={runScheduler} reflowSchedule={reflowSchedule} role={role}
           scheduleInfo={scheduleInfo} tournament={tournament} dates={dates}
           matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM}
           occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn} />
@@ -8299,7 +8364,70 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
   );
 }
 
-function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, role }) {
+// v2.81.8, a pedido del club: antes esto guardaba en la base con CADA tecla que se escribía en
+// los inputs (setMatchDuration/setBreakM llaman a updateTournament directo) -- valores a medio
+// escribir (ej. borrar "35" para escribir "40" pasa por un "" o un "4" intermedio) se
+// guardaban de verdad un instante, visibles para cualquier otro dispositivo mirando en ese
+// momento. Ahora hay un borrador local que no se guarda solo -- "Guardar duración" lo aplica
+// de una (deshabilitado si no hay ningún cambio pendiente), y "Reprogramar horarios ya
+// agendados" (aparte, con su propia confirmación) es quien de verdad retoca los partidos ya
+// puestos en el tablero -- ver reflowSchedule en el componente principal para qué hace y qué
+// NO toca. El borrador se resetea solo si se cambia de torneo (tournamentId), nunca porque
+// matchDuration/breakM cambien por su cuenta (evita perder lo que el admin esté escribiendo).
+function DuracionPartidosCard({ matchDuration, setMatchDuration, breakM, setBreakM, reflowSchedule, tournamentId }) {
+  const [draftDuration, setDraftDuration] = useState(matchDuration);
+  const [draftBreak, setDraftBreak] = useState(breakM);
+  useEffect(() => { setDraftDuration(matchDuration); setDraftBreak(breakM); }, [tournamentId]);
+  const isDirty = Number(draftDuration) !== Number(matchDuration) || Number(draftBreak) !== Number(breakM);
+  const [confirmReflow, setConfirmReflow] = useState(false);
+  const [reflowing, setReflowing] = useState(false);
+  const doReflow = async () => {
+    setReflowing(true);
+    await reflowSchedule();
+    setReflowing(false);
+    setConfirmReflow(false);
+  };
+  return (
+    <Card>
+      <SectionTitle sub="Duración de cada partido e intervalo entre partidos. Puedes ajustarlos antes o después de planificar.">Duración de partidos</SectionTitle>
+      <div className="grid sm:grid-cols-3 gap-3 items-end">
+        <div>
+          <Label>Duración aproximada por partido (min)</Label>
+          <input type="number" min={10} style={inputStyle} value={draftDuration} onChange={(e) => setDraftDuration(e.target.value)} />
+        </div>
+        <div>
+          <Label>Intervalo entre partidos (min)</Label>
+          <input type="number" min={0} style={inputStyle} value={draftBreak} onChange={(e) => setDraftBreak(e.target.value)} />
+        </div>
+        <div className="text-xs px-3 py-2.5 rounded-lg h-fit" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+          Cada franja por cancha: {Number(draftDuration) + Number(draftBreak)} min
+        </div>
+      </div>
+      <div className="flex items-center gap-3 mt-3 flex-wrap">
+        <button onClick={() => { setMatchDuration(draftDuration); setBreakM(draftBreak); }} disabled={!isDirty}
+          style={{ background: isDirty ? COLORS.court : "#E5E5E5", color: isDirty ? "#fff" : "#999" }}
+          className="px-4 py-2 rounded-xl text-sm font-semibold">
+          Guardar duración
+        </button>
+        {!confirmReflow ? (
+          <button onClick={() => setConfirmReflow(true)} className="text-xs font-semibold underline" style={{ color: COLORS.clay }}>
+            Reprogramar horarios ya agendados
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs" style={{ color: "#6B7688" }}>Recalcula la hora de cada partido YA agendado (mismo orden, misma cancha) para que queden pegados uno detrás de otro con esta duración -- sin tocar los fijados a mano. ¿Seguro?</span>
+            <button onClick={doReflow} disabled={reflowing} style={{ background: COLORS.clay, color: "#fff", opacity: reflowing ? 0.6 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+              {reflowing ? "Reprogramando…" : "Sí, reprogramar"}
+            </button>
+          </div>
+        )}
+      </div>
+      {isDirty && <p className="text-xs mt-2" style={{ color: "#8A5A16" }}>Tienes cambios sin guardar -- dale a "Guardar duración" primero.</p>}
+    </Card>
+  );
+}
+
+function CalendarioTab({ categories, courts, runScheduler, reflowSchedule, scheduleInfo, tournament, dates, matchDuration, setMatchDuration, breakM, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, role }) {
   const isAdmin = role === "admin";
   // "Editar manualmente": modo tap-origen → tap-destino para reprogramar un partido ya
   // agendado. `selectedMatch` es el partido "origen" elegido; `moveTarget` el destino en
@@ -8637,24 +8765,7 @@ function CalendarioTab({ categories, courts, runScheduler, scheduleInfo, tournam
 
   return (
     <div className="mt-2 space-y-5">
-      {isAdmin && (
-        <Card>
-          <SectionTitle sub="Duración de cada partido e intervalo entre partidos. Puedes ajustarlos antes o después de planificar.">Duración de partidos</SectionTitle>
-          <div className="grid sm:grid-cols-3 gap-3 items-end">
-            <div>
-              <Label>Duración aproximada por partido (min)</Label>
-              <input type="number" min={10} style={inputStyle} value={matchDuration} onChange={(e) => setMatchDuration(e.target.value)} />
-            </div>
-            <div>
-              <Label>Intervalo entre partidos (min)</Label>
-              <input type="number" min={0} style={inputStyle} value={breakM} onChange={(e) => setBreakM(e.target.value)} />
-            </div>
-            <div className="text-xs px-3 py-2.5 rounded-lg h-fit" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
-              Cada franja por cancha: {Number(matchDuration) + Number(breakM)} min
-            </div>
-          </div>
-        </Card>
-      )}
+      {isAdmin && <DuracionPartidosCard matchDuration={matchDuration} setMatchDuration={setMatchDuration} breakM={breakM} setBreakM={setBreakM} reflowSchedule={reflowSchedule} tournamentId={tournament.id} />}
 
       {isAdmin && unscheduledMatches.length > 0 && (
         <div className="text-xs px-3 py-2.5 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B", border: "1px solid #F0AE9B" }}>
