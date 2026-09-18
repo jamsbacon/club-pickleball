@@ -76,6 +76,24 @@ const sendPush = async (type, payload) => {
   }
 };
 
+// Bitácora de inscripciones (v2.80.6, ver migración registration_log) -- INSERT-only, APARTE de
+// categories.teams/waitlist. Nace del incidente real Nicolás Merchán/Camila Sangster: una
+// inscripción de verdad desapareció de `categories` sin que nadie la borrara a mano, y no había
+// ningún otro rastro de que hubiera existido más allá de una notificación push ya perdida.
+// Fire-and-forget a propósito -- si esto falla (tabla sin migrar todavía, sin red) NUNCA debe
+// bloquear ni hacer fallar la inscripción real, solo se pierde el respaldo extra de esa vez.
+const logRegistration = async ({ tournamentId, tournamentName, categoryId, categoryName, playerNames, source }) => {
+  try {
+    await supabase.from("registration_log").insert({
+      tournament_id: tournamentId || null, tournament_name: tournamentName || "—",
+      category_id: categoryId || null, category_name: categoryName || "—",
+      player_names: playerNames, source,
+    });
+  } catch (err) {
+    console.error("logRegistration:", err?.message || err);
+  }
+};
+
 // Conversión estándar de la llave pública VAPID (base64url) al Uint8Array que pide
 // pushManager.subscribe -- la misma función que aparece en cualquier tutorial de Web Push.
 const urlBase64ToUint8Array = (base64String) => {
@@ -1438,7 +1456,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.5";
+const APP_VERSION = "2.80.6";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2134,6 +2152,18 @@ export default function PickleballTournamentApp() {
   // runScheduler, addCategory/removeCategory...) -- así reabrir la app durante un apagón sigue
   // mostrando el calendario/categorías tal como quedaron, en vez de pantalla vacía (v2.34.0).
   useEffect(() => { saveCache("categories", categories); }, [categories]);
+  // Bitácora de inscripciones (v2.80.6, ver logRegistration/migración registration_log) --
+  // INSERT-only, nada la puede sobreescribir desde la UI. Solo el admin puede leerla (RLS); se
+  // carga una vez al confirmar ese rol, no necesita refrescarse en vivo -- es historial de
+  // consulta, no un dato que se edite desde acá.
+  const [registrationLog, setRegistrationLog] = useState([]);
+  useEffect(() => {
+    if (currentUser?.role !== "admin") return;
+    supabase.from("registration_log").select("*").order("created_at", { ascending: false }).limit(300).then(({ data, error }) => {
+      if (error) { console.error("fetch registration_log:", error.message); return; }
+      setRegistrationLog(data || []);
+    });
+  }, [currentUser?.role]);
   const [activeCatId, setActiveCatId] = useState(null);
   const [scheduleInfo, setScheduleInfo] = useState(null);
   // App-wide player ranking directory: { "nombre en minúsculas": { name, ranking } }
@@ -2449,6 +2479,11 @@ export default function PickleballTournamentApp() {
         body: `${name} se inscribió en ${cat?.name || "una categoría"}${tournament ? ` -- ${tournament.name}` : ""}.`,
         url: "/",
       });
+      logRegistration({
+        tournamentId: tournament?.id, tournamentName: tournament?.name,
+        categoryId: catId, categoryName: cat?.name,
+        playerNames: name, source: checkout ? "checkout" : "walkin",
+      });
     }
     return { teamId, error: result?.error };
   };
@@ -2508,6 +2543,11 @@ export default function PickleballTournamentApp() {
         title: "Nueva inscripción",
         body: `${player.name} se unió al equipo de ${team.players[0]?.name || "alguien"} en ${cat.name}${tournament ? ` -- ${tournament.name}` : ""}.`,
         url: "/",
+      });
+      logRegistration({
+        tournamentId: tournament?.id, tournamentName: tournament?.name,
+        categoryId: catId, categoryName: cat.name,
+        playerNames: `${player.name} (se unió a ${team.players[0]?.name || "alguien"})`, source: "join_partner",
       });
     }
     return { error: result?.error };
@@ -3711,6 +3751,7 @@ export default function PickleballTournamentApp() {
               <TorneosSection
                 role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
                 tournament={tournament} setTournament={updateTournament} uploadTournamentImage={uploadTournamentImage} dates={dates}
+                registrationLog={registrationLog.filter((r) => r.tournament_id === tournament.id)}
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
@@ -6258,7 +6299,7 @@ function TorneosSection(props) {
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
-    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab,
+    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog,
   } = props;
   const isAdmin = role === "admin";
 
@@ -6336,7 +6377,7 @@ function TorneosSection(props) {
 
       {subTab === "inscritos" && role === "admin" && (
         <InscritosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
-          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} recordPartialPayment={recordPartialPayment} />
+          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} recordPartialPayment={recordPartialPayment} registrationLog={registrationLog} />
       )}
 
       {subTab === "duplas" && role === "admin" && (
@@ -6689,7 +6730,8 @@ function referenceHint(entry) {
   return [...entry.references].map((r) => `••${r.slice(-4)}`).join(", ");
 }
 
-function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory, moveSoloRegistration, recordPartialPayment }) {
+function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory, moveSoloRegistration, recordPartialPayment, registrationLog }) {
+  const [showLog, setShowLog] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -6775,9 +6817,39 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 
   return (
     <div className="mt-2 space-y-3">
-      <SectionTitle>
-        Inscritos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
-      </SectionTitle>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <SectionTitle>
+          Inscritos del torneo{pendingCount > 0 && <span className="text-base font-normal ml-2" style={{ color: COLORS.clay }}>· {pendingCount} por revisar</span>}
+        </SectionTitle>
+        {/* v2.80.6 -- respaldo a prueba de borrones (ver logRegistration/migración
+           registration_log): un registro de SOLO AGREGAR, separado de `categories`, de cada
+           inscripción apenas ocurre. Nace del incidente Nicolás Merchán/Camila Sangster --
+           esto deja comparar "quién se inscribió alguna vez" contra lo que se ve arriba, para
+           notar si algo desapareció sin que nadie lo haya borrado a mano. */}
+        <button onClick={() => setShowLog((v) => !v)} className="text-xs font-semibold underline" style={{ color: "#6B7688" }}>
+          {showLog ? "Ocultar" : "Ver"} historial de inscripciones (respaldo)
+        </button>
+      </div>
+
+      {showLog && (
+        <div className="rounded-xl p-3 max-h-64 overflow-y-auto" style={{ background: "#F5F6F9" }}>
+          <p className="text-xs mb-2" style={{ color: "#6B7688" }}>
+            Cada inscripción queda anotada aquí apenas ocurre y nunca se sobreescribe -- si alguien de esta lista no aparece arriba, algo se perdió y hay que investigar.
+          </p>
+          {(registrationLog || []).length === 0 ? (
+            <p className="text-xs italic text-gray-400">Sin registros todavía.</p>
+          ) : (
+            <div className="space-y-1">
+              {registrationLog.map((r) => (
+                <div key={r.id} className="text-xs flex items-center justify-between gap-2 flex-wrap py-1" style={{ borderBottom: "1px solid #E4E8F0" }}>
+                  <span><strong>{r.player_names}</strong> -- {r.category_name}</span>
+                  <span style={{ color: "#9AA6BC" }}>{new Date(r.created_at).toLocaleString("es-VE")}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard label="Jugadores inscritos" value={participants.length} icon={Users} />
