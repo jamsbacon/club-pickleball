@@ -1459,7 +1459,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.1";
+const APP_VERSION = "2.81.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6484,7 +6484,16 @@ function CategoryPicker({ categories, activeCat, setActiveCatId, onCreateClick, 
                a la línea siguiente en vez de recortarse; min-w-0 en el span deja que el flex
                item se angoste de verdad (si no, un texto largo empuja el ancho del botón en
                vez de partirse). */}
-            <span className="min-w-0"><CategoryLabel cat={c} /></span>
+            <span className="min-w-0">
+              <CategoryLabel cat={c} />
+              {/* v2.81.2, a pedido del club: de un vistazo en el sidebar, sin entrar a cada
+                 categoría, saber cuáles ya tienen draw armado y cuáles no. */}
+              {c.drawGenerated && (
+                <span className="block text-[10px] font-bold mt-0.5" style={{ color: "#1B7A4C" }}>
+                  ✓ Draw listo
+                </span>
+              )}
+            </span>
             <ChevronRight size={14} className="opacity-40 group-hover:opacity-100 shrink-0" />
           </button>
         ))}
