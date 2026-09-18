@@ -1515,7 +1515,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.6";
+const APP_VERSION = "2.81.7";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6242,7 +6242,10 @@ const TORNEO_SUB_ITEMS = [
   // v2.44.3: el admin también puede auto-inscribirse (con checkout real, no el roster manual
   // de Duplas) -- antes esta pestaña ni le aparecía.
   { id: "inscripcion", label: "Inscripción", roles: ["admin", "cliente"] },
-  { id: "calendario", label: "Calendario", roles: ["admin", "cliente"] },
+  // v2.81.7, a pedido del club: el cliente ya no ve el Calendario del torneo (la grilla
+  // cancha por cancha, pensada para mesa técnica/organizador) -- sigue viendo Inscripción,
+  // Resultados y Clasificación sin cambios.
+  { id: "calendario", label: "Calendario", roles: ["admin"] },
   { id: "resultados", label: "Resultados", roles: ["admin", "cliente"] },
   // v2.77.1: antes había que entrar a Resultados y filtrar categoría por categoría para ver
   // cómo iba cada una -- acá se ven todas juntas de una, sin la carga de marcador de por medio.
