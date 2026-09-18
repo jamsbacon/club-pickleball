@@ -1515,7 +1515,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.5";
+const APP_VERSION = "2.81.6";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7732,6 +7732,14 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
   const [bestOf, setBestOf] = useState(3);
   const [bracketSize, setBracketSize] = useState(4);
   const [numGroups, setNumGroups] = useState(2);
+  // v2.81.6, a pedido del club: una vez que el draw ya está armado, esta tarjeta de
+  // configuración (sembrado/sets/tamaño de cuadro/vista previa) ocupaba media pantalla antes de
+  // llegar al draw en sí -- normalmente ya no hace falta tocarla. Colapsada por default apenas
+  // hay draw, con un link "Editar formato" para volver a abrirla si hace falta regenerar. Se
+  // reinicia al cambiar de categoría (efecto de abajo) y se vuelve a colapsar sola justo
+  // después de generar/regenerar (ver el onClick del botón, más abajo).
+  const [expanded, setExpanded] = useState(!cat.drawGenerated);
+  useEffect(() => { setExpanded(!cat.drawGenerated); }, [cat.id]);
 
   const teamCount = cat.teams.length;
   const preview = cat.format === "grupos_eliminatoria" && teamCount >= 2
@@ -7747,12 +7755,21 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
 
   return (
     <Card>
-      <div className="flex items-center justify-between mb-1">
-        <SectionTitle sub="Define cómo se sembrarán los equipos y arma el draw de esta categoría.">
+      <div className="flex items-center justify-between" style={{ marginBottom: expanded ? 4 : 0 }}>
+        <SectionTitle sub={expanded ? "Define cómo se sembrarán los equipos y arma el draw de esta categoría." : undefined}>
           Configurar draw · {FORMAT_LABELS[cat.format]}
         </SectionTitle>
-        <button onClick={onChangeFormat} className="text-xs font-semibold shrink-0" style={{ color: COLORS.clay }}>Cambiar formato</button>
+        <div className="flex items-center gap-3 shrink-0">
+          {cat.drawGenerated && (
+            <button onClick={() => setExpanded((v) => !v)} className="text-xs font-semibold" style={{ color: COLORS.court }}>
+              {expanded ? "Ocultar" : "Editar formato"}
+            </button>
+          )}
+          <button onClick={onChangeFormat} className="text-xs font-semibold" style={{ color: COLORS.clay }}>Cambiar formato</button>
+        </div>
       </div>
+      {expanded && (
+      <>
       <div className="grid md:grid-cols-2 gap-4">
         <div>
           <Label>Modo de sembrado</Label>
@@ -7817,12 +7834,14 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
 
       <button
         disabled={!canGenerate}
-        onClick={() => generateDraw(cat.id, { seedMode, bestOf, bracketSize: nextPow2(Number(bracketSize)), numGroups })}
+        onClick={() => { generateDraw(cat.id, { seedMode, bestOf, bracketSize: nextPow2(Number(bracketSize)), numGroups }); setExpanded(false); }}
         style={{ background: canGenerate ? COLORS.clay : "#E5E5E5", color: canGenerate ? "#fff" : "#999" }}
         className="mt-5 px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
         <Swords size={16} /> {cat.drawGenerated ? "Regenerar draw" : "Generar draw"}
       </button>
       {!canGenerate && <p className="text-xs text-red-400 mt-2">Necesitas más equipos inscritos para este formato/tamaño de cuadro.</p>}
+      </>
+      )}
     </Card>
   );
 }
@@ -7858,7 +7877,11 @@ function DrawPreview({ cat, closeGroupsAndSeedBracket, removeTeamFromGroup, assi
 
   return (
     <Card>
-      <SectionTitle>Draw generado</SectionTitle>
+      {/* v2.81.6, a pedido del club: se ve de un vistazo a cuántos sets se juega esta
+         categoría, sin tener que abrir "Editar formato" para revisarlo. */}
+      <SectionTitle sub={cat.bestOf ? `Mejor de ${cat.bestOf} set${cat.bestOf === 1 ? "" : "s"} por partido.` : undefined}>
+        Draw generado
+      </SectionTitle>
       {cat.groups.length > 0 && (
         <div className="grid md:grid-cols-2 gap-4 mb-5">
           {cat.groups.map((g) => (

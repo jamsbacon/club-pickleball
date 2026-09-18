@@ -1,7 +1,7 @@
 {
   "name": "club-pickleball-app",
   "private": true,
-  "version": "2.81.5",
+  "version": "2.81.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
