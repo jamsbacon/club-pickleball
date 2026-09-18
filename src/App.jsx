@@ -1126,12 +1126,26 @@ function computeStandings(teams, teamIds, matches) {
     b.setsF += setsB; b.setsC += setsA;
     if (m.winnerId === m.teamAId) { a.pg++; b.pp++; } else { b.pg++; a.pp++; }
   });
+  // v2.81.3, a pedido del club: 4to criterio de desempate -- enfrentamiento directo. Solo
+  // entra en juego si los 3 de arriba (partidos ganados, diferencia de sets, diferencia de
+  // puntos) quedan exactamente empatados entre DOS duplas puntuales. Como cada grupo es round
+  // robin (un solo partido por par), basta con guardar el ganador de cada partido jugado bajo
+  // una llave sin orden ("idA|idB" ordenado) y consultarla en el sort.
+  const h2h = {};
+  matches.forEach((m) => {
+    if (!m.winnerId || !m.teamAId || !m.teamBId) return;
+    h2h[[m.teamAId, m.teamBId].sort().join("|")] = m.winnerId;
+  });
   return Object.values(rows).sort((x, y) => {
     if (y.pg !== x.pg) return y.pg - x.pg;
     const diffX = x.setsF - x.setsC, diffY = y.setsF - y.setsC;
     if (diffY !== diffX) return diffY - diffX;
     const pdX = x.ptsF - x.ptsC, pdY = y.ptsF - y.ptsC;
-    return pdY - pdX;
+    if (pdY !== pdX) return pdY - pdX;
+    const winner = h2h[[x.teamId, y.teamId].sort().join("|")];
+    if (winner === x.teamId) return -1;
+    if (winner === y.teamId) return 1;
+    return 0;
   });
 }
 
@@ -1459,7 +1473,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.2";
+const APP_VERSION = "2.81.3";
 
 /* =========================================================================
    DESIGN TOKENS
