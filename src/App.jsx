@@ -1279,6 +1279,24 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   // el loop de bracket original, solo que ahora se arma como lista en vez de
   // consumirse con su propio cursor de slots independiente. Los fijados a mano ya
   // tienen lugar (arriba) y no entran acá.
+  //
+  // v2.81.4 -- INCIDENTE REAL: un partido de bracket con equipos aún no definidos (teamAId/
+  // teamBId null, ver buildQualifierBracket) nunca choca por jugador -- más abajo, `ps.length
+  // > 0 && ...` es false para él, así que jamás lo descarta el chequeo de choque. Si el partido
+  // de GRUPO que le tocaba a un hueco de cancha/horario quedaba descartado por choque de
+  // jugador, el buscador seguía bajando por la cola y terminaba agendando ahí un partido de
+  // LLAVE en su lugar -- aunque sus equipos dependan de que la fase de grupos de esa MISMA
+  // categoría ya haya cerrado. Resultado real: semifinal/final con el MISMO horario (o antes)
+  // que partidos de grupo de la propia categoría, imposibles de jugar en ese momento.
+  //
+  // `matchBucket` numera la fase de cada partido POR CATEGORÍA (0 = grupos, 1 = ronda 1 de
+  // bracket, 2 = ronda 2, ...) y `bucketRemaining` cuenta cuántos de cada fase le quedan sin
+  // agendar a esa categoría. Un partido de fase N recién se considera elegible más abajo cuando
+  // ya no queda NINGÚN partido de fase < N sin agendar en su categoría -- dentro de la MISMA
+  // fase el orden se queda libre, como siempre (los partidos de grupo entre sí, o los de una
+  // misma ronda de bracket entre sí, no tienen por qué respetar ningún orden particular).
+  const matchBucket = new Map();
+  const bucketRemaining = {}; // catId -> [cantidad sin agendar por fase]
   const perCatQueues = orderedCats.map((cat) => {
     const group = cat.matches.filter((m) => m.phase === "group" && !m.locked && roundAllowed(cat, m));
     const byRound = {};
@@ -1287,7 +1305,11 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
       byRound[key] = byRound[key] || [];
       byRound[key].push(m);
     });
-    const bracket = Object.keys(byRound).map(Number).sort((a, b) => a - b).flatMap((rn) => byRound[rn]);
+    const roundKeys = Object.keys(byRound).map(Number).sort((a, b) => a - b);
+    const bracket = roundKeys.flatMap((rn) => byRound[rn]);
+    group.forEach((m) => matchBucket.set(m, 0));
+    roundKeys.forEach((rn, bi) => byRound[rn].forEach((m) => matchBucket.set(m, bi + 1)));
+    bucketRemaining[cat.id] = [group.length, ...roundKeys.map((rn) => byRound[rn].length)];
     return [...group, ...bracket];
   });
 
@@ -1326,12 +1348,25 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     }
     const slot = slots[slotIndex];
     const usedPlayers = new Set(lockedPlayersBySlot[`${slot.date}|${slot.timeMin}`] || []);
+    // v2.81.4 -- foto de bucketRemaining ANTES de repartir esta franja entre canchas: si se
+    // usara el contador en vivo, el último partido de grupo de una categoría y el primero de
+    // bracket podrían caer en la MISMA franja (cancha distinta) apenas ese contador llegara a
+    // cero a mitad del loop de canchas -- aunque ya no "choquen" en la cola, el partido de
+    // grupo todavía no se habría JUGADO a esa hora. Congelar la foto al empezar la franja
+    // obliga al de bracket a esperar, como mínimo, a la franja siguiente.
+    const bucketRemainingAtSlotStart = {};
+    Object.keys(bucketRemaining).forEach((cid) => { bucketRemainingAtSlotStart[cid] = [...bucketRemaining[cid]]; });
     for (let c = 0; c < courts.length && queue.length > 0; c++) {
       if (preOccupied.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
       let foundIdx = -1;
       for (let i = 0; i < queue.length; i++) {
         const m = queue[i];
         if (!dateAllows(m.categoryId, slot.date)) continue;
+        // v2.81.4 -- ver comentario de matchBucket/bucketRemaining arriba: nunca elegible
+        // todavía si a su categoría le queda algún partido de una fase ANTERIOR sin agendar,
+        // sin importar que este partido puntual no choque por jugador.
+        const bucket = matchBucket.get(m);
+        if (bucketRemainingAtSlotStart[m.categoryId].slice(0, bucket).some((n) => n > 0)) continue;
         const ps = playersOf(m);
         // Un partido de bracket con equipos aún no definidos (rondas futuras, o
         // llave alimentada por grupos que todavía no cerraron) no tiene jugadores
@@ -1344,6 +1379,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
       }
       if (foundIdx === -1) continue;
       const match = queue.splice(foundIdx, 1)[0];
+      bucketRemaining[match.categoryId][matchBucket.get(match)]--;
       playersOf(match).forEach((p) => usedPlayers.add(p));
       match.day = slot.date; match.time = minutesToTime(slot.timeMin); match.courtId = courts[c].id;
       // v2.69.0: el panel Planificar arma cada corrida para UN día -- que lo que acaba de
@@ -1473,7 +1509,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.3";
+const APP_VERSION = "2.81.4";
 
 /* =========================================================================
    DESIGN TOKENS
