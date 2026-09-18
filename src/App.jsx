@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.0";
+const APP_VERSION = "2.80.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6811,7 +6811,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
       {removeTarget && (
         <ConfirmDeleteModal
           title={`¿Eliminar a ${removeTarget.name} de este torneo?`}
-          message={removeError || `Se le borra de ${removeTarget.categories.length === 1 ? "su única categoría" : "sus " + removeTarget.categories.length + " categorías"}: ${removeTarget.categories.join(", ")}. Esta acción no se puede deshacer.`}
+          message={removeError || `Se le borra de ${removeTarget.categories.length === 1 ? "su única categoría" : "sus " + removeTarget.categories.length + " categorías"}: ${removeTarget.categories.join(", ")}.${removeTarget.verifiedUsd > 0 ? ` ⚠ Incluye ${formatMoney(removeTarget.verifiedUsd)} YA VERIFICADOS que se pierden sin dejar rastro.` : ""} Esta acción no se puede deshacer.`}
           options={[{ label: removing ? "Eliminando…" : "Eliminar", variant: "danger", onClick: confirmRemove }]}
           onCancel={() => { setRemoveTarget(null); setRemoveError(""); }} />
       )}
@@ -6845,6 +6845,22 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
     return [...(cat.teams || []), ...(cat.waitlist || [])].find((team) => team.id === t.teamId) || null;
   };
   const isSolo = (t) => (teamFor(t)?.players?.length || 0) === 1;
+  // v2.80.1 -- ver incidente: quitar a alguien de una categoría con pago YA VERIFICADO
+  // borraba ese pago (monto, referencia, comprobante) sin ningún aviso, junto con el resto
+  // del equipo. `paymentFor` calcula el monto/estatus real de ESTE jugador puntual (mismo
+  // criterio "ownPayment" que buildTournamentParticipants: el jugador #0 usa los campos del
+  // equipo, uno que se unió después por su cuenta con joinTeam tiene los suyos propios) para
+  // poder advertir ANTES de borrar, no descubrirlo después como pasó con Flor Monttalti.
+  const paymentFor = (t) => {
+    const team = teamFor(t);
+    if (!team) return null;
+    const player = team.players?.[t.playerIdx];
+    const ownPayment = t.playerIdx > 0 && player?.paymentStatus !== undefined;
+    return {
+      paymentStatus: ownPayment ? player.paymentStatus : team.paymentStatus,
+      priceUsd: Number(ownPayment ? player.priceUsd : team.priceUsd) || 0,
+    };
+  };
   const destOptions = (t) => {
     const originCat = categories.find((c) => c.id === t.catId);
     // No se ofrece una categoría donde ya está inscrita -- moveSoloRegistration la rechaza
@@ -6905,14 +6921,25 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
                   </button>
                 </div>
               )}
-              {confirmIdx === idx && (
-                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-                  <span className="text-xs" style={{ color: "#6B7688" }}>¿Seguro que quieres quitarla de "{t.catName}"?</span>
-                  <button onClick={() => doRemove(t)} disabled={busy} style={{ background: COLORS.clay, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
-                    {busy ? "Quitando…" : "Sí, quitar"}
-                  </button>
-                </div>
-              )}
+              {confirmIdx === idx && (() => {
+                const pay = paymentFor(t);
+                const isVerified = pay?.paymentStatus === "confirmada";
+                return (
+                  <div className="mt-2.5 flex flex-col gap-2">
+                    {isVerified && (
+                      <p className="text-xs font-bold px-2.5 py-2 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
+                        ⚠ Esta categoría tiene un pago YA VERIFICADO de {formatMoney(pay.priceUsd)} -- al quitarla, ese pago se borra sin dejar rastro (no se puede recuperar). Solo continúa si el reembolso o el cambio ya está resuelto por fuera.
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs" style={{ color: "#6B7688" }}>¿Seguro que quieres quitarla de "{t.catName}"?</span>
+                      <button onClick={() => doRemove(t)} disabled={busy} style={{ background: COLORS.clay, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                        {busy ? "Quitando…" : isVerified ? "Sí, quitar y perder el pago verificado" : "Sí, quitar"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           ))}
           {entry.removalTargets.length === 0 && <p className="text-xs text-gray-400 italic">Ya no está en ninguna categoría de este torneo.</p>}
