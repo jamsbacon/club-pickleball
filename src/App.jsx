@@ -1459,7 +1459,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.0";
+const APP_VERSION = "2.81.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -11434,7 +11434,12 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
     // Torneos hasta que se publique (v2.16.0).
     tournaments.filter((t) => t.status === "published").forEach((t) => {
       const tCats = categories.filter((c) => c.tournamentId === t.id);
-      const teamCount = tCats.reduce((s, c) => s + c.teams.length, 0);
+      // v2.81.1 -- a pedido del club: "equipos inscritos" contaba FILAS de equipo, no personas
+      // -- una dupla "esperando pareja" (un solo jugador, ver countCategoryPlayers) contaba
+      // igual que una ya completa, subestimando cuánta gente de verdad se anotó. Esto cuenta
+      // JUGADORES reales (mismo criterio que categoryCountLabel/categoryIsFull en el resto de
+      // la app), no filas.
+      const registrationCount = tCats.reduce((s, c) => s + countCategoryPlayers(c.teams), 0);
       // Antes esto era un solo booleano (¿hay algún equipo inscrito?) que confundía "sin
       // categorías todavía" con "hay categorías pero nadie se anotó aún" -- distinguir los
       // dos casos importa más ahora que hay varias tarjetas de torneo a la vez.
@@ -11453,7 +11458,7 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // primer día.
         date: t.startDate, endDate: t.endDate, startTime: t.dailyStart, endTime: t.dailyEnd,
         price: entryPrice > 0 ? `Desde ${formatMoney(entryPrice)}` : "Gratis", image: t.image || null, recurring: false,
-        meta: { text: noCatsYet ? "Sin categorías aún" : `${teamCount} equipo(s) inscrito(s)` },
+        meta: { text: noCatsYet ? "Sin categorías aún" : `${registrationCount} inscripción${registrationCount === 1 ? "" : "es"}` },
         onClick: () => openTournament(t.id),
         // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
         // admin, no hace falta un modo edición aparte como Open Play/Clase.
