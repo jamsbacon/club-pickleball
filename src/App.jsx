@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.1";
+const APP_VERSION = "2.80.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6819,6 +6819,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
       {manageEntry && (
         <ManageCategoriesModal entry={manageEntry} categories={categories}
           removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration}
+          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
           onClose={() => setManageKey(null)} />
       )}
     </div>
@@ -6832,12 +6833,13 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 // fila de `entry.removalTargets` es una categoría/equipo distinto; los dos sub-formularios
 // (mover / quitar) son mutuamente excluyentes y viven expandidos DEBAJO de su propia fila, no en
 // un modal aparte, para no apilar confirmaciones una encima de otra.
-function ManageCategoriesModal({ entry, categories, removePersonFromCategory, moveSoloRegistration, onClose }) {
+function ManageCategoriesModal({ entry, categories, removePersonFromCategory, moveSoloRegistration, setTeamPaymentStatus, setPlayerPaymentStatus, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmIdx, setConfirmIdx] = useState(null);
   const [moveIdx, setMoveIdx] = useState(null);
   const [moveToCatId, setMoveToCatId] = useState("");
+  const [verifyIdx, setVerifyIdx] = useState(null);
 
   const teamFor = (t) => {
     const cat = categories.find((c) => c.id === t.catId);
@@ -6850,16 +6852,32 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
   // del equipo. `paymentFor` calcula el monto/estatus real de ESTE jugador puntual (mismo
   // criterio "ownPayment" que buildTournamentParticipants: el jugador #0 usa los campos del
   // equipo, uno que se unió después por su cuenta con joinTeam tiene los suyos propios) para
-  // poder advertir ANTES de borrar, no descubrirlo después como pasó con Flor Monttalti.
+  // poder advertir ANTES de borrar, no descubrirlo después como pasó con Flor Monttalti. La
+  // misma función arma "Verificar este pago" (v2.80.2): el botón "Verificar" de Inscritos
+  // confirma TODO lo pendiente de la persona de una (ver confirmVerify) -- si tiene dos
+  // categorías con estados reales distintos (una transferencia de verdad, otra efectivo que
+  // todavía no llega), ese botón confirmaría las dos juntas por error. Acá se puede verificar
+  // una categoría puntual sin tocar las demás.
   const paymentFor = (t) => {
     const team = teamFor(t);
     if (!team) return null;
     const player = team.players?.[t.playerIdx];
     const ownPayment = t.playerIdx > 0 && player?.paymentStatus !== undefined;
+    const src = ownPayment ? player : team;
     return {
-      paymentStatus: ownPayment ? player.paymentStatus : team.paymentStatus,
-      priceUsd: Number(ownPayment ? player.priceUsd : team.priceUsd) || 0,
+      ownPayment,
+      paymentStatus: src.paymentStatus,
+      priceUsd: Number(src.priceUsd) || 0,
+      paymentMethod: src.paymentMethod,
+      reference: src.reference || "",
     };
+  };
+  const doVerify = (t) => {
+    const pay = paymentFor(t);
+    if (!pay) return;
+    if (pay.ownPayment) setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, "confirmada");
+    else setTeamPaymentStatus(t.catId, t.teamId, "confirmada");
+    setVerifyIdx(null);
   };
   const destOptions = (t) => {
     const originCat = categories.find((c) => c.id === t.catId);
@@ -6891,23 +6909,42 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
         <p className="text-xs mt-1 mb-4" style={{ color: "#6B7688" }}>Quítala de una categoría puntual, o cámbiala de categoría si todavía está esperando pareja.</p>
         {error && <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>{error}</p>}
         <div className="space-y-2 max-h-[50vh] overflow-y-auto">
-          {entry.removalTargets.map((t, idx) => (
+          {entry.removalTargets.map((t, idx) => {
+            const pay = paymentFor(t);
+            const pending = pay && pay.paymentStatus !== "confirmada";
+            return (
             <div key={`${t.catId}_${t.teamId}_${t.playerIdx}`} className="rounded-lg p-3" style={{ background: "#F5F6F9" }}>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-sm font-semibold">{t.catName}{t.inWaitlist ? " (lista de espera)" : ""}</span>
                 <div className="flex items-center gap-3 shrink-0">
+                  {pending && (
+                    <button onClick={() => { setVerifyIdx(verifyIdx === idx ? null : idx); setConfirmIdx(null); setMoveIdx(null); setError(""); }} disabled={busy}
+                      className="text-xs font-semibold underline" style={{ color: "#1B7A4C" }}>
+                      Verificar este pago
+                    </button>
+                  )}
                   {isSolo(t) && (
-                    <button onClick={() => { setMoveIdx(moveIdx === idx ? null : idx); setConfirmIdx(null); setError(""); }} disabled={busy}
+                    <button onClick={() => { setMoveIdx(moveIdx === idx ? null : idx); setConfirmIdx(null); setVerifyIdx(null); setError(""); }} disabled={busy}
                       className="text-xs font-semibold underline" style={{ color: COLORS.court }}>
                       Cambiar de categoría
                     </button>
                   )}
-                  <button onClick={() => { setConfirmIdx(confirmIdx === idx ? null : idx); setMoveIdx(null); setError(""); }} disabled={busy}
+                  <button onClick={() => { setConfirmIdx(confirmIdx === idx ? null : idx); setMoveIdx(null); setVerifyIdx(null); setError(""); }} disabled={busy}
                     className="text-xs font-semibold underline" style={{ color: COLORS.clay }}>
                     Quitar de esta categoría
                   </button>
                 </div>
               </div>
+              {verifyIdx === idx && pay && (
+                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                  <span className="text-xs" style={{ color: "#6B7688" }}>
+                    Marcar {formatMoney(pay.priceUsd)} ({METHOD_LABELS[pay.paymentMethod] || pay.paymentMethod}{pay.reference ? `, ref. ••${pay.reference.slice(-4)}` : ""}) como verificado -- solo esta categoría.
+                  </span>
+                  <button onClick={() => doVerify(t)} style={{ background: "#1B7A4C", color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                    Sí, verificar
+                  </button>
+                </div>
+              )}
               {moveIdx === idx && (
                 <div className="mt-2.5 flex items-center gap-2 flex-wrap">
                   <select value={moveToCatId} onChange={(ev) => setMoveToCatId(ev.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs">
@@ -6941,7 +6978,8 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
                 );
               })()}
             </div>
-          ))}
+            );
+          })}
           {entry.removalTargets.length === 0 && <p className="text-xs text-gray-400 italic">Ya no está en ninguna categoría de este torneo.</p>}
         </div>
         <button onClick={onClose} className="w-full mt-4 py-2 rounded-xl font-semibold text-sm" style={{ color: "#6B7688" }}>Cerrar</button>
