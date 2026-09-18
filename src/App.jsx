@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.2";
+const APP_VERSION = "2.80.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2507,6 +2507,45 @@ export default function PickleballTournamentApp() {
       c.waitlist = c.waitlist.map(patch);
       return c;
     });
+  };
+  // Pago PARCIAL de una categoría puntual (v2.80.3) -- caso real: Flor Monttalti quedó anotada
+  // en una categoría de $20 pero solo pagó $15 (el resto de un carrito de 2 categorías que se
+  // desarmó). Antes de esto, "pagado" era todo o nada -- ver buildTournamentParticipants, que
+  // asumía SIEMPRE el precio completo (`priceUsd`) apenas el estatus dejaba de ser
+  // "pendiente_efectivo". Esto guarda un `paidUsd`/`paidBs` EXPLÍCITO, que puede ser menor al
+  // precio total, sin fingir que ya entró todo -- buildTournamentParticipants usa este valor en
+  // vez de asumir el precio completo cuando existe (ver comentario ahí). Si lo pagado cubre el
+  // precio entero, se marca "confirmada" igual que el flujo viejo; si no, se queda
+  // "pendiente_verificacion" -- hay plata real registrada, pero falta el resto.
+  const recordPartialPayment = async (catId, teamId, playerIdx, { paidUsd, paidBs, paymentMethod, reference }) => {
+    const cat = categories.find((c) => c.id === catId);
+    if (!cat) return { error: "Esta categoría ya no existe." };
+    const list = cat.teams || [];
+    if (list.filter((t) => t.id === teamId).length > 1) {
+      return { error: `Hay más de un equipo con el mismo identificador en "${cat.name}" (dato corrupto) -- no se guardó nada. Avísale al admin de la app para revisarlo a mano.` };
+    }
+    const team = list.find((t) => t.id === teamId);
+    if (!team) return { error: "Este cupo ya no existe -- puede que lo hayan borrado." };
+    const target = playerIdx > 0 ? team.players?.[playerIdx] : team;
+    const priceUsd = Number(target?.priceUsd) || 0;
+    const paymentStatus = Number(paidUsd) >= priceUsd ? "confirmada" : "pendiente_verificacion";
+    const result = await updateCategory(catId, (c) => {
+      const patch = (t) => {
+        if (t.id !== teamId) return t;
+        if (playerIdx > 0) {
+          return { ...t, players: t.players.map((p, i) => (i === playerIdx ? { ...p, paidUsd: Number(paidUsd) || 0, paidBs: Number(paidBs) || 0, paymentMethod, reference: reference || "", paymentStatus } : p)) };
+        }
+        return { ...t, paidUsd: Number(paidUsd) || 0, paidBs: Number(paidBs) || 0, paymentMethod, reference: reference || "", paymentStatus };
+      };
+      c.teams = c.teams.map(patch);
+      c.waitlist = c.waitlist.map(patch);
+      return c;
+    });
+    if (result?.error) return { error: result.error };
+    if (paymentStatus === "confirmada" && target?.userId) {
+      sendPush("payment_confirmed", { userId: target.userId, title: "Pago verificado", body: "Tu inscripción al torneo quedó confirmada.", url: "/" });
+    }
+    return {};
   };
   // Borra a UNA persona de una categoría puntual (v2.50.0) -- reemplaza a los removeTeam/
   // removeFromWaitlist de antes, que borraban el EQUIPO entero sin distinguir cuál de los dos
@@ -3647,7 +3686,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
-                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -6186,7 +6225,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
@@ -6269,7 +6308,7 @@ function TorneosSection(props) {
 
       {subTab === "inscritos" && role === "admin" && (
         <InscritosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
-          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} />
+          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} recordPartialPayment={recordPartialPayment} />
       )}
 
       {subTab === "duplas" && role === "admin" && (
@@ -6518,12 +6557,20 @@ function buildTournamentParticipants(categories) {
         // de nivel de equipo; el #2 solo tiene los suyos propios si se unió por su cuenta con
         // el link (joinTeam, v2.44.2) -- si no, comparte el pago de quien creó el equipo.
         const ownPayment = idx > 0 && p.paymentStatus !== undefined;
-        const priceUsd = Number(ownPayment ? p.priceUsd : team.priceUsd) || 0;
-        const priceBs = Number(ownPayment ? p.priceBs : team.priceBs) || 0;
-        const paymentMethod = ownPayment ? p.paymentMethod : team.paymentMethod;
-        const paymentStatus = ownPayment ? p.paymentStatus : team.paymentStatus;
-        const reference = (ownPayment ? p.reference : team.reference) || "";
+        const src = ownPayment ? p : team;
+        const priceUsd = Number(src.priceUsd) || 0;
+        const priceBs = Number(src.priceBs) || 0;
+        const paymentMethod = src.paymentMethod;
+        const paymentStatus = src.paymentStatus;
+        const reference = (src.reference) || "";
         const createdAt = (ownPayment ? p.joinedAt : team.createdAt) || 0;
+        // v2.80.3 -- pago parcial (ver recordPartialPayment): si esta categoría puntual tiene un
+        // `paidUsd`/`paidBs` explícito guardado (menos del precio total), usar ESO en vez de
+        // asumir que ya entró el precio completo solo porque el estatus dejó de ser
+        // "pendiente_efectivo" -- el criterio viejo (línea de abajo, `priceUsd`/`priceBs`) sigue
+        // aplicando tal cual para cualquier registro que nunca haya pasado por ese flujo.
+        const paidAmountUsd = src.paidUsd != null ? Number(src.paidUsd) : priceUsd;
+        const paidAmountBs = src.paidBs != null ? Number(src.paidBs) : priceBs;
         const key = p.userId || `name:${p.name.trim().toLowerCase()}`;
         const entry = byPerson.get(key) || {
           key, name: p.name, categories: [], totalUsd: 0, paidUsd: 0, paidBs: 0, verifiedUsd: 0,
@@ -6532,7 +6579,7 @@ function buildTournamentParticipants(categories) {
         entry.categories.push(cat.name);
         entry.totalUsd += priceUsd;
         if (paymentStatus === "confirmada") entry.verifiedUsd += priceUsd;
-        if (paymentStatus !== "pendiente_efectivo") { entry.paidUsd += priceUsd; entry.paidBs += priceBs; }
+        if (paymentStatus !== "pendiente_efectivo") { entry.paidUsd += paidAmountUsd; entry.paidBs += paidAmountBs; }
         if (paymentStatus !== "confirmada") entry.verifyTargets.push(ownPayment ? { kind: "player", catId: cat.id, teamId: team.id, playerIdx: idx } : { kind: "team", catId: cat.id, teamId: team.id });
         entry.removalTargets.push({ catId: cat.id, catName: cat.name, teamId: team.id, playerIdx: idx, inWaitlist });
         if (paymentMethod) entry.methods.add(paymentMethod);
@@ -6614,7 +6661,7 @@ function referenceHint(entry) {
   return [...entry.references].map((r) => `••${r.slice(-4)}`).join(", ");
 }
 
-function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory, moveSoloRegistration }) {
+function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory, moveSoloRegistration, recordPartialPayment }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -6819,7 +6866,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
       {manageEntry && (
         <ManageCategoriesModal entry={manageEntry} categories={categories}
           removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration}
-          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+          setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
           onClose={() => setManageKey(null)} />
       )}
     </div>
@@ -6833,13 +6880,17 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
 // fila de `entry.removalTargets` es una categoría/equipo distinto; los dos sub-formularios
 // (mover / quitar) son mutuamente excluyentes y viven expandidos DEBAJO de su propia fila, no en
 // un modal aparte, para no apilar confirmaciones una encima de otra.
-function ManageCategoriesModal({ entry, categories, removePersonFromCategory, moveSoloRegistration, setTeamPaymentStatus, setPlayerPaymentStatus, onClose }) {
+function ManageCategoriesModal({ entry, categories, removePersonFromCategory, moveSoloRegistration, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmIdx, setConfirmIdx] = useState(null);
   const [moveIdx, setMoveIdx] = useState(null);
   const [moveToCatId, setMoveToCatId] = useState("");
   const [verifyIdx, setVerifyIdx] = useState(null);
+  const [payAmount, setPayAmount] = useState("");
+  const [payBs, setPayBs] = useState("");
+  const [payMethod, setPayMethod] = useState("movil");
+  const [payRef, setPayRef] = useState("");
 
   const teamFor = (t) => {
     const cat = categories.find((c) => c.id === t.catId);
@@ -6872,11 +6923,28 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
       reference: src.reference || "",
     };
   };
-  const doVerify = (t) => {
+  // v2.80.3 -- "Verificar este pago" ahora deja editar el MONTO antes de guardar (no siempre es
+  // el precio completo, ver recordPartialPayment/caso Flor Monttalti: pagó $15 de una categoría
+  // de $20). Precarga el precio completo como si fuera pago total -- el caso más común -- pero
+  // el admin lo puede bajar si el monto real fue menor.
+  const openVerify = (t, idx) => {
     const pay = paymentFor(t);
-    if (!pay) return;
-    if (pay.ownPayment) setPlayerPaymentStatus(t.catId, t.teamId, t.playerIdx, "confirmada");
-    else setTeamPaymentStatus(t.catId, t.teamId, "confirmada");
+    setConfirmIdx(null); setMoveIdx(null); setError("");
+    if (verifyIdx === idx) { setVerifyIdx(null); return; }
+    setVerifyIdx(idx);
+    setPayAmount(pay ? String(pay.priceUsd) : "");
+    setPayBs("");
+    setPayMethod((pay && pay.paymentMethod) || "movil");
+    setPayRef((pay && pay.reference) || "");
+  };
+  const doVerify = async (t) => {
+    if (!payAmount || Number(payAmount) <= 0) { setError("Ingresa el monto que de verdad pagó."); return; }
+    setBusy(true); setError("");
+    const result = await recordPartialPayment(t.catId, t.teamId, t.playerIdx, {
+      paidUsd: Number(payAmount), paidBs: Number(payBs) || 0, paymentMethod: payMethod, reference: payRef,
+    });
+    setBusy(false);
+    if (result?.error) { setError(result.error); return; }
     setVerifyIdx(null);
   };
   const destOptions = (t) => {
@@ -6918,7 +6986,7 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
                 <span className="text-sm font-semibold">{t.catName}{t.inWaitlist ? " (lista de espera)" : ""}</span>
                 <div className="flex items-center gap-3 shrink-0">
                   {pending && (
-                    <button onClick={() => { setVerifyIdx(verifyIdx === idx ? null : idx); setConfirmIdx(null); setMoveIdx(null); setError(""); }} disabled={busy}
+                    <button onClick={() => openVerify(t, idx)} disabled={busy}
                       className="text-xs font-semibold underline" style={{ color: "#1B7A4C" }}>
                       Verificar este pago
                     </button>
@@ -6936,12 +7004,31 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
                 </div>
               </div>
               {verifyIdx === idx && pay && (
-                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-                  <span className="text-xs" style={{ color: "#6B7688" }}>
-                    Marcar {formatMoney(pay.priceUsd)} ({METHOD_LABELS[pay.paymentMethod] || pay.paymentMethod}{pay.reference ? `, ref. ••${pay.reference.slice(-4)}` : ""}) como verificado -- solo esta categoría.
-                  </span>
-                  <button onClick={() => doVerify(t)} style={{ background: "#1B7A4C", color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
-                    Sí, verificar
+                <div className="mt-2.5 p-2.5 rounded-lg space-y-2" style={{ background: "#EAF5EE" }}>
+                  <p className="text-xs" style={{ color: "#1B7A4C" }}>Precio de esta categoría: {formatMoney(pay.priceUsd)}. Si pagó menos, ajusta el monto -- se queda "por verificar" hasta que llegue el resto; si cubre el precio completo, se marca verificado.</p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div>
+                      <Label>Monto pagado (USD)</Label>
+                      <input type="number" step="0.01" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} style={{ ...inputStyle, width: 110 }} className="text-xs" />
+                    </div>
+                    <div>
+                      <Label>Monto pagado (Bs, opcional)</Label>
+                      <input type="number" step="0.01" value={payBs} onChange={(e) => setPayBs(e.target.value)} placeholder="—" style={{ ...inputStyle, width: 120 }} className="text-xs" />
+                    </div>
+                    <div>
+                      <Label>Medio</Label>
+                      <select value={payMethod} onChange={(e) => setPayMethod(e.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs">
+                        <option value="movil">Pago Móvil</option>
+                        <option value="efectivo">Efectivo</option>
+                      </select>
+                    </div>
+                    <div>
+                      <Label>Referencia</Label>
+                      <input type="text" value={payRef} onChange={(e) => setPayRef(e.target.value)} style={{ ...inputStyle, width: 110 }} className="text-xs" />
+                    </div>
+                  </div>
+                  <button onClick={() => doVerify(t)} disabled={busy} style={{ background: "#1B7A4C", color: "#fff", opacity: busy ? 0.6 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                    {busy ? "Guardando…" : "Guardar pago"}
                   </button>
                 </div>
               )}
