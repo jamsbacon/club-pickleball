@@ -1101,7 +1101,10 @@ function computePodium(cat) {
    ========================================================================= */
 function computeStandings(teams, teamIds, matches) {
   const rows = {};
-  teamIds.forEach((tid) => {
+  // v2.81.0: un cupo vacío de grupo (ver removeTeamFromGroup) guarda `null` en teamIds en vez
+  // de encoger el arreglo -- filtrarlo acá evita una fila fantasma "?" en la tabla de posiciones
+  // mientras el cupo sigue sin asignar.
+  teamIds.filter(Boolean).forEach((tid) => {
     const team = teams.find((t) => t.id === tid);
     rows[tid] = {
       teamId: tid, name: team ? team.name : "?",
@@ -1456,7 +1459,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.6";
+const APP_VERSION = "2.81.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2954,6 +2957,39 @@ export default function PickleballTournamentApp() {
     setScheduleInfo(null);
   };
 
+  // v2.81.0: quitar/reasignar una dupla de un grupo YA generado -- a pedido del club: alguien
+  // se retira o quedó en el grupo equivocado DESPUÉS de generar el draw, y hasta ahora la única
+  // forma de corregirlo era regenerar TODO el draw de la categoría (perdiendo cualquier
+  // resultado ya cargado en los demás grupos). `removeTeamFromGroup` deja ese cupo VACÍO (null)
+  // en vez de encoger el grupo -- así el admin ve el hueco y lo puede volver a llenar en vez de
+  // perder la cuenta de cuántos cupos tiene el grupo -- y borra los partidos de fase de grupos
+  // donde esa dupla jugaba (ya no pueden jugarse; si alguno ya tenía marcador cargado, ese
+  // resultado se pierde -- inevitable, la dupla que lo jugó ya no está en el grupo).
+  const removeTeamFromGroup = (catId, groupId, teamId) => {
+    updateCategory(catId, (c) => {
+      c.groups = c.groups.map((g) => (g.id !== groupId ? g : { ...g, teamIds: g.teamIds.map((tid) => (tid === teamId ? null : tid)) }));
+      c.matches = c.matches.filter((m) => !(m.groupId === groupId && (m.teamAId === teamId || m.teamBId === teamId)));
+      return c;
+    });
+  };
+  // Inversa de arriba: llena un cupo vacío (null) de un grupo con una dupla que todavía no
+  // tiene grupo asignado en esta categoría, y genera sus partidos de fase de grupos contra cada
+  // rival que YA está en ese grupo (mismo formato que makeGroupMatch/generateDraw). No los
+  // programa por su cuenta -- esos partidos nuevos salen "sin horario" hasta la próxima corrida
+  // de "Actualizar calendario" (buildSchedule ya garantiza que todo partido sin horario termine
+  // ubicado, ver v2.75.0).
+  const assignTeamToGroupSlot = (catId, groupId, slotIndex, newTeamId) => {
+    updateCategory(catId, (c) => {
+      const group = c.groups.find((g) => g.id === groupId);
+      if (!group) return c;
+      const others = group.teamIds.filter((tid, i) => i !== slotIndex && tid);
+      c.groups = c.groups.map((g) => (g.id !== groupId ? g : { ...g, teamIds: g.teamIds.map((tid, i) => (i === slotIndex ? newTeamId : tid)) }));
+      const newMatches = others.map((otherId) => makeGroupMatch(catId, groupId, newTeamId, otherId));
+      c.matches = [...c.matches, ...newMatches];
+      return c;
+    });
+  };
+
   const submitScore = (catId, matchId, sets) => {
     updateCategory(catId, (c) => {
       const m = c.matches.find((mm) => mm.id === matchId);
@@ -3756,7 +3792,7 @@ export default function PickleballTournamentApp() {
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
                 addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
-                generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
+                generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
                 matchDuration={matchDuration} breakM={breakM}
@@ -6295,7 +6331,7 @@ function TorneosSection(props) {
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
-    generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
+    generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
@@ -6390,6 +6426,7 @@ function TorneosSection(props) {
       {subTab === "formatos" && role === "admin" && (
         <FormatosTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
+          removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
           setCategoryFormat={setCategoryFormat} courts={courts} dates={dates} tournament={tournament}
           matchDuration={matchDuration} breakM={breakM} />
       )}
@@ -7214,7 +7251,7 @@ function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRa
 // Formato de competencia por categoría -- recomendación (FormatAdvisor) mientras no tiene
 // formato, luego armar/ver el draw (DrawSetup/DrawPreview). Antes vivía mezclado dentro de
 // Categorías; misma lógica, solo movida a su propia pestaña.
-function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, closeGroupsAndSeedBracket, setCategoryFormat, courts, dates, tournament, matchDuration, breakM }) {
+function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, setCategoryFormat, courts, dates, tournament, matchDuration, breakM }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -7228,7 +7265,7 @@ function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, clos
             ) : (
               <>
                 <DrawSetup cat={activeCat} generateDraw={generateDraw} onChangeFormat={() => setCategoryFormat(activeCat.id, null)} />
-                {activeCat.drawGenerated && <DrawPreview cat={activeCat} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} />}
+                {activeCat.drawGenerated && <DrawPreview cat={activeCat} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot} />}
               </>
             )}
           </div>
@@ -7725,9 +7762,35 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
   );
 }
 
-function DrawPreview({ cat, closeGroupsAndSeedBracket }) {
+// v2.81.0 -- editar la composición de un grupo YA generado (quitar una dupla dejando el cupo
+// vacío, o llenar un cupo vacío con una dupla sin grupo). Ver removeTeamFromGroup/
+// assignTeamToGroupSlot en el componente principal para qué pasa con los partidos al hacerlo.
+// Solo mientras el grupo sigue abierto (`!cat.groupsClosed`) -- una vez cerrado, la eliminatoria
+// ya se armó a partir de esas posiciones, cambiar quién jugó ya no tiene sentido ahí.
+function DrawPreview({ cat, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot }) {
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
   const isDouble = cat.format === "doble_eliminacion";
+  const canEditGroups = !cat.groupsClosed && cat.groups.length > 0;
+  const [confirmRemove, setConfirmRemove] = useState(null); // { groupId, teamId } | null
+  const [pickSlot, setPickSlot] = useState(null); // { groupId, slotIndex } | null
+  const [pickTeamId, setPickTeamId] = useState("");
+
+  // Duplas de la categoría que no están en NINGÚN grupo todavía (recién quedaron sin cupo por
+  // "Quitar", o nunca se les asignó uno) -- estas son las candidatas para llenar un hueco vacío.
+  const assignedIds = new Set(cat.groups.flatMap((g) => g.teamIds.filter(Boolean)));
+  const unassignedTeams = cat.teams.filter((t) => !assignedIds.has(t.id));
+
+  // Si algún partido de este grupo con esta dupla YA tiene marcador cargado, avisar que se
+  // pierde ese resultado -- removeTeamFromGroup los borra sin más.
+  const hasResult = (groupId, teamId) => cat.matches.some((m) => m.groupId === groupId && (m.teamAId === teamId || m.teamBId === teamId) && m.winnerId);
+
+  const doRemove = (groupId, teamId) => { removeTeamFromGroup(cat.id, groupId, teamId); setConfirmRemove(null); };
+  const doAssign = (groupId, slotIndex) => {
+    if (!pickTeamId) return;
+    assignTeamToGroupSlot(cat.id, groupId, slotIndex, pickTeamId);
+    setPickSlot(null); setPickTeamId("");
+  };
+
   return (
     <Card>
       <SectionTitle>Draw generado</SectionTitle>
@@ -7740,23 +7803,83 @@ function DrawPreview({ cat, closeGroupsAndSeedBracket }) {
                 <span className="text-xs text-gray-500">clasifican {g.qualifiers}</span>
               </div>
               <ul className="text-sm space-y-1">
-                {g.teamIds.map((tid) => <li key={tid}>• {teamName(tid)}</li>)}
+                {g.teamIds.map((tid, idx) => {
+                  if (tid) {
+                    const removing = confirmRemove?.groupId === g.id && confirmRemove?.teamId === tid;
+                    return (
+                      <li key={`${g.id}_${idx}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span>• {teamName(tid)}</span>
+                          {canEditGroups && (
+                            <button onClick={() => { setConfirmRemove(removing ? null : { groupId: g.id, teamId: tid }); setPickSlot(null); }}
+                              className="text-[11px] font-semibold underline shrink-0" style={{ color: COLORS.clay }}>
+                              Quitar
+                            </button>
+                          )}
+                        </div>
+                        {removing && (
+                          <div className="mt-1 mb-1.5 p-2 rounded-lg text-[11px]" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
+                            {hasResult(g.id, tid) && <p className="font-bold mb-1">⚠ Ya hay un resultado cargado con esta dupla en este grupo -- se pierde al quitarla.</p>}
+                            <p className="mb-1.5">El cupo queda vacío para asignar otra dupla. ¿Seguro?</p>
+                            <button onClick={() => doRemove(g.id, tid)} className="px-2.5 py-1 rounded-lg font-bold" style={{ background: COLORS.clay, color: "#fff" }}>Sí, quitar</button>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  }
+                  // Cupo vacío -- clic para elegir una dupla sin grupo asignado.
+                  const picking = pickSlot?.groupId === g.id && pickSlot?.slotIndex === idx;
+                  return (
+                    <li key={`${g.id}_${idx}`}>
+                      <button onClick={() => { setPickSlot(picking ? null : { groupId: g.id, slotIndex: idx }); setPickTeamId(""); setConfirmRemove(null); }}
+                        className="italic text-left w-full" style={{ color: canEditGroups ? COLORS.court : "#9AA6BC" }} disabled={!canEditGroups}>
+                        • — cupo vacío {canEditGroups && "(clic para asignar)"} —
+                      </button>
+                      {picking && (
+                        <div className="mt-1 mb-1.5 p-2 rounded-lg flex items-center gap-2 flex-wrap" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                          {unassignedTeams.length === 0 ? (
+                            <span className="text-[11px] text-gray-400 italic">No hay ninguna dupla sin grupo asignado en esta categoría.</span>
+                          ) : (
+                            <>
+                              <select value={pickTeamId} onChange={(e) => setPickTeamId(e.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs">
+                                <option value="">Elige una dupla…</option>
+                                {unassignedTeams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                              </select>
+                              <button onClick={() => doAssign(g.id, idx)} disabled={!pickTeamId}
+                                style={{ background: COLORS.court, color: "#fff", opacity: pickTeamId ? 1 : 0.5 }} className="px-2.5 py-1 rounded-lg text-xs font-bold">
+                                Asignar
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
         </div>
       )}
 
-      {cat.format === "grupos_eliminatoria" && !cat.groupsClosed && (
-        <button onClick={() => closeGroupsAndSeedBracket(cat.id)}
-          style={{ background: COLORS.court, color: COLORS.chalk }}
-          className="mb-5 px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
-          <CheckCircle2 size={15} /> Cerrar fase de grupos y armar eliminatoria
-        </button>
-      )}
-      {cat.format === "grupos_eliminatoria" && !cat.groupsClosed && (
-        <p className="text-xs text-amber-600 -mt-3 mb-5">Carga primero todos los resultados de grupos en la pestaña "Resultados" y luego cierra la fase para definir el cuadro final.</p>
-      )}
+      {cat.format === "grupos_eliminatoria" && !cat.groupsClosed && (() => {
+        // v2.81.0 -- un cupo vacío (ver removeTeamFromGroup) no se puede editar más una vez
+        // cerrada la fase (canEditGroups se apaga con groupsClosed) -- si se cierra con un
+        // hueco sin llenar, quedaría atascado para siempre como "Por definir" en la
+        // eliminatoria. Mejor bloquear el cierre hasta que todos los cupos estén asignados.
+        const hasEmptySlot = cat.groups.some((g) => g.teamIds.some((tid) => !tid));
+        return (
+          <>
+            <button onClick={() => closeGroupsAndSeedBracket(cat.id)} disabled={hasEmptySlot}
+              style={{ background: hasEmptySlot ? "#E5E5E5" : COLORS.court, color: hasEmptySlot ? "#999" : COLORS.chalk }}
+              className="mb-2 px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
+              <CheckCircle2 size={15} /> Cerrar fase de grupos y armar eliminatoria
+            </button>
+            {hasEmptySlot && <p className="text-xs mb-5" style={{ color: COLORS.clay }}>Hay un cupo vacío sin asignar -- llénalo arriba antes de cerrar la fase de grupos.</p>}
+            <p className="text-xs text-amber-600 mb-5">Carga primero todos los resultados de grupos en la pestaña "Resultados" y luego cierra la fase para definir el cuadro final.</p>
+          </>
+        );
+      })()}
 
       {isDouble && <DoubleEliminationView cat={cat} />}
       {!isDouble && cat.matches.some((m) => m.phase === "bracket") && <BracketView cat={cat} teamName={teamName} />}
