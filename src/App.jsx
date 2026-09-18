@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.4";
+const APP_VERSION = "2.80.5";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2246,9 +2246,25 @@ export default function PickleballTournamentApp() {
   // PUEDE (no tiene que) esperar el resultado real antes de decirle al usuario "listo".
   // Ningún llamador existente que no lo esperaba se rompe -- una promesa sin await simplemente
   // corre en segundo plano, igual que antes.
-  const updateCategory = (id, updater) => {
-    const current = categories.find((c) => c.id === id);
-    if (!current) return Promise.resolve({ error: "Esta categoría ya no existe." });
+  //
+  // v2.80.5 -- INCIDENTE REAL DE PÉRDIDA DE DATOS: esta función leía `current` del estado LOCAL
+  // (`categories`), que se carga UNA sola vez al abrir la pantalla (ver el useEffect de arriba
+  // -- no hay Supabase Realtime, nada refresca esto solo) y escribía TODO el array
+  // `teams`/`waitlist` de vuelta como un swap completo, no un merge. Si alguien se inscribió en
+  // esa MISMA categoría después de que este navegador cargó -- o mientras la pestaña del admin
+  // quedó abierta toda la noche -- la siguiente escritura desde ese navegador pisaba esa
+  // inscripción sin que nadie la tocara a propósito ni la borrara a mano. Pasó de verdad:
+  // Nicolás Merchán/Camila Sangster se inscribieron por su cuenta (push de confirmación
+  // incluido) y una acción del admin sobre esa MISMA categoría (quitar a otra persona) los
+  // borró de encuentro -- "last write wins" sobre una copia vieja. Ahora se relee la categoría
+  // FRESCA de Supabase justo antes de aplicar `updater`, así el cambio siempre parte del estado
+  // real más reciente en vez de lo que el navegador recuerde de cuando cargó la página. Si el
+  // refetch falla por red (no porque la fila se haya borrado), cae de vuelta al estado local
+  // como último recurso -- mismo riesgo de antes, pero solo cuando de verdad no hay conexión.
+  const updateCategory = async (id, updater) => {
+    const { data: freshRow } = await supabase.from("categories").select("*").eq("id", id).single();
+    const current = freshRow ? mapCategoryRow(freshRow) : categories.find((c) => c.id === id);
+    if (!current) return { error: "Esta categoría ya no existe." };
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
     return persistCategoryWrite(id, {
@@ -3512,12 +3528,24 @@ export default function PickleballTournamentApp() {
     // persistCategoryWrite (upsert) por categoría, en vez de un solo upsert masivo, para que si
     // el internet se va a mitad de esto, cada categoría que no se alcance a guardar quede en la
     // cola de pendientes por su cuenta (v2.34.0) en vez de perderse toda la tanda junta.
-    clone.forEach((c) => persistCategoryWrite(c.id, {
-      tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
-      max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
-      draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
-      teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
-    }, true));
+    //
+    // v2.80.5 -- mismo incidente de fondo que updateCategory (ver su comentario): `clone` sale
+    // de `categories`, el estado LOCAL que puede estar desactualizado si alguien se inscribió
+    // en esta categoría DESPUÉS de que este navegador cargó la pantalla. runScheduler solo
+    // necesita persistir matches/groups (lo que de verdad calculó) -- escribir de vuelta
+    // `c.teams`/`c.waitlist` tal como estaban en ese clon viejo pisaría cualquier inscripción
+    // nueva que haya llegado mientras tanto. Por eso relee cada categoría FRESCA de Supabase
+    // justo antes de escribir y manda ESE teams/waitlist, no el del clon.
+    clone.forEach(async (c) => {
+      const { data: freshRow } = await supabase.from("categories").select("teams, waitlist").eq("id", c.id).single();
+      persistCategoryWrite(c.id, {
+        tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
+        max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
+        draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
+        teams: freshRow ? (freshRow.teams || []) : c.teams, waitlist: freshRow ? (freshRow.waitlist || []) : c.waitlist,
+        groups: c.groups, matches: c.matches,
+      }, true);
+    });
   };
 
   const stats = {
