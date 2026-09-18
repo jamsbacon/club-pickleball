@@ -1358,6 +1358,12 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     Object.keys(bucketRemaining).forEach((cid) => { bucketRemainingAtSlotStart[cid] = [...bucketRemaining[cid]]; });
     for (let c = 0; c < courts.length && queue.length > 0; c++) {
       if (preOccupied.has(blockKey(courts[c].id, slot.date, slot.timeMin))) continue;
+      // v2.81.5 -- hora de inicio propia por cancha (panel Planificar, `plan.courtStartTimes`,
+      // a pedido del club: por ejemplo, arrancar con 2 canchas a las 9am y sumar las otras 2 a
+      // las 10am). Una cancha sin hora propia configurada sigue usando `dailyStart` como
+      // siempre -- esto es 100% opcional, no cambia nada para quien no lo use.
+      const courtStart = plan?.courtStartTimes?.[courts[c].id];
+      if (courtStart && slot.timeMin < timeToMinutes(courtStart)) continue;
       let foundIdx = -1;
       for (let i = 0; i < queue.length; i++) {
         const m = queue[i];
@@ -1509,7 +1515,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.4";
+const APP_VERSION = "2.81.5";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -8065,6 +8071,11 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
   const [catIds, setCatIds] = useState([]); // orden de selección = orden para "Por categoría completa"
   const [roundKeys, setRoundKeys] = useState({}); // { [catId]: Set(roundKey) }
   const [courtIds, setCourtIds] = useState(() => tournamentCourts.map((c) => c.id));
+  // v2.81.5, a pedido del club: hora de inicio propia por cancha para esta corrida puntual --
+  // ej. arrancar con 2 canchas a las 9am y sumar las otras 2 a las 10am. Vacío/sin tocar =
+  // usa la hora general del torneo (tournament.dailyStart), como siempre.
+  const [courtStartTimes, setCourtStartTimes] = useState({});
+  const setCourtStart = (courtId, value) => setCourtStartTimes((prev) => ({ ...prev, [courtId]: value }));
   const [mode, setMode] = useState("mixed");
   const [reschedule, setReschedule] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -8099,8 +8110,8 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
   };
 
   const plan = useMemo(() => ({
-    mode, categoryOrder: catIds, categoryIds: catIds, roundKeys, courtIds, reschedule, lockAfterSchedule: true,
-  }), [mode, catIds, roundKeys, courtIds, reschedule]);
+    mode, categoryOrder: catIds, categoryIds: catIds, roundKeys, courtIds, reschedule, lockAfterSchedule: true, courtStartTimes,
+  }), [mode, catIds, roundKeys, courtIds, reschedule, courtStartTimes]);
 
   const scheduleCourts = courtIds.length ? tournamentCourts.filter((c) => courtIds.includes(c.id)) : tournamentCourts;
   const preview = useMemo(
@@ -8183,6 +8194,24 @@ function PlanificarPanel({ categories, tournamentCourts, selectedDay, tournament
             </button>
           ))}
         </div>
+        {/* v2.81.5, a pedido del club: hora de inicio propia por cancha para esta corrida --
+           ej. 2 canchas desde las 9am, las otras 2 se suman a las 10am. Solo se muestra el
+           input para canchas ya elegidas arriba; vacío = usa la hora general del torneo. */}
+        {courtIds.length > 0 && (
+          <div className="mt-2 space-y-1">
+            <p className="text-[11px]" style={{ color: "#9AA6BC" }}>Hora de inicio por cancha (opcional -- vacío usa {formatTimeAmPm(tournament.dailyStart)})</p>
+            {tournamentCourts.filter((c) => courtIds.includes(c.id)).map((c) => (
+              <div key={c.id} className="flex items-center gap-2">
+                <span className="text-[11px] w-16 shrink-0">{c.name}</span>
+                <input type="time" value={courtStartTimes[c.id] || ""} onChange={(e) => setCourtStart(c.id, e.target.value)}
+                  style={{ ...inputStyle, padding: "4px 8px", width: "auto" }} className="text-xs" />
+                {courtStartTimes[c.id] && (
+                  <button type="button" onClick={() => setCourtStart(c.id, "")} className="text-[11px] underline" style={{ color: "#9AA6BC" }}>quitar</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {catIds.length > 1 && (
