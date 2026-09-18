@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.79.1";
+const APP_VERSION = "2.80.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2570,6 +2570,63 @@ export default function PickleballTournamentApp() {
     return {};
   };
 
+  // "Cambiar de categoría" (v2.80.0, a pedido del club: alguien quedó anotado en la categoría
+  // que no le corresponde -- nivel, género, lo que sea) -- solo para una inscripción SOLA
+  // ("esperando pareja", team.players.length === 1). Una dupla ya formada primero hay que
+  // desemparejarla (splitTeam) y mover a cada quien por separado -- mover a los dos juntos
+  // arrastraría a la pareja a una categoría que ella nunca eligió, sin preguntarle.
+  //
+  // A diferencia de addTeam, el precio/estado de pago que YA tenía se conserva TAL CUAL -- no
+  // se recalcula para la categoría nueva (el club lo pidió así: es la misma persona, el mismo
+  // dinero, solo cambió dónde compite). Por eso esto copia el objeto `team` completo en vez de
+  // llamar a addTeam (que generaría un paymentStatus nuevo desde cero).
+  //
+  // Orden deliberado -- agrega primero, borra después: si el segundo paso fallara (red, etc.),
+  // el peor caso es quedar registrada en LAS DOS categorías (visible, se corrige a mano) en vez
+  // de en NINGUNA (se perdería la inscripción sin que nadie lo note). Mismo blindaje de IDs
+  // duplicados que removePersonFromCategory.
+  const moveSoloRegistration = async (fromCatId, teamId, toCatId) => {
+    const fromCat = categories.find((c) => c.id === fromCatId);
+    if (!fromCat) return { error: "La categoría de origen ya no existe." };
+    const toCat = categories.find((c) => c.id === toCatId);
+    if (!toCat) return { error: "La categoría destino ya no existe." };
+    const inWaitlist = (fromCat.waitlist || []).some((t) => t.id === teamId);
+    const list = inWaitlist ? (fromCat.waitlist || []) : (fromCat.teams || []);
+    if (list.filter((t) => t.id === teamId).length > 1) {
+      return { error: `Hay más de un equipo con el mismo identificador en "${fromCat.name}" (dato corrupto) -- no se movió nada. Avísale al admin de la app para revisarlo a mano.` };
+    }
+    const team = list.find((t) => t.id === teamId);
+    if (!team) return { error: "Este cupo ya no existe -- puede que lo hayan borrado." };
+    if ((team.players || []).length !== 1) return { error: "Solo se puede cambiar de categoría a alguien que todavía está esperando pareja -- desempareja la dupla primero (Duplas → Desemparejar)." };
+    // Blindaje: que la categoría destino no la tenga ya inscrita -- sin esto, moverla ahí
+    // crearía una SEGUNDA fila para la misma persona en esa categoría en vez de reemplazar nada.
+    const player = team.players[0];
+    const personKey = player.userId || (player.name || "").trim().toLowerCase();
+    const alreadyThere = [...(toCat.teams || []), ...(toCat.waitlist || [])].some((t) =>
+      (t.players || []).some((p) => (p.userId || (p.name || "").trim().toLowerCase()) === personKey));
+    if (alreadyThere) return { error: `${player.name} ya está inscrita en "${toCat.name}" -- no se puede mover ahí de nuevo.` };
+
+    const addResult = await updateCategory(toCatId, (c) => {
+      if (categoryIsFull(c)) c.waitlist = [...c.waitlist, team];
+      else c.teams = [...c.teams, team];
+      return c;
+    });
+    if (addResult?.error) return { error: addResult.error };
+
+    const removeResult = await updateCategory(fromCatId, (c) => {
+      if (inWaitlist) { c.waitlist = c.waitlist.filter((t) => t.id !== teamId); return c; }
+      c.teams = c.teams.filter((t) => t.id !== teamId);
+      if (c.waitlist.length > 0) {
+        const [promoted, ...restWaitlist] = c.waitlist;
+        c.teams = [...c.teams, promoted];
+        c.waitlist = restWaitlist;
+      }
+      return c;
+    });
+    if (removeResult?.error) return { error: `Se agregó a "${toCat.name}" pero no se pudo quitar de "${fromCat.name}" (${removeResult.error}) -- revisa a mano, puede haber quedado inscrita en las dos.` };
+    return {};
+  };
+
   // Une dos inscripciones sueltas "esperando pareja" de la MISMA categoría en una sola dupla
   // (v2.66.0, pestaña Duplas) -- a pedido del club: hasta ahora la única forma de completar un
   // cupo era que la propia pareja abriera el link de invitación y pagara por su cuenta; si el
@@ -3590,7 +3647,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
-                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -6129,7 +6186,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus,
     generateDraw, closeGroupsAndSeedBracket, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
@@ -6212,7 +6269,7 @@ function TorneosSection(props) {
 
       {subTab === "inscritos" && role === "admin" && (
         <InscritosTab categories={categories} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
-          removePersonFromCategory={removePersonFromCategory} />
+          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} />
       )}
 
       {subTab === "duplas" && role === "admin" && (
@@ -6557,7 +6614,7 @@ function referenceHint(entry) {
   return [...entry.references].map((r) => `••${r.slice(-4)}`).join(", ");
 }
 
-function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory }) {
+function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus, removePersonFromCategory, moveSoloRegistration }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | verificado
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -6610,6 +6667,15 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
     setRemoving(false);
     setRemoveTarget(null);
   };
+
+  // v2.80.0: "Gestionar categorías" -- borrar de UNA categoría puntual, o cambiar de categoría
+  // (ver moveSoloRegistration), a diferencia del trash de arriba que borra de TODO el torneo.
+  // Guarda solo la `key` (no el objeto `participants[i]` completo) para que el modal siempre
+  // muestre datos frescos -- `participants` se recalcula en cada render de este componente, así
+  // que buscar por key acá abajo refleja de una cualquier borrado/cambio que se haga DENTRO del
+  // propio modal, sin tener que cerrarlo y volver a abrirlo para ver la lista actualizada.
+  const [manageKey, setManageKey] = useState(null);
+  const manageEntry = manageKey ? participants.find((p) => p.key === manageKey) || null : null;
 
   const filtered = participants.filter((e) => {
     if (statusFilter === "pending" && e.verifyTargets.length === 0) return false;
@@ -6685,6 +6751,7 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
               <th className="py-2.5 px-3">Estatus</th>
               <th className="py-2.5 px-3"></th>
               <th className="py-2.5 px-3"></th>
+              <th className="py-2.5 px-3"></th>
             </tr>
           </thead>
           <tbody>
@@ -6720,6 +6787,9 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
                     )}
                   </td>
                   <td className="py-2.5 px-3">
+                    <button onClick={() => setManageKey(e.key)} title="Gestionar sus categorías (quitar de una puntual, o cambiarla)" className="text-gray-300 hover:text-blue-600"><Settings2 size={14} /></button>
+                  </td>
+                  <td className="py-2.5 px-3">
                     <button onClick={() => setRemoveTarget(e)} title="Eliminar de todo el torneo" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
                   </td>
                 </tr>
@@ -6745,7 +6815,111 @@ function InscritosTab({ categories, setTeamPaymentStatus, setPlayerPaymentStatus
           options={[{ label: removing ? "Eliminando…" : "Eliminar", variant: "danger", onClick: confirmRemove }]}
           onCancel={() => { setRemoveTarget(null); setRemoveError(""); }} />
       )}
+
+      {manageEntry && (
+        <ManageCategoriesModal entry={manageEntry} categories={categories}
+          removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration}
+          onClose={() => setManageKey(null)} />
+      )}
     </div>
+  );
+}
+
+// "Gestionar categorías" (v2.80.0) -- acciones más finas que el trash de arriba (que borra a la
+// persona de TODO el torneo de una): quitarla de UNA categoría puntual, o cambiarla de
+// categoría si todavía está esperando pareja (moveSoloRegistration ya rechaza el intento si la
+// dupla ya está completa -- el mensaje de error de la propia función se muestra tal cual). Cada
+// fila de `entry.removalTargets` es una categoría/equipo distinto; los dos sub-formularios
+// (mover / quitar) son mutuamente excluyentes y viven expandidos DEBAJO de su propia fila, no en
+// un modal aparte, para no apilar confirmaciones una encima de otra.
+function ManageCategoriesModal({ entry, categories, removePersonFromCategory, moveSoloRegistration, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmIdx, setConfirmIdx] = useState(null);
+  const [moveIdx, setMoveIdx] = useState(null);
+  const [moveToCatId, setMoveToCatId] = useState("");
+
+  const teamFor = (t) => {
+    const cat = categories.find((c) => c.id === t.catId);
+    if (!cat) return null;
+    return [...(cat.teams || []), ...(cat.waitlist || [])].find((team) => team.id === t.teamId) || null;
+  };
+  const isSolo = (t) => (teamFor(t)?.players?.length || 0) === 1;
+  const destOptions = (t) => {
+    const originCat = categories.find((c) => c.id === t.catId);
+    // No se ofrece una categoría donde ya está inscrita -- moveSoloRegistration la rechaza
+    // igual, esto evita que el admin la elija para nada y se tope con ese error después.
+    return categories.filter((c) => c.tournamentId === originCat?.tournamentId && c.id !== t.catId && !entry.categories.includes(c.name));
+  };
+
+  const doRemove = async (t) => {
+    setBusy(true); setError("");
+    const result = await removePersonFromCategory(t.catId, t.teamId, t.playerIdx, t.inWaitlist);
+    setBusy(false);
+    if (result?.error) { setError(result.error); return; }
+    setConfirmIdx(null);
+  };
+  const doMove = async (t) => {
+    if (!moveToCatId) return;
+    setBusy(true); setError("");
+    const result = await moveSoloRegistration(t.catId, t.teamId, moveToCatId);
+    setBusy(false);
+    if (result?.error) { setError(result.error); return; }
+    setMoveIdx(null); setMoveToCatId("");
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={540}>
+      <div className="p-5">
+        <p className="font-bold text-sm" style={{ color: COLORS.courtDark }}>Categorías de {entry.name}</p>
+        <p className="text-xs mt-1 mb-4" style={{ color: "#6B7688" }}>Quítala de una categoría puntual, o cámbiala de categoría si todavía está esperando pareja.</p>
+        {error && <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>{error}</p>}
+        <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+          {entry.removalTargets.map((t, idx) => (
+            <div key={`${t.catId}_${t.teamId}_${t.playerIdx}`} className="rounded-lg p-3" style={{ background: "#F5F6F9" }}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-sm font-semibold">{t.catName}{t.inWaitlist ? " (lista de espera)" : ""}</span>
+                <div className="flex items-center gap-3 shrink-0">
+                  {isSolo(t) && (
+                    <button onClick={() => { setMoveIdx(moveIdx === idx ? null : idx); setConfirmIdx(null); setError(""); }} disabled={busy}
+                      className="text-xs font-semibold underline" style={{ color: COLORS.court }}>
+                      Cambiar de categoría
+                    </button>
+                  )}
+                  <button onClick={() => { setConfirmIdx(confirmIdx === idx ? null : idx); setMoveIdx(null); setError(""); }} disabled={busy}
+                    className="text-xs font-semibold underline" style={{ color: COLORS.clay }}>
+                    Quitar de esta categoría
+                  </button>
+                </div>
+              </div>
+              {moveIdx === idx && (
+                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                  <select value={moveToCatId} onChange={(ev) => setMoveToCatId(ev.target.value)} style={{ ...inputStyle, width: "auto" }} className="text-xs">
+                    <option value="">Elige la categoría correcta…</option>
+                    {destOptions(t).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <button onClick={() => doMove(t)} disabled={busy || !moveToCatId}
+                    style={{ background: COLORS.court, color: "#fff", opacity: (busy || !moveToCatId) ? 0.5 : 1 }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                    {busy ? "Moviendo…" : "Confirmar"}
+                  </button>
+                </div>
+              )}
+              {confirmIdx === idx && (
+                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                  <span className="text-xs" style={{ color: "#6B7688" }}>¿Seguro que quieres quitarla de "{t.catName}"?</span>
+                  <button onClick={() => doRemove(t)} disabled={busy} style={{ background: COLORS.clay, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                    {busy ? "Quitando…" : "Sí, quitar"}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+          {entry.removalTargets.length === 0 && <p className="text-xs text-gray-400 italic">Ya no está en ninguna categoría de este torneo.</p>}
+        </div>
+        <button onClick={onClose} className="w-full mt-4 py-2 rounded-xl font-semibold text-sm" style={{ color: "#6B7688" }}>Cerrar</button>
+      </div>
+    </Modal>
   );
 }
 
