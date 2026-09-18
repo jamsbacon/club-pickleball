@@ -1438,7 +1438,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.80.3";
+const APP_VERSION = "2.80.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6915,25 +6915,40 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
     const player = team.players?.[t.playerIdx];
     const ownPayment = t.playerIdx > 0 && player?.paymentStatus !== undefined;
     const src = ownPayment ? player : team;
+    const priceUsd = Number(src.priceUsd) || 0;
+    // v2.80.4 -- si ya se guardó un pago parcial antes (recordPartialPayment), `paidUsd` es lo
+    // que DE VERDAD entró; si nunca se tocó este registro, no hay forma de saber si el precio
+    // completo llegó a pagarse de verdad -- se muestra el precio como referencia, pero ver el
+    // aviso en el formulario (v2.80.4) para no repetir el error de asumirlo sin más.
     return {
       ownPayment,
       paymentStatus: src.paymentStatus,
-      priceUsd: Number(src.priceUsd) || 0,
+      priceUsd,
+      paidUsd: src.paidUsd != null ? Number(src.paidUsd) : priceUsd,
+      paidBs: src.paidBs != null ? Number(src.paidBs) : null,
       paymentMethod: src.paymentMethod,
       reference: src.reference || "",
+      hasExplicitPaid: src.paidUsd != null,
     };
   };
-  // v2.80.3 -- "Verificar este pago" ahora deja editar el MONTO antes de guardar (no siempre es
-  // el precio completo, ver recordPartialPayment/caso Flor Monttalti: pagó $15 de una categoría
-  // de $20). Precarga el precio completo como si fuera pago total -- el caso más común -- pero
-  // el admin lo puede bajar si el monto real fue menor.
+  // v2.80.3 -- "Verificar este pago" deja editar el MONTO antes de guardar (no siempre es el
+  // precio completo, ver recordPartialPayment/caso Flor Monttalti: pagó $15 de una categoría de
+  // $20). v2.80.4 -- ya NO se esconde una vez "confirmada": el botón grande "Verificar" de la
+  // tabla de Inscritos (confirmVerify, fuera de este modal) sigue existiendo y confirma el
+  // precio COMPLETO sin preguntar el monto -- si alguien lo usa por error en vez de este
+  // formulario (pasó de verdad con Flor: quedó "confirmada" $20 en efectivo sin que ella hubiera
+  // pagado eso), acá tiene que poder CORREGIRLO, no solo registrar un pago nuevo. Por eso el
+  // botón pasa a llamarse "Editar pago" cuando ya hay algo guardado, precarga lo que haya (el
+  // monto ya pagado si existe, si no el precio completo tal como venía) y deja guardar de nuevo
+  // -- recordPartialPayment sobreescribe el estatus según el monto que se guarde ahora, así que
+  // corrige un "confirmada" equivocado igual que registraría uno nuevo.
   const openVerify = (t, idx) => {
     const pay = paymentFor(t);
     setConfirmIdx(null); setMoveIdx(null); setError("");
     if (verifyIdx === idx) { setVerifyIdx(null); return; }
     setVerifyIdx(idx);
-    setPayAmount(pay ? String(pay.priceUsd) : "");
-    setPayBs("");
+    setPayAmount(pay ? String(pay.paidUsd) : "");
+    setPayBs(pay && pay.paidBs != null ? String(pay.paidBs) : "");
     setPayMethod((pay && pay.paymentMethod) || "movil");
     setPayRef((pay && pay.reference) || "");
   };
@@ -6979,16 +6994,15 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
         <div className="space-y-2 max-h-[50vh] overflow-y-auto">
           {entry.removalTargets.map((t, idx) => {
             const pay = paymentFor(t);
-            const pending = pay && pay.paymentStatus !== "confirmada";
             return (
             <div key={`${t.catId}_${t.teamId}_${t.playerIdx}`} className="rounded-lg p-3" style={{ background: "#F5F6F9" }}>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-sm font-semibold">{t.catName}{t.inWaitlist ? " (lista de espera)" : ""}</span>
                 <div className="flex items-center gap-3 shrink-0">
-                  {pending && (
+                  {pay && (
                     <button onClick={() => openVerify(t, idx)} disabled={busy}
                       className="text-xs font-semibold underline" style={{ color: "#1B7A4C" }}>
-                      Verificar este pago
+                      {pay.paymentStatus === "confirmada" ? "Editar este pago" : "Verificar este pago"}
                     </button>
                   )}
                   {isSolo(t) && (
@@ -7005,7 +7019,9 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
               </div>
               {verifyIdx === idx && pay && (
                 <div className="mt-2.5 p-2.5 rounded-lg space-y-2" style={{ background: "#EAF5EE" }}>
-                  <p className="text-xs" style={{ color: "#1B7A4C" }}>Precio de esta categoría: {formatMoney(pay.priceUsd)}. Si pagó menos, ajusta el monto -- se queda "por verificar" hasta que llegue el resto; si cubre el precio completo, se marca verificado.</p>
+                  <p className="text-xs" style={{ color: "#1B7A4C" }}>
+                    Precio de esta categoría: {formatMoney(pay.priceUsd)}{pay.paymentStatus === "confirmada" ? " -- YA está marcada verificada; corrige el monto de abajo si no es el correcto." : ""}. Escribe el monto que DE VERDAD pagó (puede ser menos que el precio) -- si no cubre el precio completo, se queda "por verificar"; si lo cubre, queda verificada.
+                  </p>
                   <div className="flex items-center gap-2 flex-wrap">
                     <div>
                       <Label>Monto pagado (USD)</Label>
