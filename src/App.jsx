@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.83.0";
+const APP_VERSION = "2.83.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1697,6 +1697,7 @@ export default function PickleballTournamentApp() {
     } catch { return null; }
   });
   const publicActConsumedRef = useRef(false);
+  const couponConsumedRef = useRef(false);
 
   // Link "invitar a mi pareja" (v2.44.2) -- `?join=<catId>:<teamId>`, mismo criterio de parseo
   // que publicAct. A diferencia de publicAct, esto no navega a ningún tab -- se resuelve
@@ -2090,6 +2091,20 @@ export default function PickleballTournamentApp() {
     setTab(publicAct.kind === "torneo" ? "torneos" : "eventos");
     window.history.replaceState({}, "", window.location.pathname);
   }, [publicAct, currentUser]);
+
+  // v2.83.1 -- INCIDENTE REAL: quien escaneaba el QR de un cupón YA CON SESIÓN ABIERTA no veía
+  // pasar nada -- el checkout se abre solo desde un efecto DENTRO de MembresiasTab
+  // (`couponAutoOpenedRef`), pero ese componente ni siquiera se monta a menos que la pestaña
+  // activa ya sea "membresias". Sin este efecto, el link deja a la persona donde sea que haya
+  // cargado la app la última vez (Torneos, Usuarios, lo que fuera guardado en caché) y el cupón
+  // se queda esperando sin que nadie lo vea nunca. Mismo patrón que `publicAct` arriba: navega
+  // a la pestaña correcta UNA sola vez que hay sesión Y el cupón terminó de resolverse (sea
+  // válido o no -- si no es válido, MembresiasTab simplemente no lo ofrece).
+  useEffect(() => {
+    if (!couponCode || couponInfo === undefined || !currentUser || couponConsumedRef.current) return;
+    couponConsumedRef.current = true;
+    setTab("membresias");
+  }, [couponCode, couponInfo, currentUser]);
 
   useEffect(() => {
     fetchAllProfiles();
