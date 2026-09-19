@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.82.0";
+const APP_VERSION = "2.82.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1957,7 +1957,11 @@ export default function PickleballTournamentApp() {
     if (error) { console.error("fetch coupons:", error.message); return; }
     setCoupons(data.map(mapCouponRow));
   };
-  useEffect(() => { if (currentUser?.role === "admin") fetchCoupons(); }, [currentUser?.role]);
+  // v2.82.1 -- este efecto se movió más abajo (ver `currentUser` cerca de la línea 2060):
+  // usarlo acá arriba, en el dependency array, lo leía ANTES de que `currentUser` quedara
+  // declarado más abajo en este mismo componente -- un ReferenceError de TDZ real
+  // ("Cannot access 'currentUser' before initialization") que tumbaba la app ENTERA en cada
+  // carga, para cualquier usuario, no solo admin. Ver el useEffect real más abajo.
 
   // Código corto, legible, fácil de teclear a mano si el QR no escanea bien -- 6 caracteres en
   // mayúsculas sin 0/O/1/I (se confunden fácil a simple vista). No hay unicidad garantizada acá
@@ -2058,6 +2062,11 @@ export default function PickleballTournamentApp() {
     return Object.values(byId);
   }, [directory, profiles]);
   const currentUser = users.find((u) => u.id === currentUserId) || null;
+
+  // v2.82.1 -- carga la lista de cupones solo para el admin (ver bloque "Cupones de descuento"
+  // más arriba); movido a ESTA línea, después de declarar `currentUser`, para arreglar el
+  // ReferenceError de TDZ descrito ahí.
+  useEffect(() => { if (currentUser?.role === "admin") fetchCoupons(); }, [currentUser?.role]);
 
   // Traduce el link compartido (`publicAct`) a navegación real UNA sola vez que hay sesión --
   // ya sea porque el visitante se acaba de loguear/registrar desde PublicActivityView, o
