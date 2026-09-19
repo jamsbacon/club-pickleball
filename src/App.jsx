@@ -1519,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.85.1";
+const APP_VERSION = "2.85.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -9254,7 +9254,7 @@ function CalendarioTab({ categories, courts, runScheduler, reflowSchedule, sched
             </Card>
           )}
 
-          <div className="grid lg:grid-cols-[1fr_320px] gap-5 items-start">
+          <div className="grid lg:grid-cols-[1fr_320px] gap-5">
             <Card>
               <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                 <SectionTitle sub="Una columna por cancha -- compara horarios uno al lado del otro para detectar choques.">Cancha por cancha — {formatDateHuman(day)}</SectionTitle>
@@ -9391,7 +9391,15 @@ function CalendarioTab({ categories, courts, runScheduler, reflowSchedule, sched
             </Card>
 
             {isAdmin && (
-              <div>
+              // v2.85.2, a pedido del club: "Cancha por cancha" puede llegar a ser mucho más
+              // alto que este panel (varias canchas x muchas franjas de horario), así que sin
+              // sticky el panel se perdía de vista al hacer scroll para llegar a la casilla
+              // donde soltar un partido arrastrado desde aquí. `lg:sticky` porque en mobile el
+              // layout ya es una sola columna apilada (sticky ahí no tendría sentido -- el
+              // panel simplemente empuja el tablero hacia abajo). El `overflow-y-auto` propio
+              // es para que, si el panel es más alto que el espacio visible bajo el TopBar fijo,
+              // se desplace internamente en vez de salirse de la pantalla.
+              <div className="lg:sticky lg:top-24 lg:max-h-[calc(100vh-6.5rem)] lg:overflow-y-auto lg:pb-2">
                 <div className="flex gap-1.5 mb-2">
                   <button type="button" onClick={() => setRightPanelTab("planificar")}
                     className="flex-1 px-3 py-2 rounded-xl text-sm font-bold"
