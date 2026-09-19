@@ -1529,7 +1529,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.84.0";
+const APP_VERSION = "2.84.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -10128,6 +10128,32 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // "En cancha ahora" -- ver buildMatchIndex.
   const matchIndex = useMemo(() => buildMatchIndex(categories, courts, day), [categories, courts, day]);
 
+  // v2.84.1, a pedido del club: "¿vamos con retraso o vamos bien?" al lado de "En cancha ahora"
+  // -- compara la hora PROGRAMADA de cada partido activo contra la hora real ahora mismo.
+  // `now` se refresca solo cada 30s (no en cada tecla/render) para que el badge se mantenga al
+  // día sin recargar la página, sin recalcular nada más pesado que esto.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(id);
+  }, []);
+  const matchDelayMinutes = (m) => {
+    if (!m?.day || !m?.time) return null;
+    const scheduled = new Date(`${m.day}T${m.time}:00`).getTime();
+    if (Number.isNaN(scheduled)) return null;
+    return Math.round((now - scheduled) / 60000);
+  };
+  const worstDelayMin = useMemo(() => {
+    const delays = nextCalls.map((nc) => (nc.current ? matchDelayMinutes(nc.current) : null)).filter((d) => d !== null);
+    return delays.length ? Math.max(...delays) : null;
+  }, [nextCalls, now]);
+  const formatDelay = (min) => {
+    const abs = Math.abs(min);
+    if (abs < 60) return `${abs} min`;
+    const h = Math.floor(abs / 60), m = abs % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
+  };
+
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
   }
@@ -10184,7 +10210,20 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   };
   const nextCallsPanel = day && (
     <Card>
-      <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
+        {worstDelayMin !== null && (
+          worstDelayMin > 15 ? (
+            <span className="text-xs font-extrabold px-3 py-1.5 rounded-full shrink-0" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
+              Vamos con retraso de {formatDelay(worstDelayMin)}
+            </span>
+          ) : (
+            <span className="text-xs font-extrabold px-3 py-1.5 rounded-full shrink-0" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+              Vamos bien
+            </span>
+          )
+        )}
+      </div>
       <div className="space-y-3 mt-2">
         {nextCalls.map(({ court, current, next, borrowed }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
@@ -10199,7 +10238,8 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                   <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
                     {matchIndex.get(current.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(current.id)}</span>}
                     <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[current.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[current.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(current.__cat)}</span>
-                    <span className="mono text-xs text-gray-400">{formatTimeAmPm(current.time)} · {courtById[current.courtId]?.name}</span>
+                    <span className="mono text-sm font-extrabold" style={{ color: COLORS.clay }}>{formatTimeAmPm(current.time)}</span>
+                    <span className="mono text-sm text-gray-500">· {courtById[current.courtId]?.name}</span>
                     <span>{teamLabelOf(current, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(current, "B")}</span>
                   </div>
                   {isAdmin && (
@@ -10548,7 +10588,12 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
               pueda ubicar acá el partido correcto sin tener que leer nombres. */}
           {matchNumber != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchNumber}</span>}
           {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide align-middle" style={{ background: cc.bg, color: cc.text }}>{catName}</span>}
-          {m.day && <span className="mono text-xs text-gray-400">{formatTimeAmPm(m.time)} · {courtById[m.courtId]?.name}</span>}
+          {m.day && (
+            <>
+              <span className="mono text-sm font-extrabold" style={{ color: COLORS.clay }}>{formatTimeAmPm(m.time)}</span>
+              <span className="mono text-sm text-gray-500">· {courtById[m.courtId]?.name}</span>
+            </>
+          )}
           <span>
             <span className={m.winnerId === m.teamAId ? "font-bold" : ""}>{labelA}</span>
             <span className="text-gray-400 mx-1.5">vs</span>
