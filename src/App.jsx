@@ -1519,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.85.0";
+const APP_VERSION = "2.85.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2662,7 +2662,7 @@ export default function PickleballTournamentApp() {
     const { data: row, error } = await supabase.from("categories").insert({
       tournament_id: tournament.id, name: makeCategoryName(modality, gender, level),
       modality, gender, level, max_teams: maxTeams ? Number(maxTeams) : null, min_teams: minTeams ? Number(minTeams) : null,
-      seed_mode: "ranking", best_of: 3, bracket_size: 4,
+      seed_mode: "ranking", best_of: 1, bracket_size: 4,
       teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
     }).select().single();
     if (error) { console.error("addCategory:", error.message); return; }
@@ -3128,7 +3128,12 @@ export default function PickleballTournamentApp() {
   const generateDraw = (catId, opts) => {
     updateCategory(catId, (c) => {
       c.seedMode = opts.seedMode;
-      c.bestOf = opts.bestOf;
+      // v2.85.0: bestOf/pointsTarget/scoringType ya no se tocan aquí -- viven enteramente en
+      // "Formato de puntuación" (ScoringFormatCard/updateCategory) desde que ese feature existe.
+      // Antes esta línea pisaba c.bestOf con lo que fuera que el selector de "Configurar draw"
+      // tuviera seleccionado en ese momento CADA VEZ que se regeneraba el draw -- si el admin ya
+      // había fijado el formato de puntuación real en la otra tarjeta, un "Regenerar draw" para
+      // corregir algo del cuadro (nada que ver con puntuación) se lo borraba sin avisar.
       let matches = [];
       let groups = [];
       if (c.format === "eliminatoria") {
@@ -8181,7 +8186,6 @@ function FormatAdvisor({ cat, categories, courts, dates, tournament, matchDurati
 
 function DrawSetup({ cat, generateDraw, onChangeFormat }) {
   const [seedMode, setSeedMode] = useState("ranking");
-  const [bestOf, setBestOf] = useState(3);
   const [bracketSize, setBracketSize] = useState(4);
   const [numGroups, setNumGroups] = useState(2);
   // v2.81.6, a pedido del club: una vez que el draw ya está armado, esta tarjeta de
@@ -8237,15 +8241,6 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
             </button>
           </div>
         </div>
-        <div>
-          <Label>Sets por partido (mejor de)</Label>
-          <select style={inputStyle} value={bestOf} onChange={(e) => setBestOf(Number(e.target.value))}>
-            <option value={1}>1 set</option>
-            <option value={3}>3 sets</option>
-            <option value={5}>5 sets</option>
-          </select>
-        </div>
-
         {cat.format === "grupos_eliminatoria" && (
           <>
             <div>
@@ -8297,7 +8292,7 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
 
       <button
         disabled={!canGenerate}
-        onClick={() => { generateDraw(cat.id, { seedMode, bestOf, bracketSize: nextPow2(Number(bracketSize)), numGroups }); setExpanded(false); }}
+        onClick={() => { generateDraw(cat.id, { seedMode, bracketSize: nextPow2(Number(bracketSize)), numGroups }); setExpanded(false); }}
         style={{ background: canGenerate ? COLORS.clay : "#E5E5E5", color: canGenerate ? "#fff" : "#999" }}
         className="mt-5 px-5 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
         <Swords size={16} /> {cat.drawGenerated ? "Regenerar draw" : "Generar draw"}
