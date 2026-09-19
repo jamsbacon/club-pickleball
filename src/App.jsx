@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.83.3";
+const APP_VERSION = "2.83.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4040,7 +4040,8 @@ export default function PickleballTournamentApp() {
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} subscriptions={subscriptions}
-              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid} />
+              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid}
+              couponInfo={couponInfo} redeemCoupon={redeemCoupon} />
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
@@ -5542,7 +5543,7 @@ const CLUB_SUB_ITEMS = [
 
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
   membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions,
-  coupons, createCoupon, removeCoupon, couponIsValid }) {
+  coupons, createCoupon, removeCoupon, couponIsValid, couponInfo, redeemCoupon }) {
   const [subTab, setSubTab] = useState(() => {
     const cached = loadCache("clubSubTab", null);
     return cached && CLUB_SUB_ITEMS.some((it) => it.id === cached) ? cached : CLUB_SUB_ITEMS[0].id;
@@ -5713,7 +5714,8 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
         <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
           addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
           subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin"
-          coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid} />
+          coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid}
+          couponInfo={couponInfo} redeemCoupon={redeemCoupon} />
       )}
     </div>
   );
