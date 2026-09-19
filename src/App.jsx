@@ -1519,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.85.2";
+const APP_VERSION = "2.85.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2478,7 +2478,21 @@ export default function PickleballTournamentApp() {
     } else {
       query = supabase.from("categories").update(fields).eq("id", id).select("id");
     }
-    const { data, error } = await query;
+    // v2.85.3 -- ver comentario en updateCategory (más abajo) sobre por qué esto necesita un
+    // tope de tiempo: un wifi "conectado" pero sin salida real a internet (típico en la cancha)
+    // puede tardar decenas de segundos en fallar por su cuenta. Mientras tanto no aparecía el
+    // aviso de "cambios sin sincronizar" -- la señal que le confirma al admin que su guardado
+    // offline SÍ quedó a salvo en este teléfono y se subirá solo.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    let data, error;
+    try {
+      ({ data, error } = await query.abortSignal(controller.signal));
+    } catch (e) {
+      error = e;
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const conflict = !error && expectedRev != null && !upsert && (!data || data.length === 0);
     const next = { ...pendingCategoryWritesRef.current };
     if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
@@ -2542,7 +2556,28 @@ export default function PickleballTournamentApp() {
   // reintenta -- hasta 5 veces, lo cual cubre con margen incluso una ráfaga de inscripciones
   // simultáneas la noche antes de un torneo.
   const updateCategory = async (id, updater, attempt = 0) => {
-    const { data: freshRow } = await supabase.from("categories").select("*").eq("id", id).single();
+    // v2.85.3 -- INCIDENTE REAL: esta relectura no tenía tope de tiempo. Con wifi "conectado"
+    // pero sin salida real a internet (la cancha del club, por ejemplo), `fetch()` puede tardar
+    // decenas de segundos en darse cuenta de que no hay respuesta -- y mientras tanto este
+    // `await` bloqueaba TODO lo de abajo, incluido el `setCategories` optimista que es lo que
+    // de verdad hace posible cargar un resultado sin señal (ver "Aviso de resiliencia sin
+    // internet" en TorneosSection). El admin cargaba un marcador sin internet en la cancha y
+    // "no pasaba al siguiente partido" -- porque, en efecto, todavía no había pasado nada; seguía
+    // colgado esperando esta relectura. Con un tope de 4s, si no llega a tiempo se sigue de una
+    // vez con el estado local (mismo camino que ya existía para cuando el fetch fallaba del
+    // todo), y el guardado optimista + la cola de reintento (persistCategoryWrite) hacen su
+    // trabajo igual que siempre.
+    let freshRow = null;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    try {
+      const { data } = await supabase.from("categories").select("*").eq("id", id).single().abortSignal(controller.signal);
+      freshRow = data;
+    } catch (e) {
+      // sin señal o se agotó el tiempo -- sigue con el estado local más abajo
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const current = freshRow ? mapCategoryRow(freshRow) : categories.find((c) => c.id === id);
     if (!current) return { error: "Esta categoría ya no existe." };
     const updated = updater({ ...current });
