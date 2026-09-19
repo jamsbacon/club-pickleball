@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.82.2";
+const APP_VERSION = "2.82.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -6337,7 +6337,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                         {plan?.name || "Sin membresía"}{isExpired ? " (vencida)" : ""}
                       </span>
                     </td>
-                    <td className="py-2 pr-3 text-gray-500">{formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10))}</td>
+                    <td className="py-2 pr-3 text-gray-500">{u.createdAt ? formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10)) : "—"}</td>
                     <td className="py-2 pr-3">
                       {/* Nunca sobre uno mismo; sobre otro admin hay que quitarle el rol primero
                          (con el botón de la columna Rol) -- mismo bloqueo que ya aplica
@@ -11293,7 +11293,7 @@ function AttendeesPanel({ occurrences, users, onRemove, onSetAttendance, onSetPa
                     <span className="min-w-0">
                       <span className="font-semibold block truncate">{r.userName}</span>
                       <span className="text-xs text-gray-500 block truncate">
-                        {contact} · {r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {formatDateHuman(new Date(r.createdAt).toISOString().slice(0, 10))}
+                        {contact} · {r.paymentMethod === "movil" ? "Pago Móvil" : "Efectivo"} · {r.createdAt ? formatDateHuman(new Date(r.createdAt).toISOString().slice(0, 10)) : "—"}
                         {r.paymentMethod === "movil" && r.reference && ` · ref. ${r.reference}`}
                         {r.paymentMethod === "movil" && (r.proofName ? " · comprobante" : " · sin comprobante")}
                       </span>
@@ -12957,7 +12957,7 @@ function ProfileTab({ currentUser, membershipPlans, subscriptions, courts, updat
           </div>
           <div className="min-w-0">
             <p className="font-bold truncate" style={{ color: COLORS.courtDark }}>{currentUser.name}</p>
-            <p className="text-xs" style={{ color: "#6B7688" }}>{currentUser.role === "admin" ? "Administrador" : "Cliente"} · miembro desde {formatDateHuman(new Date(currentUser.createdAt).toISOString().slice(0, 10))}</p>
+            <p className="text-xs" style={{ color: "#6B7688" }}>{currentUser.role === "admin" ? "Administrador" : "Cliente"}{currentUser.createdAt ? ` · miembro desde ${formatDateHuman(new Date(currentUser.createdAt).toISOString().slice(0, 10))}` : ""}</p>
           </div>
         </div>
 
