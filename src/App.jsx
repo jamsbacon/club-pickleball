@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.83.2";
+const APP_VERSION = "2.83.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12454,14 +12454,21 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
   // válido solo si llegó por link/QR, apunta a un plan real, y todavía no se canjeó. Apenas hay
   // uno válido, se abre solo el checkout de SU plan (una sola vez -- `couponAutoOpenedRef` evita
   // reabrirlo si el cliente lo cierra a mano) con el % ya aplicado.
+  //
+  // v2.83.3 -- INCIDENTE REAL: esto tenía `&& !isAdmin`, así que para la propia cuenta admin
+  // (la vista de "Mi Club -> Planes" SIEMPRE renderiza este componente con role="admin" fijo,
+  // ver el llamado en ClubTab) el link de cupón te llevaba hasta acá (arreglado en v2.83.1/.2)
+  // pero nunca abría el checkout -- llegabas a Planes y no pasaba nada más, el 50% nunca se veía
+  // marcado. Si alguien siguió un link de cupón real, es porque quiere canjearlo, sea cliente o
+  // admin -- no hay razón para tratarlos distinto acá.
   const activeCoupon = couponInfo && couponInfo.plan && couponIsValid(couponInfo.coupon) ? couponInfo : null;
   const couponAutoOpenedRef = useRef(false);
   useEffect(() => {
-    if (activeCoupon && !isAdmin && !couponAutoOpenedRef.current) {
+    if (activeCoupon && !couponAutoOpenedRef.current) {
       couponAutoOpenedRef.current = true;
       setCheckoutPlanId(activeCoupon.plan.id);
     }
-  }, [activeCoupon, isAdmin]);
+  }, [activeCoupon]);
   const [couponRedeemError, setCouponRedeemError] = useState("");
 
   // Ascendente por precio (v2.54.0, antes descendente) -- el plan más barato primero, el más
