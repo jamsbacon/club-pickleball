@@ -736,33 +736,23 @@ function membershipRisk(users, membershipPlans, todayIso, withinDays = 7) {
    qualifiers each group must produce so the elimination bracket ends up
    with exactly the size the organizer requested.
    ========================================================================= */
-function computeGroupDistribution(numTeams, desiredBracketSize) {
+// v2.85.0, a pedido del club: antes la cantidad de grupos en "Grupos + Eliminatoria" la elegía
+// sola la app (buscando ~4 equipos por grupo, ver el viejo computeGroupDistribution en git log
+// si hace falta). Ahora el admin la fija a mano -- igual que ya podía en "Fase de grupos" -- y
+// esta función solo reparte equipos y cupos de eliminatoria lo más parejo posible entre esa
+// cantidad de grupos. Puede devolver una repartición inválida (un grupo con menos de 2 equipos,
+// o con más cupos de eliminatoria que equipos) si el admin pide una combinación imposible --
+// DrawSetup valida el resultado y no deja generar el draw hasta que sea válida.
+function computeManualGroupDistribution(numTeams, numGroups, desiredBracketSize) {
+  const G = Math.max(1, numGroups);
   const Q = Math.min(desiredBracketSize, numTeams);
-  let best = null;
-  for (let G = 1; G <= Q; G++) {
-    const baseSize = Math.floor(numTeams / G);
-    const extraSize = numTeams % G;
-    if (baseSize < 2 && !(baseSize === 1 && extraSize > 0)) continue; // group too small
-    const baseQ = Math.floor(Q / G);
-    const extraQ = Q % G;
-    if (baseQ < 1) continue;
-    if (baseSize < baseQ) continue; // can't qualify more teams than are in the group
-    const avgSize = numTeams / G;
-    const sizeScore = Math.abs(avgSize - 4.2); // prefer ~4 teams/group
-    const groupCountScore = Math.abs(G - Q / Math.max(1, Math.round(Q / G || 1))) * 0.01;
-    const score = sizeScore + groupCountScore;
-    if (!best || score < best.score) {
-      best = { G, baseSize, extraSize, baseQ, extraQ, score };
-    }
-  }
-  if (!best) {
-    return [{ size: numTeams, qualifiers: Math.min(numTeams, Q) }];
-  }
+  const baseSize = Math.floor(numTeams / G), extraSize = numTeams % G;
+  const baseQ = Math.floor(Q / G), extraQ = Q % G;
   const groups = [];
-  for (let i = 0; i < best.G; i++) {
+  for (let i = 0; i < G; i++) {
     groups.push({
-      size: best.baseSize + (i < best.extraSize ? 1 : 0),
-      qualifiers: best.baseQ + (i < best.extraQ ? 1 : 0),
+      size: baseSize + (i < extraSize ? 1 : 0),
+      qualifiers: baseQ + (i < extraQ ? 1 : 0),
     });
   }
   return groups;
@@ -1529,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.84.1";
+const APP_VERSION = "2.85.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3167,7 +3157,7 @@ export default function PickleballTournamentApp() {
       } else if (c.format === "grupos_eliminatoria") {
         const bracketSize = nextPow2(Number(opts.bracketSize));
         c.bracketSize = bracketSize;
-        const meta = computeGroupDistribution(c.teams.length, bracketSize);
+        const meta = computeManualGroupDistribution(c.teams.length, Number(opts.numGroups) || 1, bracketSize);
         groups = distributeTeamsToGroups(c.teams, meta, opts.seedMode);
         groups.forEach((g) => {
           roundRobinPairs(g.teamIds).forEach((round) => {
@@ -8205,15 +8195,16 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
 
   const teamCount = cat.teams.length;
   const preview = cat.format === "grupos_eliminatoria" && teamCount >= 2
-    ? computeGroupDistribution(teamCount, nextPow2(Number(bracketSize)))
+    ? computeManualGroupDistribution(teamCount, Number(numGroups), nextPow2(Number(bracketSize)))
     : null;
+  const previewValid = !!preview && preview.every((g) => g.size >= 2 && g.qualifiers >= 1 && g.qualifiers <= g.size);
 
   const canGenerate =
     (cat.format === "eliminatoria" && teamCount >= 2) ||
     (cat.format === "doble_eliminacion" && teamCount >= 2) ||
     (cat.format === "liga" && teamCount >= 2) ||
     (cat.format === "grupos" && teamCount >= Number(numGroups) * 2) ||
-    (cat.format === "grupos_eliminatoria" && teamCount >= nextPow2(Number(bracketSize)));
+    (cat.format === "grupos_eliminatoria" && teamCount >= nextPow2(Number(bracketSize)) && previewValid);
 
   return (
     <Card>
@@ -8256,15 +8247,21 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
         </div>
 
         {cat.format === "grupos_eliminatoria" && (
-          <div className="md:col-span-2">
-            <Label>¿Con cuántos equipos quieres empezar la eliminatoria?</Label>
-            <select style={inputStyle} value={bracketSize} onChange={(e) => setBracketSize(e.target.value)}>
-              {[2, 4, 8, 16, 32].map((n) => <option key={n} value={n}>{n} equipos</option>)}
-            </select>
+          <>
+            <div>
+              <Label>Cantidad de grupos</Label>
+              <input type="number" min={1} style={inputStyle} value={numGroups} onChange={(e) => setNumGroups(e.target.value)} />
+            </div>
+            <div>
+              <Label>¿Con cuántos equipos quieres empezar la eliminatoria?</Label>
+              <select style={inputStyle} value={bracketSize} onChange={(e) => setBracketSize(e.target.value)}>
+                {[2, 4, 8, 16, 32].map((n) => <option key={n} value={n}>{n} equipos</option>)}
+              </select>
+            </div>
             {preview && (
-              <div className="mt-3 rounded-xl p-3 text-xs" style={{ background: "#EAF0F8" }}>
-                <p className="font-semibold mb-1" style={{ color: COLORS.courtDark }}>
-                  Con {teamCount} equipos inscritos, la app formará automáticamente:
+              <div className="md:col-span-2 rounded-xl p-3 text-xs" style={{ background: previewValid ? "#EAF0F8" : "#FCE9E4" }}>
+                <p className="font-semibold mb-1" style={{ color: previewValid ? COLORS.courtDark : "#B23A1B" }}>
+                  Con {teamCount} equipos inscritos en {numGroups} grupo(s), la app repartirá:
                 </p>
                 <div className="flex flex-wrap gap-2 mt-1.5">
                   {preview.map((g, i) => (
@@ -8273,10 +8270,14 @@ function DrawSetup({ cat, generateDraw, onChangeFormat }) {
                     </span>
                   ))}
                 </div>
-                <p className="text-gray-500 mt-2">Total clasificados a eliminatoria: {preview.reduce((s, g) => s + g.qualifiers, 0)} de {nextPow2(Number(bracketSize))} deseados.</p>
+                <p className="mt-2" style={{ color: previewValid ? "#6B7280" : "#B23A1B" }}>
+                  {previewValid
+                    ? `Total clasificados a eliminatoria: ${preview.reduce((s, g) => s + g.qualifiers, 0)} de ${nextPow2(Number(bracketSize))} deseados.`
+                    : "Esta combinación no funciona: algún grupo quedaría con menos de 2 equipos, o con más cupos de eliminatoria que equipos tiene. Ajusta la cantidad de grupos o el tamaño de la eliminatoria."}
+                </p>
               </div>
             )}
-          </div>
+          </>
         )}
 
         {cat.format === "grupos" && (
