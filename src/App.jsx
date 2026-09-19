@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import QRCode from "qrcode";
 import {
   Trophy, Users, MapPin, Calendar, ClipboardList, Plus, Trash2,
   ChevronRight, ChevronDown, ChevronUp, Shuffle, ArrowUpDown, CheckCircle2,
@@ -8,7 +9,8 @@ import {
   CalendarClock, PartyPopper, Award, Lock, Unlock,
   Image as ImageIcon, Smartphone, Banknote, Upload, Star, Building2,
   GraduationCap, Sparkles, Check, ArrowRight, LogOut, Shield, Mail, KeyRound, BarChart3, MapPinned, ChevronLeft, Repeat, Search, UserCircle,
-  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye, Download, AlertCircle
+  RefreshCw, TrendingUp, Wallet, ShieldAlert, Bell, BellOff, Megaphone, Share2, Eye, Download, AlertCircle,
+  Tag, QrCode, Copy
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import clubLogo from "./assets/pickle-hub-logo.png";
@@ -1515,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.81.9";
+const APP_VERSION = "2.82.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1717,6 +1719,29 @@ export default function PickleballTournamentApp() {
     if (joinParam) window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
+  // Link de cupón de descuento (v2.82.0) -- `?cupon=<code>`, mismo criterio de parseo que
+  // act/join de arriba. A diferencia de esos dos, el código no identifica nada que ya viva en
+  // el estado general (`coupons` solo se carga para el admin, ver fetchCoupons) -- se resuelve
+  // aparte, con su propio fetch por code, funcione o no haya sesión todavía. `couponInfo`:
+  // `undefined` mientras carga, `null` si el código no existe, `{coupon, plan}` si es válido
+  // (el propio `coupon.used` dice si ya se canjeó).
+  const [couponCode] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("cupon") || null; } catch { return null; }
+  });
+  const [couponInfo, setCouponInfo] = useState(undefined);
+  useEffect(() => {
+    if (!couponCode) { setCouponInfo(null); return; }
+    (async () => {
+      const { data: couponRow } = await supabase.from("coupons").select("*").eq("code", couponCode).maybeSingle();
+      if (!couponRow) { setCouponInfo(null); return; }
+      const { data: planRow } = await supabase.from("membership_plans").select("*").eq("id", couponRow.plan_id).maybeSingle();
+      setCouponInfo({ coupon: mapCouponRow(couponRow), plan: planRow ? mapPlanRow(planRow) : null });
+    })();
+  }, [couponCode]);
+  useEffect(() => {
+    if (couponCode) window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
   // ---- Club-wide schedule & courts (shared by Reservas, Eventos y Torneos) ----
   // `clubs`/`courts` en Supabase son la fuente real; estos mappers convierten las filas
   // (snake_case) a la misma forma camelCase que ya consumía el resto de la app, para no
@@ -1914,6 +1939,74 @@ export default function PickleballTournamentApp() {
     setSubscriptions(data.map(mapSubscriptionRow));
   };
   useEffect(() => { fetchSubscriptions(); }, []);
+
+  // ---- Cupones de descuento (v2.82.0, ver migración coupons) ----
+  // Cada cupón apunta a UN plan puntual con un % de descuento, de un solo uso -- se comparte
+  // como link/QR (`?cupon=<code>`, ver publicCoupon más abajo, mismo patrón que publicAct/join)
+  // que lleva directo al checkout de ese plan ya descontado. `coupons` (lista completa) es solo
+  // para la pantalla de administración (Membresías, admin) -- lectura pública en RLS, pero acá
+  // solo hace falta cargarla para quien la vaya a gestionar.
+  const mapCouponRow = (r) => ({
+    id: r.id, code: r.code, planId: r.plan_id, discountPct: Number(r.discount_pct),
+    used: !!r.used, usedBy: r.used_by, usedAt: r.used_at ? new Date(r.used_at).getTime() : null,
+    createdAt: new Date(r.created_at).getTime(),
+  });
+  const [coupons, setCoupons] = useState([]);
+  const fetchCoupons = async () => {
+    const { data, error } = await supabase.from("coupons").select("*").order("created_at", { ascending: false });
+    if (error) { console.error("fetch coupons:", error.message); return; }
+    setCoupons(data.map(mapCouponRow));
+  };
+  useEffect(() => { if (currentUser?.role === "admin") fetchCoupons(); }, [currentUser?.role]);
+
+  // Código corto, legible, fácil de teclear a mano si el QR no escanea bien -- 6 caracteres en
+  // mayúsculas sin 0/O/1/I (se confunden fácil a simple vista). No hay unicidad garantizada acá
+  // (la tabla sí tiene `unique` real) -- si por pura mala suerte choca con uno existente, el
+  // insert de createCoupon falla y create Coupon simplemente lo reintenta con otro código.
+  const genCouponCode = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let s = "";
+    for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return s;
+  };
+  const createCoupon = async (planId, discountPct, tries = 0) => {
+    if (tries > 5) return { error: "No se pudo generar un código único -- intenta de nuevo." };
+    const code = genCouponCode();
+    const { data, error } = await supabase.from("coupons").insert({ code, plan_id: planId, discount_pct: Number(discountPct) }).select().single();
+    if (error) {
+      if (error.code === "23505") return createCoupon(planId, discountPct, tries + 1); // choque de código único -- reintenta con otro
+      console.error("createCoupon:", error.message);
+      return { error: error.message };
+    }
+    const created = mapCouponRow(data);
+    setCoupons((prev) => [created, ...prev]);
+    return { data: created };
+  };
+  const removeCoupon = async (id) => {
+    setCoupons((prev) => prev.filter((c) => c.id !== id));
+    const { error } = await supabase.from("coupons").delete().eq("id", id);
+    if (error) console.error("removeCoupon:", error.message);
+  };
+  // Canjear (v2.82.0) -- marca el cupón usado a nombre de quien está logueado AHORA MISMO. La
+  // política RLS "authenticated redeem coupons" es la que de verdad protege esto (exige
+  // used=false antes y used=true + used_by=auth.uid() después) -- esto solo refleja el
+  // resultado en el estado local si el UPDATE real se aceptó.
+  const redeemCoupon = async (couponId) => {
+    if (!currentUser) return { error: "Necesitas iniciar sesión." };
+    const { data, error } = await supabase.from("coupons")
+      .update({ used: true, used_by: currentUser.id, used_at: new Date().toISOString() })
+      .eq("id", couponId).eq("used", false).select().single();
+    if (error || !data) return { error: "Este cupón ya no está disponible -- puede que alguien más lo haya usado justo antes." };
+    const updated = mapCouponRow(data);
+    setCoupons((prev) => prev.map((c) => (c.id === couponId ? updated : c)));
+    // v2.82.0 -- `couponInfo` (resuelto del link/QR con el que se llegó, ver couponCode más
+    // arriba) es un estado APARTE de `coupons` -- sin esto, tras canjearlo, el checkout de ESE
+    // mismo plan seguiría mostrando el cupón como disponible si el cliente lo reabre a mano en
+    // la misma sesión (el canje real igual se rechazaría bien, esto es solo para que la
+    // pantalla no siga ofreciendo un descuento que ya no aplica).
+    setCouponInfo((prev) => (prev && prev.coupon.id === couponId ? { ...prev, coupon: updated } : prev));
+    return { data: updated };
+  };
 
   // ---- Cuentas (login / registro) ----
   // Backend real: Supabase Auth guarda las credenciales; la tabla `profiles` (1:1 con
@@ -3803,6 +3896,16 @@ export default function PickleballTournamentApp() {
         </div>
       );
     }
+    // Mismo criterio para un link/QR de cupón de descuento (v2.82.0, ver couponCode/couponInfo
+    // más arriba) -- couponInfo se resuelve solo, no depende de activitiesLoaded.
+    if (couponCode) {
+      return (
+        <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
+          <GlobalStyles />
+          <PublicCouponView couponInfo={couponInfo} club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />
+        </div>
+      );
+    }
     return (
       <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
         <GlobalStyles />
@@ -3857,7 +3960,8 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "club" && role === "admin" && (
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-              subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} subscriptions={subscriptions} />
+              subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} subscriptions={subscriptions}
+              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} />
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
@@ -3938,7 +4042,9 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "membresias" && (
             <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
               addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-              subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role} />
+              subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role}
+              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon}
+              couponInfo={couponInfo} redeemCoupon={redeemCoupon} />
           )}
 
           {effectiveTab === "perfil" && (
@@ -4158,6 +4264,60 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
           <button onClick={() => setWantsAuth(true)} style={{ background: COLORS.court, color: "#fff" }}
             className="w-full py-3 rounded-xl font-bold text-sm">
             {!unavailable ? "Iniciar sesión para unirme" : "Iniciar sesión"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Mismo patrón que PublicJoinTeamView -- alguien sin sesión escaneó/abrió un link de cupón
+// (v2.82.0, `?cupon=<code>`, ver couponInfo en el componente principal). Solo previsualiza
+// (plan + % de descuento + precio ya calculado) y empuja a loguearse/registrarse -- el canje
+// real (redeemCoupon) pasa recién adentro de la app, una vez con sesión, para que quede
+// atribuido a una cuenta real (ver MembresiasTab/CouponCheckoutBanner).
+function PublicCouponView({ couponInfo, club, registerUser, loginUser, resetPasswordUser }) {
+  const [wantsAuth, setWantsAuth] = useState(false);
+  if (wantsAuth) {
+    return <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />;
+  }
+  const loading = couponInfo === undefined;
+  const valid = !!(couponInfo && couponInfo.plan && !couponInfo.coupon.used);
+  const discounted = valid ? couponInfo.plan.monthlyPrice * (1 - couponInfo.coupon.discountPct / 100) : null;
+
+  return (
+    <div className="w-full min-h-screen flex items-center justify-center p-4" style={{ background: COLORS.chalk }}>
+      <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+        <div className="flex items-center gap-2 mb-5">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background: COLORS.ball }}>
+            <Tag size={18} color="#fff" />
+          </div>
+          <span className="font-extrabold truncate" style={{ color: COLORS.courtDark }}>{club?.name || "Pickle Hub"}</span>
+        </div>
+
+        {loading ? (
+          <p className="text-sm py-6 text-center" style={{ color: "#6B7688" }}>Cargando cupón…</p>
+        ) : valid ? (
+          <>
+            <p className="disp text-xl mb-1" style={{ color: COLORS.courtDark }}>¡Tienes un cupón!</p>
+            <p className="text-sm mb-3" style={{ color: "#6B7688" }}>{couponInfo.coupon.discountPct}% de descuento en <b>{couponInfo.plan.name}</b>.</p>
+            <div className="flex items-baseline gap-2 mb-4">
+              <span className="disp text-2xl" style={{ color: COLORS.courtDark }}>{formatMoney(discounted)}</span>
+              <span className="text-sm line-through" style={{ color: "#9AA6BC" }}>{formatMoney(couponInfo.plan.monthlyPrice)}</span>
+              <span className="text-xs" style={{ color: "#6B7688" }}>/mes</span>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm mb-5" style={{ color: "#6B7688" }}>
+            {couponInfo?.coupon?.used ? "Este cupón ya fue usado -- solo sirve una vez." : "Este cupón ya no está disponible."}
+            {" "}Puedes iniciar sesión para ver todo lo que tiene el club ahora mismo.
+          </p>
+        )}
+
+        {!loading && (
+          <button onClick={() => setWantsAuth(true)} style={{ background: COLORS.court, color: "#fff" }}
+            className="w-full py-3 rounded-xl font-bold text-sm">
+            {valid ? "Iniciar sesión para canjearlo" : "Iniciar sesión"}
           </button>
         )}
       </div>
@@ -5300,7 +5460,8 @@ const CLUB_SUB_ITEMS = [
 ];
 
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
-  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions }) {
+  membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions,
+  coupons, createCoupon, removeCoupon }) {
   const [subTab, setSubTab] = useState(() => {
     const cached = loadCache("clubSubTab", null);
     return cached && CLUB_SUB_ITEMS.some((it) => it.id === cached) ? cached : CLUB_SUB_ITEMS[0].id;
@@ -5470,7 +5631,8 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
       {subTab === "planes" && (
         <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
           addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
-          subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin" />
+          subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin"
+          coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} />
       )}
     </div>
   );
@@ -12199,12 +12361,27 @@ function PlanCard({ plan, idx, rateLabels, basePlan, courts, blockLabel, state, 
   );
 }
 
-function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role }) {
+function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role,
+  coupons, createCoupon, removeCoupon, couponInfo, redeemCoupon }) {
   const [showForm, setShowForm] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [checkoutPlanId, setCheckoutPlanId] = useState(null);
   const isAdmin = role === "admin";
   const todayIso = new Date().toISOString().slice(0, 10);
+
+  // Cupón de descuento (v2.82.0, ver couponInfo/redeemCoupon en el componente principal) --
+  // válido solo si llegó por link/QR, apunta a un plan real, y todavía no se canjeó. Apenas hay
+  // uno válido, se abre solo el checkout de SU plan (una sola vez -- `couponAutoOpenedRef` evita
+  // reabrirlo si el cliente lo cierra a mano) con el % ya aplicado.
+  const activeCoupon = couponInfo && couponInfo.plan && !couponInfo.coupon.used ? couponInfo : null;
+  const couponAutoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (activeCoupon && !isAdmin && !couponAutoOpenedRef.current) {
+      couponAutoOpenedRef.current = true;
+      setCheckoutPlanId(activeCoupon.plan.id);
+    }
+  }, [activeCoupon, isAdmin]);
+  const [couponRedeemError, setCouponRedeemError] = useState("");
 
   // Ascendente por precio (v2.54.0, antes descendente) -- el plan más barato primero, el más
   // caro/premium al final: PRO ($50) antes que VIP ($100), como pidió el club. Sigue siendo
@@ -12286,6 +12463,8 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
           onSave={(p) => { updateMembershipPlan(editingPlan.id, p); setEditingPlanId(null); }}
           onCancel={() => setEditingPlanId(null)} />
       )}
+
+      {isAdmin && <CouponesCard membershipPlans={paidPlans} coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} />}
 
       <div className="rounded-[24px] overflow-hidden" style={{ background: COLORS.courtDark }}>
         <div className="px-5 md:px-7 pt-7 pb-5 flex items-start justify-between flex-wrap gap-3">
@@ -12404,14 +12583,149 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
          para encontrarla). Con Modal gana lo mismo que ganó todo lo demás: fondo oscuro,
          hoja anclada abajo en mobile, y el botón de atrás del teléfono la cierra en vez de
          sacar de la app. */}
-      {selectedPlan && (
-        <Modal onClose={() => setCheckoutPlanId(null)}>
-          <Card>
-            <CheckoutPanel title={`Suscripción a ${selectedPlan.name}`} baseUsd={selectedPlan.monthlyPrice} discountPct={0} club={club} defaultName={currentUser.name}
-              onConfirm={(checkout) => { subscribeToPlan(selectedPlan.id, checkout); setCheckoutPlanId(null); }} onCancel={() => setCheckoutPlanId(null)} confirmLabel="Confirmar suscripción" />
-          </Card>
-        </Modal>
+      {selectedPlan && (() => {
+        // El cupón solo aplica si es DE ESTE plan puntual -- si el cliente cerró el checkout
+        // que se abrió solo y eligió suscribirse a otro plan distinto, ese otro paga precio
+        // completo (el cupón sigue ahí, sin usar, por si vuelve a este plan).
+        const couponHere = activeCoupon && activeCoupon.plan.id === selectedPlan.id ? activeCoupon : null;
+        const confirmSubscription = async (checkout) => {
+          setCouponRedeemError("");
+          if (couponHere) {
+            const result = await redeemCoupon(couponHere.coupon.id);
+            if (result?.error) { setCouponRedeemError(result.error); return; }
+          }
+          subscribeToPlan(selectedPlan.id, checkout);
+          setCheckoutPlanId(null);
+        };
+        return (
+          <Modal onClose={() => setCheckoutPlanId(null)}>
+            <Card>
+              {couponHere && (
+                <div className="mb-4 px-3 py-2.5 rounded-xl flex items-center gap-2 text-xs font-bold" style={{ background: "#EAF5EE", color: "#1B7A4C" }}>
+                  <Tag size={14} className="shrink-0" /> Cupón {couponHere.coupon.code}: {couponHere.coupon.discountPct}% de descuento aplicado.
+                </div>
+              )}
+              {couponRedeemError && <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>{couponRedeemError}</p>}
+              <CheckoutPanel title={`Suscripción a ${selectedPlan.name}`} baseUsd={selectedPlan.monthlyPrice} discountPct={couponHere ? couponHere.coupon.discountPct : 0} club={club} defaultName={currentUser.name}
+                onConfirm={confirmSubscription} onCancel={() => setCheckoutPlanId(null)} confirmLabel="Confirmar suscripción" />
+            </Card>
+          </Modal>
+        );
+      })()}
+    </div>
+  );
+}
+
+// Panel de administración de cupones (v2.82.0, ver coupons/createCoupon/removeCoupon en el
+// componente principal) -- crear uno elige plan + %, genera un código único, y deja compartirlo
+// como link o como QR (CouponQR, justo abajo). Solo se ofrecen planes PAGOS ("Sin plan" no
+// tiene precio del que descontar nada). Un cupón ya usado no se puede borrar -- queda como
+// historial de quién lo canjeó (ver `usedBy`/`usedAt`), solo los que siguen disponibles.
+function CouponesCard({ membershipPlans, coupons, createCoupon, removeCoupon }) {
+  const [planId, setPlanId] = useState(membershipPlans[0]?.id || "");
+  const [pct, setPct] = useState(20);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const [qrFor, setQrFor] = useState(null);
+
+  const create = async () => {
+    if (!planId || !pct) return;
+    setCreating(true); setError("");
+    const result = await createCoupon(planId, pct);
+    setCreating(false);
+    if (result?.error) { setError(result.error); return; }
+    setQrFor(result.data.id);
+  };
+
+  const planName = (id) => membershipPlans.find((p) => p.id === id)?.name || "(plan borrado)";
+
+  return (
+    <Card>
+      <SectionTitle sub="Cada cupón da un % de descuento en UN plan puntual y sirve una sola vez -- compártelo como link o como código QR.">Cupones de descuento</SectionTitle>
+      {membershipPlans.length === 0 ? (
+        <p className="text-sm text-gray-400">Crea primero un plan pago para poder generar cupones.</p>
+      ) : (
+        <>
+          <div className="grid sm:grid-cols-[1fr_1fr_auto] gap-3 items-end mb-4">
+            <div>
+              <Label>Plan</Label>
+              <select style={inputStyle} value={planId} onChange={(e) => setPlanId(e.target.value)}>
+                {membershipPlans.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>% de descuento</Label>
+              <input type="number" min={1} max={100} style={inputStyle} value={pct} onChange={(e) => setPct(e.target.value)} />
+            </div>
+            <button onClick={create} disabled={creating || !planId} style={{ background: COLORS.court, color: "#fff", opacity: (creating || !planId) ? 0.6 : 1 }}
+              className="px-4 py-2.5 rounded-xl text-sm font-bold h-[42px] flex items-center gap-1.5">
+              <Plus size={15} /> {creating ? "Creando…" : "Crear cupón"}
+            </button>
+          </div>
+          {error && <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "#FCE9E4", color: "#B23A1B" }}>{error}</p>}
+
+          <div className="space-y-2">
+            {coupons.length === 0 && <p className="text-xs text-gray-400 italic">Ningún cupón creado todavía.</p>}
+            {coupons.map((c) => (
+              <div key={c.id} className="rounded-xl p-3" style={{ background: "#F5F6F9" }}>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="min-w-0">
+                    <p className="font-bold text-sm mono">{c.code}</p>
+                    <p className="text-xs" style={{ color: "#6B7688" }}>{c.discountPct}% en {planName(c.planId)}</p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold whitespace-nowrap" style={{ background: c.used ? "#DCEBD5" : "#FBF3E4", color: c.used ? COLORS.courtDark : "#8A5A16" }}>
+                      {c.used ? "Usado" : "Disponible"}
+                    </span>
+                    {!c.used && (
+                      <button onClick={() => setQrFor((id) => (id === c.id ? null : c.id))} className="text-xs font-semibold underline flex items-center gap-1" style={{ color: COLORS.court }}>
+                        <QrCode size={13} /> QR
+                      </button>
+                    )}
+                    {!c.used && (
+                      <button onClick={() => removeCoupon(c.id)} title="Borrar cupón" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
+                    )}
+                  </div>
+                </div>
+                {qrFor === c.id && <CouponQR code={c.code} />}
+              </div>
+            ))}
+          </div>
+        </>
       )}
+    </Card>
+  );
+}
+
+// QR + link de un cupón puntual (v2.82.0) -- se genera al vuelo con la librería `qrcode`
+// (cliente puro, sin llamada al servidor) apenas se expande esta fila, no de una por cada
+// cupón de la lista -- generar 20 QR ocultos que nadie va a ver sería trabajo de sobra.
+function CouponQR({ code }) {
+  const [dataUrl, setDataUrl] = useState(null);
+  const url = `${window.location.origin}/?cupon=${code}`;
+  useEffect(() => {
+    let alive = true;
+    QRCode.toDataURL(url, { width: 220, margin: 1 }).then((d) => { if (alive) setDataUrl(d); }).catch(() => {});
+    return () => { alive = false; };
+  }, [url]);
+  return (
+    <div className="mt-3 pt-3 flex flex-col items-center gap-2.5" style={{ borderTop: `1px dashed ${COLORS.line}` }}>
+      {dataUrl ? (
+        <img src={dataUrl} alt={`QR del cupón ${code}`} style={{ width: 180, height: 180 }} className="rounded-lg" />
+      ) : (
+        <p className="text-xs text-gray-400 py-8">Generando QR…</p>
+      )}
+      <input readOnly value={url} onFocus={(e) => e.target.select()} style={{ ...inputStyle, width: "auto", fontSize: 11 }} className="mono text-center" />
+      <div className="flex items-center gap-3">
+        <button onClick={() => navigator.clipboard?.writeText(url)} className="text-xs font-semibold underline flex items-center gap-1" style={{ color: COLORS.court }}>
+          <Copy size={12} /> Copiar link
+        </button>
+        {dataUrl && (
+          <a href={dataUrl} download={`cupon-${code}.png`} className="text-xs font-semibold underline flex items-center gap-1" style={{ color: COLORS.court }}>
+            <Download size={12} /> Descargar QR
+          </a>
+        )}
+      </div>
     </div>
   );
 }
