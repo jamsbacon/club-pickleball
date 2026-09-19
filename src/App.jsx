@@ -1185,6 +1185,18 @@ function computeStandings(teams, teamIds, matches) {
 function roundKeyOf(m) {
   return m.phase === "group" ? "group" : `${m.phase}:${m.round}`;
 }
+// v2.84.0 -- formato de puntuación efectivo de una fase/ronda puntual: el override guardado en
+// `cat.roundFormats[roundKey]` si existe, si no el default de la categoría (`cat.bestOf`/
+// `pointsTarget`/`scoringType`). Puramente informativo -- no lo usa `buildSchedule`.
+function roundFormatFor(cat, roundKey) {
+  const override = cat.roundFormats?.[roundKey];
+  return {
+    bestOf: override?.bestOf ?? cat.bestOf,
+    pointsTarget: override?.pointsTarget ?? cat.pointsTarget,
+    scoringType: override?.scoringType ?? cat.scoringType,
+  };
+}
+const SCORING_TYPE_LABELS = { estandar: "Estándar", rally: "Rally" };
 function roundOptionsForCategory(cat) {
   const opts = [];
   if (cat.matches.some((m) => m.phase === "group")) opts.push({ key: "group", label: "Fase de grupos" });
@@ -1517,7 +1529,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.83.4";
+const APP_VERSION = "2.84.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2348,6 +2360,9 @@ export default function PickleballTournamentApp() {
   const mapCategoryRow = (r) => ({
     id: r.id, tournamentId: r.tournament_id, name: r.name, format: r.format, modality: r.modality, gender: r.gender, level: r.level,
     maxTeams: r.max_teams, minTeams: r.min_teams, seedMode: r.seed_mode, bestOf: r.best_of, bracketSize: r.bracket_size,
+    // v2.84.0 -- formato de puntuación (sets/puntos/tipo), default de categoría + overrides por
+    // fase (ver roundFormatFor más abajo).
+    pointsTarget: r.points_target ?? 11, scoringType: r.scoring_type || "estandar", roundFormats: r.round_formats || {},
     teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
     drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
   });
@@ -2546,6 +2561,7 @@ export default function PickleballTournamentApp() {
     const result = await persistCategoryWrite(id, {
       name: updated.name, max_teams: updated.maxTeams, min_teams: updated.minTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
+      points_target: updated.pointsTarget, scoring_type: updated.scoringType, round_formats: updated.roundFormats,
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
       teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
     }, false, expectedRev);
@@ -2629,6 +2645,7 @@ export default function PickleballTournamentApp() {
     clone.forEach((c) => persistCategoryWrite(c.id, {
       tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
       max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
+      points_target: c.pointsTarget, scoring_type: c.scoringType, round_formats: c.roundFormats,
       draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
       teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
     }, true));
@@ -3863,6 +3880,7 @@ export default function PickleballTournamentApp() {
       persistCategoryWrite(c.id, {
         tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
         max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
+        points_target: c.pointsTarget, scoring_type: c.scoringType, round_formats: c.roundFormats,
         draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
         teams: freshRow ? (freshRow.teams || []) : c.teams, waitlist: freshRow ? (freshRow.waitlist || []) : c.waitlist,
         groups: c.groups, matches: c.matches,
@@ -6797,7 +6815,7 @@ function TorneosSection(props) {
           generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket}
           removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
           setCategoryFormat={setCategoryFormat} courts={courts} dates={dates} tournament={tournament}
-          matchDuration={matchDuration} breakM={breakM} />
+          matchDuration={matchDuration} breakM={breakM} updateCategory={updateCategory} />
       )}
 
       {subTab === "inscripcion" && (
@@ -7629,7 +7647,7 @@ function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRa
 // Formato de competencia por categoría -- recomendación (FormatAdvisor) mientras no tiene
 // formato, luego armar/ver el draw (DrawSetup/DrawPreview). Antes vivía mezclado dentro de
 // Categorías; misma lógica, solo movida a su propia pestaña.
-function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, setCategoryFormat, courts, dates, tournament, matchDuration, breakM }) {
+function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, setCategoryFormat, courts, dates, tournament, matchDuration, breakM, updateCategory }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -7643,6 +7661,7 @@ function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, clos
             ) : (
               <>
                 <DrawSetup cat={activeCat} generateDraw={generateDraw} onChangeFormat={() => setCategoryFormat(activeCat.id, null)} />
+                <ScoringFormatCard cat={activeCat} updateCategory={updateCategory} />
                 {activeCat.drawGenerated && <DrawPreview cat={activeCat} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot} />}
               </>
             )}
@@ -7652,6 +7671,136 @@ function FormatosTab({ categories, activeCat, setActiveCatId, generateDraw, clos
         )}
       </div>
     </div>
+  );
+}
+
+// v2.84.0, a pedido del club -- formato de puntuación (sets/puntos/tipo) por categoría, con la
+// opción de fijar uno distinto por fase (grupos, 8vos, 4tos, semis, final) si esa categoría ya
+// tiene draw generado. A propósito NO pasa por generateDraw -- guarda directo con
+// updateCategory, así que nunca toca teams/groups/matches ni arriesga borrar un draw ya armado
+// (a diferencia de "Regenerar draw" en DrawSetup, que sí los reconstruye desde cero). Puramente
+// informativo para mesa/marcador: no cambia cómo buildSchedule arma el calendario.
+function ScoringFormatCard({ cat, updateCategory }) {
+  const [editing, setEditing] = useState(false);
+  const [bestOf, setBestOf] = useState(cat.bestOf);
+  const [pointsTarget, setPointsTarget] = useState(cat.pointsTarget);
+  const [scoringType, setScoringType] = useState(cat.scoringType);
+  const [roundFormats, setRoundFormats] = useState(cat.roundFormats || {});
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setEditing(false); }, [cat.id]);
+
+  const rounds = roundOptionsForCategory(cat); // [] hasta que haya draw generado
+
+  const startEdit = () => {
+    setBestOf(cat.bestOf); setPointsTarget(cat.pointsTarget); setScoringType(cat.scoringType);
+    setRoundFormats(cat.roundFormats || {});
+    setEditing(true);
+  };
+  const setOverride = (key, field, value) => {
+    setRoundFormats((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
+  };
+  const clearOverride = (key) => setRoundFormats((prev) => { const next = { ...prev }; delete next[key]; return next; });
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    await updateCategory(cat.id, (c) => {
+      c.bestOf = Number(bestOf); c.pointsTarget = Number(pointsTarget); c.scoringType = scoringType;
+      c.roundFormats = roundFormats;
+      return c;
+    });
+    setSaving(false);
+    setEditing(false);
+  };
+
+  const fmtSummary = (f) => `${f.bestOf === 1 ? "1 set" : `mejor de ${f.bestOf}`} · a ${f.pointsTarget} pts · ${SCORING_TYPE_LABELS[f.scoringType]}`;
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between" style={{ marginBottom: editing ? 4 : 0 }}>
+        <SectionTitle sub={editing ? "Default de la categoría -- cada fase puede tener el suyo más abajo si hace falta." : "Sets, puntos y tipo de conteo. No afecta el calendario."}>
+          Formato de puntuación
+        </SectionTitle>
+        {!editing && (
+          <button onClick={startEdit} title="Editar formato de puntuación" className="text-gray-300 hover:text-gray-600 shrink-0"><Pencil size={16} /></button>
+        )}
+      </div>
+
+      {!editing ? (
+        <p className="text-sm font-semibold mt-2" style={{ color: COLORS.courtDark }}>{fmtSummary({ bestOf: cat.bestOf, pointsTarget: cat.pointsTarget, scoringType: cat.scoringType })}</p>
+      ) : (
+        <>
+          <div className="grid sm:grid-cols-3 gap-3 mt-2">
+            <div>
+              <Label>Sets por partido</Label>
+              <select style={inputStyle} value={bestOf} onChange={(e) => setBestOf(Number(e.target.value))}>
+                <option value={1}>1 set</option>
+                <option value={3}>3 sets</option>
+                <option value={5}>5 sets</option>
+              </select>
+            </div>
+            <div>
+              <Label>Puntos por set</Label>
+              <select style={inputStyle} value={pointsTarget} onChange={(e) => setPointsTarget(Number(e.target.value))}>
+                <option value={11}>11 puntos</option>
+                <option value={15}>15 puntos</option>
+              </select>
+            </div>
+            <div>
+              <Label>Tipo de conteo</Label>
+              <select style={inputStyle} value={scoringType} onChange={(e) => setScoringType(e.target.value)}>
+                <option value="estandar">Estándar</option>
+                <option value="rally">Rally</option>
+              </select>
+            </div>
+          </div>
+
+          {rounds.length > 0 && (
+            <div className="mt-5 pt-5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <p className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: "#9AA6BC" }}>Por fase (opcional -- sin elegir, usa el default de arriba)</p>
+              <div className="space-y-3">
+                {rounds.map((r) => {
+                  const effective = roundFormatFor({ bestOf, pointsTarget, scoringType, roundFormats }, r.key);
+                  const hasOverride = !!roundFormats[r.key];
+                  return (
+                    <div key={r.key} className="rounded-xl p-3" style={{ background: "#F5F6F9" }}>
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <p className="text-sm font-bold" style={{ color: COLORS.courtDark }}>{r.label}</p>
+                        {hasOverride && (
+                          <button onClick={() => clearOverride(r.key)} className="text-xs font-semibold underline" style={{ color: COLORS.clay }}>Usar default</button>
+                        )}
+                      </div>
+                      <div className="grid sm:grid-cols-3 gap-2">
+                        <select style={inputStyle} className="text-xs" value={effective.bestOf} onChange={(e) => setOverride(r.key, "bestOf", Number(e.target.value))}>
+                          <option value={1}>1 set</option>
+                          <option value={3}>3 sets</option>
+                          <option value={5}>5 sets</option>
+                        </select>
+                        <select style={inputStyle} className="text-xs" value={effective.pointsTarget} onChange={(e) => setOverride(r.key, "pointsTarget", Number(e.target.value))}>
+                          <option value={11}>11 puntos</option>
+                          <option value={15}>15 puntos</option>
+                        </select>
+                        <select style={inputStyle} className="text-xs" value={effective.scoringType} onChange={(e) => setOverride(r.key, "scoringType", e.target.value)}>
+                          <option value="estandar">Estándar</option>
+                          <option value="rally">Rally</option>
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 mt-5">
+            <button onClick={save} disabled={saving} style={{ background: COLORS.court, color: "#fff" }} className="px-5 py-2 rounded-xl text-sm font-bold disabled:opacity-60">
+              {saving ? "Guardando…" : "Guardar formato"}
+            </button>
+            <button onClick={() => setEditing(false)} className="px-4 py-2 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -8192,7 +8341,7 @@ function DrawPreview({ cat, closeGroupsAndSeedBracket, removeTeamFromGroup, assi
     <Card>
       {/* v2.81.6, a pedido del club: se ve de un vistazo a cuántos sets se juega esta
          categoría, sin tener que abrir "Editar formato" para revisarlo. */}
-      <SectionTitle sub={cat.bestOf ? `Mejor de ${cat.bestOf} set${cat.bestOf === 1 ? "" : "s"} por partido.` : undefined}>
+      <SectionTitle sub={cat.bestOf ? `Mejor de ${cat.bestOf} set${cat.bestOf === 1 ? "" : "s"} por partido, a ${cat.pointsTarget} puntos (${SCORING_TYPE_LABELS[cat.scoringType]}).` : undefined}>
         Draw generado
       </SectionTitle>
       {cat.groups.length > 0 && (
@@ -8293,6 +8442,7 @@ function roundLabel(rn, total) {
   if (remaining === 1) return "Final";
   if (remaining === 2) return "Semifinal";
   if (remaining === 3) return "Cuartos de final";
+  if (remaining === 4) return "Octavos de final";
   return `Ronda ${rn}`;
 }
 
@@ -10363,8 +10513,12 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSubmit, matchNumber }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber }) {
   const [open, setOpen] = useState(false);
+  // v2.84.0 -- el formato efectivo de ESTA fase/ronda (puede tener su propio override, ver
+  // ScoringFormatCard/roundFormatFor) en vez del `bestOf` fijo de la categoría entera.
+  const fmt = roundFormatFor(cat, roundKeyOf(m));
+  const bestOf = fmt.bestOf;
   const setsNeeded = Math.ceil(bestOf / 2);
   const [sets, setSets] = useState(m.sets.length ? m.sets : Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
 
@@ -10423,7 +10577,7 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, bestOf, onSu
                 onChange={(e) => setSets((arr) => arr.map((x, j) => j === i ? { ...x, b: e.target.value } : x))} placeholder={labelB.slice(0, 6)} />
             </div>
           ))}
-          <p className="text-xs text-gray-400">Se necesitan {setsNeeded} sets ganados para cerrar el partido (mejor de {bestOf}).</p>
+          <p className="text-xs text-gray-400">Se necesitan {setsNeeded} sets ganados para cerrar el partido (mejor de {bestOf}) -- a {fmt.pointsTarget} puntos, {SCORING_TYPE_LABELS[fmt.scoringType]}.</p>
           <button onClick={save} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-1.5 rounded-lg text-xs font-bold">Guardar resultado</button>
         </div>
       )}
