@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.83.1";
+const APP_VERSION = "2.83.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2103,7 +2103,18 @@ export default function PickleballTournamentApp() {
   useEffect(() => {
     if (!couponCode || couponInfo === undefined || !currentUser || couponConsumedRef.current) return;
     couponConsumedRef.current = true;
-    setTab("membresias");
+    // v2.83.2 -- "membresias" es un tab de nivel superior SOLO para clientes (roles: ["cliente"]
+    // en NAV_ITEMS); para un admin ese mismo panel vive dentro de "Mi Club -> Planes", así que
+    // setTab("membresias") a solas no lo llevaba a ningún lado (effectiveTab cae de vuelta a
+    // Estadísticas apenas nota que "membresias" no está en su visibleNav). clubSubTab se lee de
+    // caché al montar ClubTab -- escribirla ACÁ, antes de montar, hace que abra directo en
+    // "Planes" en vez de la primera sub-pestaña.
+    if (currentUser.role === "admin") {
+      saveCache("clubSubTab", "planes");
+      setTab("club");
+    } else {
+      setTab("membresias");
+    }
   }, [couponCode, couponInfo, currentUser]);
 
   useEffect(() => {
