@@ -1519,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.85.3";
+const APP_VERSION = "2.85.4";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3284,6 +3284,7 @@ export default function PickleballTournamentApp() {
   };
 
   const submitScore = (catId, matchId, sets) => {
+    if (currentUser?.role !== "admin") return;
     updateCategory(catId, (c) => {
       const m = c.matches.find((mm) => mm.id === matchId);
       if (!m) return c;
@@ -10213,7 +10214,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     </div>
   );
 
-  const dayTabs = dates.length > 0 && (
+  const dayTabs = isAdmin && dates.length > 0 && (
     <div className="flex flex-wrap gap-2">
       {dates.map((d) => (
         <button key={d} onClick={() => setSelectedDay(d)} className="px-3.5 py-2 rounded-xl text-sm font-bold"
@@ -10247,7 +10248,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     if (side === "A") return m.teamALabel || cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
     return m.teamBLabel || cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
   };
-  const nextCallsPanel = day && (
+  const nextCallsPanel = isAdmin && day && (
     <Card>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
@@ -10290,7 +10291,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                 </div>
               </div>
             ) : current ? (
-              <MatchRow key={current.id} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
+              <MatchRow key={current.id} isAdmin={isAdmin} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
                 matchNumber={matchIndex.get(current.id)}
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
                 onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} />
@@ -10327,7 +10328,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // Botón compartido por las dos vistas (Todas / una categoría) -- descarga justo los
   // partidos que se están viendo en pantalla en ese momento (respeta el filtro activo, día
   // incluido -- v2.77.0: antes bajaba TODOS los días juntos en una sola planilla).
-  const downloadButton = (printMatches) => (
+  const downloadButton = (printMatches) => !isAdmin ? null : (
     <button onClick={() => setPrinting(true)} disabled={printMatches.length === 0}
       style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}`, opacity: printMatches.length === 0 ? 0.4 : 1 }}
       className="px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5">
@@ -10338,7 +10339,8 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   const printTitle = tournament?.name && day ? `${tournament.name} -- ${formatDateHuman(day)}` : (tournament?.name || "Torneo");
 
   if (catId === "all") {
-    const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day).map((m) => ({ ...m, __cat: c }))), courtOrder);
+    // Cliente: sin filtro por día (eso revelaría el horario) y solo partidos ya jugados.
+    const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && (isAdmin ? m.day === day : !!m.winnerId)).map((m) => ({ ...m, __cat: c }))), courtOrder);
     return (
       <div className="mt-2 space-y-5">
         {dayTabs}
@@ -10348,18 +10350,18 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           {downloadButton(allPlayable)}
         </div>
         <Card>
-          <SectionTitle sub={`Partidos jugables de ${day ? formatDateHuman(day) : "este torneo"}, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.`}>Cargar resultados</SectionTitle>
+          <SectionTitle sub={isAdmin ? `Partidos jugables de ${day ? formatDateHuman(day) : "este torneo"}, ordenados cronológicamente igual que el Calendario. Los BYE no se muestran porque no se juegan.` : "Marcadores de los partidos ya jugados."}>{isAdmin ? "Cargar resultados" : "Resultados"}</SectionTitle>
           <div className="space-y-3">
             {allPlayable.map((m) => (
-              <MatchRow key={m.id} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
+              <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
                 matchNumber={matchIndex.get(m.id)}
                 teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
                 onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
             ))}
-            {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">{day ? "No hay partidos programados para este día." : "Genera primero el draw de alguna categoría."}</p>}
+            {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">{!isAdmin ? "Todavía no hay resultados cargados." : day ? "No hay partidos programados para este día." : "Genera primero el draw de alguna categoría."}</p>}
           </div>
         </Card>
-        {printing && (
+        {isAdmin && printing && (
           <PrintScoreSheets matches={allPlayable} courtById={courtById} tournamentName={printTitle} matchIndex={matchIndex}
             onClose={() => setPrinting(false)} />
         )}
@@ -10370,7 +10372,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   if (!cat) return <Card className="mt-2"><p className="text-sm text-gray-400">Categoría no encontrada.</p></Card>;
 
   const teamName = (id) => cat.teams.find((t) => t.id === id)?.name || "?";
-  const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m) && m.day === day), courtOrder);
+  const playableMatches = chronoSort(cat.matches.filter((m) => !isByeMatch(m) && (isAdmin ? m.day === day : !!m.winnerId)), courtOrder);
   const printMatches = playableMatches.map((m) => ({ ...m, __cat: cat }));
   const isDouble = cat.format === "doble_eliminacion";
   const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
@@ -10391,7 +10393,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         </Card>
       ))}
 
-      {cat.format === "grupos_eliminatoria" && !cat.groupsClosed && (
+      {isAdmin && cat.format === "grupos_eliminatoria" && !cat.groupsClosed && (
         <button onClick={() => closeGroupsAndSeedBracket(cat.id)}
           style={{ background: COLORS.court, color: COLORS.chalk }}
           className="px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
@@ -10414,17 +10416,17 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
       )}
 
       <Card>
-        <SectionTitle sub={`Selecciona un partido y carga el marcador (se admite más de un set). Partidos de ${day ? formatDateHuman(day) : "este torneo"} -- los BYE no se muestran porque no se juegan.`}>Cargar resultados</SectionTitle>
+        <SectionTitle sub={isAdmin ? `Selecciona un partido y carga el marcador (se admite más de un set). Partidos de ${day ? formatDateHuman(day) : "este torneo"} -- los BYE no se muestran porque no se juegan.` : "Marcadores de los partidos ya jugados."}>{isAdmin ? "Cargar resultados" : "Resultados"}</SectionTitle>
         <div className="space-y-3">
           {playableMatches.map((m) => (
-            <MatchRow key={m.id} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
+            <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
               matchNumber={matchIndex.get(m.id)}
               onSubmit={(sets) => submitScore(cat.id, m.id, sets)} />
           ))}
-          {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
+          {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{!isAdmin ? "Todavía no hay resultados cargados." : day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
         </div>
       </Card>
-      {printing && (
+      {isAdmin && printing && (
         <PrintScoreSheets matches={printMatches} courtById={courtById} tournamentName={printTitle} matchIndex={matchIndex}
           onClose={() => setPrinting(false)} />
       )}
@@ -10592,7 +10594,7 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber, isAdmin }) {
   const [open, setOpen] = useState(false);
   // v2.84.0 -- el formato efectivo de ESTA fase/ronda (puede tener su propio override, ver
   // ScoringFormatCard/roundFormatFor) en vez del `bestOf` fijo de la categoría entera.
@@ -10607,6 +10609,7 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
   const cc = catColor || CATEGORY_PALETTE[0];
 
   const save = () => {
+    if (!isAdmin) return;
     const cleaned = sets.filter((s) => s.a !== "" && s.b !== "");
     if (cleaned.length === 0) return;
     onSubmit(cleaned);
@@ -10625,9 +10628,9 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
           {/* v2.79.0: mismo número que trae la planilla impresa para este partido (ver
               buildMatchIndex) -- para que el supervisor de cancha, con el papel en la mano,
               pueda ubicar acá el partido correcto sin tener que leer nombres. */}
-          {matchNumber != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchNumber}</span>}
+          {isAdmin && matchNumber != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchNumber}</span>}
           {catName && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide align-middle" style={{ background: cc.bg, color: cc.text }}>{catName}</span>}
-          {m.day && (
+          {isAdmin && m.day && (
             <>
               <span className="mono text-sm font-extrabold" style={{ color: COLORS.clay }}>{formatTimeAmPm(m.time)}</span>
               <span className="mono text-sm text-gray-500">· {courtById[m.courtId]?.name}</span>
@@ -10643,13 +10646,15 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
           {m.winnerId && <span className="text-xs mono px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
             {(m.sets || []).map((s) => `${s.a}-${s.b}`).join(", ")}
           </span>}
-          <button disabled={!playable} onClick={() => setOpen((o) => !o)}
-            style={{ opacity: playable ? 1 : 0.4 }} className="text-xs font-semibold flex items-center gap-1" >
-            {m.winnerId ? "Editar" : "Cargar marcador"} <ChevronDown size={13} className={open ? "rotate-180" : ""} />
-          </button>
+          {isAdmin && (
+            <button disabled={!playable} onClick={() => setOpen((o) => !o)}
+              style={{ opacity: playable ? 1 : 0.4 }} className="text-xs font-semibold flex items-center gap-1" >
+              {m.winnerId ? "Editar" : "Cargar marcador"} <ChevronDown size={13} className={open ? "rotate-180" : ""} />
+            </button>
+          )}
         </div>
       </div>
-      {open && (
+      {isAdmin && open && (
         <div className="mt-3 pt-3 border-t space-y-2" style={{ borderColor: COLORS.line }}>
           {sets.map((s, i) => (
             <div key={i} className="flex items-center gap-2 text-sm">
