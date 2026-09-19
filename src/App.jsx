@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.82.1";
+const APP_VERSION = "2.82.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2422,18 +2422,31 @@ export default function PickleballTournamentApp() {
   // la resiliencia sin internet al admin, solo le agrega a QUIEN LLAMA la posibilidad de
   // enterarse del resultado en el momento, en vez de solo el aviso "N sin sincronizar" (que
   // además es admin-only, ver más abajo el porqué de este cambio).
-  const persistCategoryWrite = async (id, fields, upsert = false) => {
-    const query = upsert
-      ? supabase.from("categories").upsert({ id, ...fields })
-      : supabase.from("categories").update(fields).eq("id", id);
-    const { error } = await query;
+  // v2.82.2 -- `expectedRev` (opcional): cuando se pasa, el UPDATE se condiciona a que la
+  // columna `rev` de la fila siga siendo esa misma (control de concurrencia optimista, ver
+  // comentario de updateCategory más abajo y la migración categories_rev_concurrency). Si
+  // nadie más escribió en el medio, el UPDATE afecta la fila y de paso sube `rev` en 1; si
+  // alguien SÍ escribió en el medio, `rev` ya cambió, el UPDATE no afecta ninguna fila (0
+  // filas, sin error), y devolvemos `conflict: true` para que updateCategory reintente en vez
+  // de asumir que se guardó.
+  const persistCategoryWrite = async (id, fields, upsert = false, expectedRev = null) => {
+    let query;
+    if (upsert) {
+      query = supabase.from("categories").upsert({ id, ...fields }).select("id");
+    } else if (expectedRev != null) {
+      query = supabase.from("categories").update({ ...fields, rev: expectedRev + 1 }).eq("id", id).eq("rev", expectedRev).select("id");
+    } else {
+      query = supabase.from("categories").update(fields).eq("id", id).select("id");
+    }
+    const { data, error } = await query;
+    const conflict = !error && expectedRev != null && !upsert && (!data || data.length === 0);
     const next = { ...pendingCategoryWritesRef.current };
     if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
-    else delete next[id];
+    else if (!conflict) delete next[id];
     pendingCategoryWritesRef.current = next;
     saveCache("pendingCategoryWrites", next);
     setPendingCategoryCount(Object.keys(next).length);
-    return { error: error?.message || null };
+    return { error: error?.message || null, conflict };
   };
   const flushPendingCategoryWrites = () => {
     Object.entries(pendingCategoryWritesRef.current).forEach(([id, { fields, upsert }]) => persistCategoryWrite(id, fields, upsert));
@@ -2470,18 +2483,40 @@ export default function PickleballTournamentApp() {
   // real más reciente en vez de lo que el navegador recuerde de cuando cargó la página. Si el
   // refetch falla por red (no porque la fila se haya borrado), cae de vuelta al estado local
   // como último recurso -- mismo riesgo de antes, pero solo cuando de verdad no hay conexión.
-  const updateCategory = async (id, updater) => {
+  // v2.82.2 -- INCIDENTE REAL: releer la fila fresca (v2.80.5, arriba) evita que una pestaña
+  // vieja pise datos nuevos, pero NO evita que DOS llamadas a updateCategory sobre la MISMA
+  // categoría, casi al mismo milisegundo (ej. un jugador auto-inscribiéndose por checkout
+  // mientras el admin empareja una dupla a mano en esa misma categoría), se pisen entre sí --
+  // ambas leen la misma fila "fresca" antes de que ninguna haya escrito, cada una calcula su
+  // propio `updated` por separado, y la que escribe SEGUNDA borra sin avisar lo que la primera
+  // acababa de guardar. Pasó de verdad la noche antes del ACP 500: se perdieron así la
+  // inscripción de Norvelys Calvo, la de María Kurilo, y el emparejo de Armando Valdivieso con
+  // Ronald Ascanio -- las tres notificaciones push SÍ llegaron (se mandan solo si el guardado
+  // "tuvo éxito" desde el punto de vista de quien lo hizo), pero el dato ya no estaba.
+  //
+  // Ahora cada intento manda el `rev` que leyó junto con el guardado (control de concurrencia
+  // optimista, ver persistCategoryWrite y la migración categories_rev_concurrency) -- el UPDATE
+  // solo aplica si `rev` sigue siendo ese mismo número. Si alguien más ya escribió en el medio,
+  // el guardado no afecta ninguna fila (en vez de pisarla) y acá se detecta como `conflict`:
+  // se relee la categoría YA CON ese otro cambio incluido, se reaplica `updater` sobre eso, y se
+  // reintenta -- hasta 5 veces, lo cual cubre con margen incluso una ráfaga de inscripciones
+  // simultáneas la noche antes de un torneo.
+  const updateCategory = async (id, updater, attempt = 0) => {
     const { data: freshRow } = await supabase.from("categories").select("*").eq("id", id).single();
     const current = freshRow ? mapCategoryRow(freshRow) : categories.find((c) => c.id === id);
     if (!current) return { error: "Esta categoría ya no existe." };
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
-    return persistCategoryWrite(id, {
+    const expectedRev = freshRow ? (freshRow.rev || 0) : null;
+    const result = await persistCategoryWrite(id, {
       name: updated.name, max_teams: updated.maxTeams, min_teams: updated.minTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
       draw_generated: updated.drawGenerated, groups_closed: updated.groupsClosed,
       teams: updated.teams, waitlist: updated.waitlist, groups: updated.groups, matches: updated.matches,
-    });
+    }, false, expectedRev);
+    if (result?.conflict && attempt < 5) return updateCategory(id, updater, attempt + 1);
+    if (result?.conflict) return { error: "Dos personas guardaron esto al mismo tiempo -- intenta de nuevo." };
+    return result;
   };
 
   // Reprograma un partido ya agendado a mano (grid de CalendarioTab, tap-origen →

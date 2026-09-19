@@ -1,0 +1,19 @@
+-- v2.82.2 -- INCIDENTE REAL: dos guardados casi simultáneos a la MISMA categoría (ej. un
+-- jugador auto-inscribiéndose por checkout mientras el admin emparejaba una dupla a mano en
+-- la misma categoría) pueden pisarse entre sí -- ambos leen la fila "fresca" de Supabase casi
+-- al mismo tiempo (ver updateCategory en App.jsx), cada uno escribe su propia versión completa
+-- por separado, y el que escribe último borra sin avisar lo que el otro acababa de guardar.
+-- Pasó de verdad la noche antes del torneo ACP 500: Norvelys Calvo, María Kurilo y el emparejo
+-- de Armando Valdivieso con Ronald Ascanio se perdieron así -- la notificación push de cada
+-- uno sí llegó (se manda solo si el guardado "tuvo éxito" desde el punto de vista de quien lo
+-- hizo), pero el dato ya no estaba: alguien más lo pisó milisegundos después. El fix de
+-- v2.80.5 (releer la categoría fresca antes de aplicar el cambio) evita que una pestaña vieja
+-- abierta por horas pise datos nuevos, pero NO evita que dos guardados verdaderamente
+-- concurrentes se pisen entre sí -- para eso hace falta control de concurrencia optimista.
+--
+-- `rev` es un contador que sube en cada guardado exitoso. `updateCategory` ahora condiciona su
+-- UPDATE a que `rev` siga siendo el mismo que leyó al empezar (`eq("rev", expectedRev)`) -- si
+-- alguien más ya guardó en el medio, ese UPDATE no afecta ninguna fila (en vez de pisarla), y
+-- updateCategory lo detecta y reintenta solo, releyendo la categoría de nuevo con el cambio de
+-- la otra persona ya incluido, hasta 5 veces.
+alter table public.categories add column if not exists rev bigint not null default 0;
