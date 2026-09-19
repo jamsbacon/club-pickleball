@@ -1517,7 +1517,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.82.3";
+const APP_VERSION = "2.83.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1724,7 +1724,7 @@ export default function PickleballTournamentApp() {
   // el estado general (`coupons` solo se carga para el admin, ver fetchCoupons) -- se resuelve
   // aparte, con su propio fetch por code, funcione o no haya sesión todavía. `couponInfo`:
   // `undefined` mientras carga, `null` si el código no existe, `{coupon, plan}` si es válido
-  // (el propio `coupon.used` dice si ya se canjeó).
+  // (ver `couponIsValid` más abajo -- chequea cupo de usos y vigencia).
   const [couponCode] = useState(() => {
     try { return new URLSearchParams(window.location.search).get("cupon") || null; } catch { return null; }
   });
@@ -1948,9 +1948,14 @@ export default function PickleballTournamentApp() {
   // solo hace falta cargarla para quien la vaya a gestionar.
   const mapCouponRow = (r) => ({
     id: r.id, code: r.code, planId: r.plan_id, discountPct: Number(r.discount_pct),
-    used: !!r.used, usedBy: r.used_by, usedAt: r.used_at ? new Date(r.used_at).getTime() : null,
+    maxUses: r.max_uses, usedCount: r.used_count,
+    expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
     createdAt: new Date(r.created_at).getTime(),
   });
+  // v2.83.0 -- un cupón sigue sirviendo mientras le queden usos Y (si tiene fecha de caducidad)
+  // esa fecha todavía no pasó. Centralizado acá porque se repite en varios lugares (deep-link,
+  // checkout, panel de admin) y todos deben coincidir en qué cuenta como "vencido".
+  const couponIsValid = (c) => !!c && c.usedCount < c.maxUses && (!c.expiresAt || c.expiresAt > Date.now());
   const [coupons, setCoupons] = useState([]);
   const fetchCoupons = async () => {
     const { data, error } = await supabase.from("coupons").select("*").order("created_at", { ascending: false });
@@ -1973,12 +1978,16 @@ export default function PickleballTournamentApp() {
     for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
     return s;
   };
-  const createCoupon = async (planId, discountPct, tries = 0) => {
+  const createCoupon = async (planId, discountPct, maxUses, expiresAt, tries = 0) => {
     if (tries > 5) return { error: "No se pudo generar un código único -- intenta de nuevo." };
     const code = genCouponCode();
-    const { data, error } = await supabase.from("coupons").insert({ code, plan_id: planId, discount_pct: Number(discountPct) }).select().single();
+    const { data, error } = await supabase.from("coupons").insert({
+      code, plan_id: planId, discount_pct: Number(discountPct),
+      max_uses: Math.max(1, Number(maxUses) || 1),
+      expires_at: expiresAt ? new Date(expiresAt + "T23:59:59").toISOString() : null,
+    }).select().single();
     if (error) {
-      if (error.code === "23505") return createCoupon(planId, discountPct, tries + 1); // choque de código único -- reintenta con otro
+      if (error.code === "23505") return createCoupon(planId, discountPct, maxUses, expiresAt, tries + 1); // choque de código único -- reintenta con otro
       console.error("createCoupon:", error.message);
       return { error: error.message };
     }
@@ -1991,16 +2000,16 @@ export default function PickleballTournamentApp() {
     const { error } = await supabase.from("coupons").delete().eq("id", id);
     if (error) console.error("removeCoupon:", error.message);
   };
-  // Canjear (v2.82.0) -- marca el cupón usado a nombre de quien está logueado AHORA MISMO. La
-  // política RLS "authenticated redeem coupons" es la que de verdad protege esto (exige
-  // used=false antes y used=true + used_by=auth.uid() después) -- esto solo refleja el
-  // resultado en el estado local si el UPDATE real se aceptó.
+  // Canjear (v2.83.0, reemplaza el UPDATE directo de v2.82.0) -- ya no es "leer el cupón, ver si
+  // sirve, escribir" desde el cliente (esa forma es la que causó el incidente real de esta misma
+  // noche con `categories`, ver updateCategory: dos guardados casi simultáneos pueden pisarse).
+  // Para un contador de usos la forma correcta es un UPDATE atómico del lado de la base de datos
+  // -- la función `redeem_coupon` (ver migración) sube `used_count` SOLO si de verdad quedaba
+  // cupo y no había vencido, en un solo paso que Postgres serializa solo.
   const redeemCoupon = async (couponId) => {
     if (!currentUser) return { error: "Necesitas iniciar sesión." };
-    const { data, error } = await supabase.from("coupons")
-      .update({ used: true, used_by: currentUser.id, used_at: new Date().toISOString() })
-      .eq("id", couponId).eq("used", false).select().single();
-    if (error || !data) return { error: "Este cupón ya no está disponible -- puede que alguien más lo haya usado justo antes." };
+    const { data, error } = await supabase.rpc("redeem_coupon", { p_coupon_id: couponId });
+    if (error || !data) return { error: "Este cupón ya no está disponible -- puede que se haya agotado o vencido." };
     const updated = mapCouponRow(data);
     setCoupons((prev) => prev.map((c) => (c.id === couponId ? updated : c)));
     // v2.82.0 -- `couponInfo` (resuelto del link/QR con el que se llegó, ver couponCode más
@@ -3946,7 +3955,7 @@ export default function PickleballTournamentApp() {
       return (
         <div style={{ background: COLORS.chalk, fontFamily: "'Inter', system-ui, sans-serif" }} className="w-full min-h-screen">
           <GlobalStyles />
-          <PublicCouponView couponInfo={couponInfo} club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />
+          <PublicCouponView couponInfo={couponInfo} club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} couponIsValid={couponIsValid} />
         </div>
       );
     }
@@ -4005,7 +4014,7 @@ export default function PickleballTournamentApp() {
             <ClubTab club={club} updateClub={updateClub} courts={courts} addCourt={addCourt} updateCourt={updateCourt} removeCourt={removeCourt} rateStatus={rateStatus} syncBcvRate={syncBcvRate}
               membershipPlans={membershipPlans} addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} users={users} subscriptions={subscriptions}
-              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} />
+              coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid} />
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
@@ -4088,7 +4097,7 @@ export default function PickleballTournamentApp() {
               addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
               subscribeToPlan={subscribeToPlan} currentUser={currentUser} role={role}
               coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon}
-              couponInfo={couponInfo} redeemCoupon={redeemCoupon} />
+              couponInfo={couponInfo} redeemCoupon={redeemCoupon} couponIsValid={couponIsValid} />
           )}
 
           {effectiveTab === "perfil" && (
@@ -4320,14 +4329,16 @@ function PublicJoinTeamView({ info, loading, club, registerUser, loginUser, rese
 // (plan + % de descuento + precio ya calculado) y empuja a loguearse/registrarse -- el canje
 // real (redeemCoupon) pasa recién adentro de la app, una vez con sesión, para que quede
 // atribuido a una cuenta real (ver MembresiasTab/CouponCheckoutBanner).
-function PublicCouponView({ couponInfo, club, registerUser, loginUser, resetPasswordUser }) {
+function PublicCouponView({ couponInfo, club, registerUser, loginUser, resetPasswordUser, couponIsValid }) {
   const [wantsAuth, setWantsAuth] = useState(false);
   if (wantsAuth) {
     return <AuthScreen club={club} registerUser={registerUser} loginUser={loginUser} resetPasswordUser={resetPasswordUser} />;
   }
   const loading = couponInfo === undefined;
-  const valid = !!(couponInfo && couponInfo.plan && !couponInfo.coupon.used);
+  const valid = !!(couponInfo && couponInfo.plan && couponIsValid(couponInfo.coupon));
   const discounted = valid ? couponInfo.plan.monthlyPrice * (1 - couponInfo.coupon.discountPct / 100) : null;
+  const expired = couponInfo?.coupon && couponInfo.coupon.expiresAt && couponInfo.coupon.expiresAt <= Date.now();
+  const exhausted = couponInfo?.coupon && couponInfo.coupon.usedCount >= couponInfo.coupon.maxUses;
 
   return (
     <div className="w-full min-h-screen flex items-center justify-center p-4" style={{ background: COLORS.chalk }}>
@@ -4353,7 +4364,7 @@ function PublicCouponView({ couponInfo, club, registerUser, loginUser, resetPass
           </>
         ) : (
           <p className="text-sm mb-5" style={{ color: "#6B7688" }}>
-            {couponInfo?.coupon?.used ? "Este cupón ya fue usado -- solo sirve una vez." : "Este cupón ya no está disponible."}
+            {exhausted ? "Este cupón ya se agotó -- llegó a su límite de usos." : expired ? "Este cupón ya venció." : "Este cupón ya no está disponible."}
             {" "}Puedes iniciar sesión para ver todo lo que tiene el club ahora mismo.
           </p>
         )}
@@ -5505,7 +5516,7 @@ const CLUB_SUB_ITEMS = [
 
 function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt, rateStatus, syncBcvRate,
   membershipPlans, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, users, subscriptions,
-  coupons, createCoupon, removeCoupon }) {
+  coupons, createCoupon, removeCoupon, couponIsValid }) {
   const [subTab, setSubTab] = useState(() => {
     const cached = loadCache("clubSubTab", null);
     return cached && CLUB_SUB_ITEMS.some((it) => it.id === cached) ? cached : CLUB_SUB_ITEMS[0].id;
@@ -5676,7 +5687,7 @@ function ClubTab({ club, updateClub, courts, addCourt, updateCourt, removeCourt,
         <MembresiasTab membershipPlans={membershipPlans} club={club} courts={courts} users={users} subscriptions={subscriptions}
           addMembershipPlan={addMembershipPlan} updateMembershipPlan={updateMembershipPlan} removeMembershipPlan={removeMembershipPlan}
           subscribeToPlan={subscribeToPlan} currentUser={currentUser} role="admin"
-          coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} />
+          coupons={coupons} createCoupon={createCoupon} removeCoupon={removeCoupon} couponIsValid={couponIsValid} />
       )}
     </div>
   );
@@ -12406,7 +12417,7 @@ function PlanCard({ plan, idx, rateLabels, basePlan, courts, blockLabel, state, 
 }
 
 function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, addMembershipPlan, updateMembershipPlan, removeMembershipPlan, subscribeToPlan, currentUser, role,
-  coupons, createCoupon, removeCoupon, couponInfo, redeemCoupon }) {
+  coupons, createCoupon, removeCoupon, couponInfo, redeemCoupon, couponIsValid }) {
   const [showForm, setShowForm] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [checkoutPlanId, setCheckoutPlanId] = useState(null);
@@ -12417,7 +12428,7 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
   // válido solo si llegó por link/QR, apunta a un plan real, y todavía no se canjeó. Apenas hay
   // uno válido, se abre solo el checkout de SU plan (una sola vez -- `couponAutoOpenedRef` evita
   // reabrirlo si el cliente lo cierra a mano) con el % ya aplicado.
-  const activeCoupon = couponInfo && couponInfo.plan && !couponInfo.coupon.used ? couponInfo : null;
+  const activeCoupon = couponInfo && couponInfo.plan && couponIsValid(couponInfo.coupon) ? couponInfo : null;
   const couponAutoOpenedRef = useRef(false);
   useEffect(() => {
     if (activeCoupon && !isAdmin && !couponAutoOpenedRef.current) {
@@ -12664,10 +12675,14 @@ function MembresiasTab({ membershipPlans, club, courts, users, subscriptions, ad
 // componente principal) -- crear uno elige plan + %, genera un código único, y deja compartirlo
 // como link o como QR (CouponQR, justo abajo). Solo se ofrecen planes PAGOS ("Sin plan" no
 // tiene precio del que descontar nada). Un cupón ya usado no se puede borrar -- queda como
-// historial de quién lo canjeó (ver `usedBy`/`usedAt`), solo los que siguen disponibles.
+// historial de canjes, solo los que nunca se usaron (ver coupon_redemptions en la migración).
 function CouponesCard({ membershipPlans, coupons, createCoupon, removeCoupon }) {
   const [planId, setPlanId] = useState(membershipPlans[0]?.id || "");
   const [pct, setPct] = useState(20);
+  // v2.83.0 -- cuántas veces sirve (antes siempre 1) y hasta cuándo (vacío = nunca vence), a
+  // pedido del club.
+  const [maxUses, setMaxUses] = useState(1);
+  const [expiresAt, setExpiresAt] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [qrFor, setQrFor] = useState(null);
@@ -12675,22 +12690,29 @@ function CouponesCard({ membershipPlans, coupons, createCoupon, removeCoupon }) 
   const create = async () => {
     if (!planId || !pct) return;
     setCreating(true); setError("");
-    const result = await createCoupon(planId, pct);
+    const result = await createCoupon(planId, pct, maxUses, expiresAt || null);
     setCreating(false);
     if (result?.error) { setError(result.error); return; }
     setQrFor(result.data.id);
+    setMaxUses(1); setExpiresAt("");
   };
 
   const planName = (id) => membershipPlans.find((p) => p.id === id)?.name || "(plan borrado)";
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const couponStatus = (c) => {
+    if (c.expiresAt && c.expiresAt <= Date.now()) return { label: "Vencido", bg: "#F1E4E4", fg: "#8A3A3A" };
+    if (c.usedCount >= c.maxUses) return { label: "Agotado", bg: "#DCEBD5", fg: COLORS.courtDark };
+    return { label: `Disponible (${c.usedCount}/${c.maxUses})`, bg: "#FBF3E4", fg: "#8A5A16" };
+  };
 
   return (
     <Card>
-      <SectionTitle sub="Cada cupón da un % de descuento en UN plan puntual y sirve una sola vez -- compártelo como link o como código QR.">Cupones de descuento</SectionTitle>
+      <SectionTitle sub="Cada cupón da un % de descuento en UN plan puntual -- elige cuántas veces se puede usar y, si quieres, hasta cuándo vale. Compártelo como link o como código QR.">Cupones de descuento</SectionTitle>
       {membershipPlans.length === 0 ? (
         <p className="text-sm text-gray-400">Crea primero un plan pago para poder generar cupones.</p>
       ) : (
         <>
-          <div className="grid sm:grid-cols-[1fr_1fr_auto] gap-3 items-end mb-4">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-[1.3fr_0.8fr_0.8fr_1fr_auto] gap-3 items-end mb-4">
             <div>
               <Label>Plan</Label>
               <select style={inputStyle} value={planId} onChange={(e) => setPlanId(e.target.value)}>
@@ -12701,6 +12723,14 @@ function CouponesCard({ membershipPlans, coupons, createCoupon, removeCoupon }) 
               <Label>% de descuento</Label>
               <input type="number" min={1} max={100} style={inputStyle} value={pct} onChange={(e) => setPct(e.target.value)} />
             </div>
+            <div>
+              <Label>Cantidad de usos</Label>
+              <input type="number" min={1} style={inputStyle} value={maxUses} onChange={(e) => setMaxUses(e.target.value)} />
+            </div>
+            <div>
+              <Label>Caduca (opcional)</Label>
+              <input type="date" min={todayIso} style={inputStyle} value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
+            </div>
             <button onClick={create} disabled={creating || !planId} style={{ background: COLORS.court, color: "#fff", opacity: (creating || !planId) ? 0.6 : 1 }}
               className="px-4 py-2.5 rounded-xl text-sm font-bold h-[42px] flex items-center gap-1.5">
               <Plus size={15} /> {creating ? "Creando…" : "Crear cupón"}
@@ -12710,30 +12740,37 @@ function CouponesCard({ membershipPlans, coupons, createCoupon, removeCoupon }) 
 
           <div className="space-y-2">
             {coupons.length === 0 && <p className="text-xs text-gray-400 italic">Ningún cupón creado todavía.</p>}
-            {coupons.map((c) => (
-              <div key={c.id} className="rounded-xl p-3" style={{ background: "#F5F6F9" }}>
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="min-w-0">
-                    <p className="font-bold text-sm mono">{c.code}</p>
-                    <p className="text-xs" style={{ color: "#6B7688" }}>{c.discountPct}% en {planName(c.planId)}</p>
+            {coupons.map((c) => {
+              const status = couponStatus(c);
+              const canShare = c.usedCount < c.maxUses && !(c.expiresAt && c.expiresAt <= Date.now());
+              return (
+                <div key={c.id} className="rounded-xl p-3" style={{ background: "#F5F6F9" }}>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="min-w-0">
+                      <p className="font-bold text-sm mono">{c.code}</p>
+                      <p className="text-xs" style={{ color: "#6B7688" }}>
+                        {c.discountPct}% en {planName(c.planId)}
+                        {c.expiresAt ? ` · vence ${formatDateHuman(new Date(c.expiresAt).toISOString().slice(0, 10))}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-bold whitespace-nowrap" style={{ background: status.bg, color: status.fg }}>
+                        {status.label}
+                      </span>
+                      {canShare && (
+                        <button onClick={() => setQrFor((id) => (id === c.id ? null : c.id))} className="text-xs font-semibold underline flex items-center gap-1" style={{ color: COLORS.court }}>
+                          <QrCode size={13} /> QR
+                        </button>
+                      )}
+                      {c.usedCount === 0 && (
+                        <button onClick={() => removeCoupon(c.id)} title="Borrar cupón" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold whitespace-nowrap" style={{ background: c.used ? "#DCEBD5" : "#FBF3E4", color: c.used ? COLORS.courtDark : "#8A5A16" }}>
-                      {c.used ? "Usado" : "Disponible"}
-                    </span>
-                    {!c.used && (
-                      <button onClick={() => setQrFor((id) => (id === c.id ? null : c.id))} className="text-xs font-semibold underline flex items-center gap-1" style={{ color: COLORS.court }}>
-                        <QrCode size={13} /> QR
-                      </button>
-                    )}
-                    {!c.used && (
-                      <button onClick={() => removeCoupon(c.id)} title="Borrar cupón" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
-                    )}
-                  </div>
+                  {qrFor === c.id && <CouponQR code={c.code} />}
                 </div>
-                {qrFor === c.id && <CouponQR code={c.code} />}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}
