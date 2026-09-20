@@ -1427,6 +1427,18 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 // Planificar. Si `plan.reschedule` está activo, primero desbloquea (en el clon, nada más) los
 // partidos que ya estaban planificados y calzan con la selección, para que la vista previa
 // refleje que sí se van a volver a mezclar.
+// v2.86.1 -- buildSchedule/"Limpiar día" solo deciden día/hora/cancha/fijado de cada partido.
+// Para guardar eso NO se debe reenviar la categoría entera calculada sobre datos viejos (así se
+// pisaban inscripciones y marcadores que otro admin acababa de guardar): se aplican solo esos
+// cuatro campos sobre los partidos FRESCOS que devuelve updateCategory, por id de partido.
+function mergeScheduleFields(freshMatches, scheduledMatches) {
+  const byId = new Map(scheduledMatches.map((m) => [m.id, m]));
+  return freshMatches.map((m) => {
+    const s = byId.get(m.id);
+    return s ? { ...m, day: s.day, time: s.time, courtId: s.courtId, locked: s.locked } : m;
+  });
+}
+
 function previewSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDuration, breakM, occupiedKeys, plan) {
   const clone = structuredClone(categories);
   if (plan?.reschedule && plan.categoryIds?.length) {
@@ -1519,7 +1531,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.86.0";
+const APP_VERSION = "2.86.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2355,6 +2367,7 @@ export default function PickleballTournamentApp() {
     pointsTarget: r.points_target ?? 11, scoringType: r.scoring_type || "estandar", roundFormats: r.round_formats || {},
     teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
     drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
+    rev: r.rev || 0,
   });
   // `categories` trae TODAS las categorías de TODOS los torneos del club (no se filtra en la
   // query) -- necesario para que occupiedKeys (más abajo) bloquee canchas cruzando torneos.
@@ -2495,15 +2508,47 @@ export default function PickleballTournamentApp() {
     }
     const conflict = !error && expectedRev != null && !upsert && (!data || data.length === 0);
     const next = { ...pendingCategoryWritesRef.current };
-    if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert }; }
+    if (error) { console.error("persistCategoryWrite:", error.message); next[id] = { fields, upsert, baseRev: expectedRev }; }
     else if (!conflict) delete next[id];
     pendingCategoryWritesRef.current = next;
     saveCache("pendingCategoryWrites", next);
     setPendingCategoryCount(Object.keys(next).length);
     return { error: error?.message || null, conflict };
   };
+  // v2.86.1 -- INCIDENTE REAL (dos admins a la vez, se perdieron inscripciones): antes esto
+  // reenviaba la fila COMPLETA vieja sin condición alguna, así que un cambio hecho sin señal
+  // pisaba lo que otra persona hubiera guardado mientras tanto. Ahora cada entrada de la cola
+  // recuerda el `rev` sobre el que se hizo (`baseRev`) y el reintento solo aplica si esa fila
+  // sigue en ese mismo `rev`. Si no -- otra persona guardó en el medio -- NO se sobrescribe: se
+  // descarta ese cambio pendiente, se carga la versión actual y se avisa para repetirlo.
+  const flushingIdsRef = useRef(new Set());
+  const dropStalePendingWrite = async (id, fields) => {
+    const next = { ...pendingCategoryWritesRef.current };
+    delete next[id];
+    pendingCategoryWritesRef.current = next;
+    saveCache("pendingCategoryWrites", next);
+    setPendingCategoryCount(Object.keys(next).length);
+    const { data } = await supabase.from("categories").select("*").eq("id", id).single();
+    if (!data) return;
+    setCategories((prev) => prev.map((c) => (c.id === id ? mapCategoryRow(data) : c)));
+    // Un guardado que venció por tiempo pero SÍ llegó a Supabase también termina acá (el `rev`
+    // ya subió por nuestra propia escritura) -- si lo guardado ya es idéntico a lo pendiente,
+    // no hay nada que avisar.
+    const same = ["teams", "waitlist", "groups", "matches"].every((k) => JSON.stringify(data[k] || []) === JSON.stringify(fields?.[k] || []));
+    if (!same) alert("Un cambio que hiciste sin conexión NO se pudo subir porque otra persona modificó esa misma categoría mientras tanto. Para no pisar su trabajo se cargó la versión actual -- revisa y repite lo que hiciste.");
+  };
   const flushPendingCategoryWrites = () => {
-    Object.entries(pendingCategoryWritesRef.current).forEach(([id, { fields, upsert }]) => persistCategoryWrite(id, fields, upsert));
+    Object.entries(pendingCategoryWritesRef.current).forEach(async ([id, { fields, upsert, baseRev }]) => {
+      if (flushingIdsRef.current.has(id)) return;
+      flushingIdsRef.current.add(id);
+      try {
+        if (baseRev == null) { await dropStalePendingWrite(id, fields); return; }
+        const result = await persistCategoryWrite(id, fields, upsert, baseRev);
+        if (result?.conflict) await dropStalePendingWrite(id, fields);
+      } finally {
+        flushingIdsRef.current.delete(id);
+      }
+    });
   };
   // Reintenta la cola sola: al recuperar señal (evento "online" del navegador) y de respaldo
   // cada 20s -- "online" no siempre dispara de forma confiable (wifi "conectado" pero sin
@@ -2582,7 +2627,13 @@ export default function PickleballTournamentApp() {
     if (!current) return { error: "Esta categoría ya no existe." };
     const updated = updater({ ...current });
     setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
-    const expectedRev = freshRow ? (freshRow.rev || 0) : null;
+    // v2.86.1 -- si la relectura falló o venció por tiempo (arriba), antes esto quedaba en `null`
+    // y el guardado salía SIN condición de `rev`: la fila completa vieja (teams incluidos) pisaba
+    // lo que otra persona hubiera guardado en el medio. Ahora, sin relectura, igual se condiciona
+    // al `rev` que este navegador conoce -- si otro admin ya guardó, el UPDATE no aplica, se
+    // detecta como `conflict` y se reintenta releyendo (o, sin señal, queda en la cola con su
+    // `baseRev` -- ver flushPendingCategoryWrites).
+    const expectedRev = freshRow ? (freshRow.rev || 0) : (current.rev ?? null);
     const result = await persistCategoryWrite(id, {
       name: updated.name, max_teams: updated.maxTeams, min_teams: updated.minTeams, seed_mode: updated.seedMode,
       best_of: updated.bestOf, bracket_size: updated.bracketSize, format: updated.format,
@@ -2592,6 +2643,9 @@ export default function PickleballTournamentApp() {
     }, false, expectedRev);
     if (result?.conflict && attempt < 5) return updateCategory(id, updater, attempt + 1);
     if (result?.conflict) return { error: "Dos personas guardaron esto al mismo tiempo -- intenta de nuevo." };
+    if (!result?.error && expectedRev != null) {
+      setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, rev: expectedRev + 1 } : c)));
+    }
     return result;
   };
 
@@ -2667,13 +2721,17 @@ export default function PickleballTournamentApp() {
     }));
     if (!touched) return;
     setCategories((prev) => prev.map((c) => clone.find((cc) => cc.id === c.id) || c));
-    clone.forEach((c) => persistCategoryWrite(c.id, {
-      tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
-      max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
-      points_target: c.pointsTarget, scoring_type: c.scoringType, round_formats: c.roundFormats,
-      draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
-      teams: c.teams, waitlist: c.waitlist, groups: c.groups, matches: c.matches,
-    }, true));
+    // v2.86.1 -- antes esto hacía un upsert de la fila COMPLETA (teams/waitlist/matches incluidos)
+    // tal como estaban en la copia local, SIN releer nada -- si otro admin se había inscrito o
+    // cargado un marcador después de que este navegador abrió la pantalla, se lo borraba. Ahora
+    // pasa por updateCategory (relee fresco, condiciona por `rev`) y solo aplica el vaciado de día.
+    clone.forEach((c) => {
+      if (!scoped.find((s) => s.id === c.id)?.matches.some((m) => m.day === date)) return;
+      updateCategory(c.id, (fresh) => {
+        fresh.matches = fresh.matches.map((m) => (m.day === date ? { ...m, day: null, time: null, courtId: null, locked: false } : m));
+        return fresh;
+      });
+    });
   };
 
   // Looks up a player's suggested ranking from the directory (read-only unless the organizer overrides it).
@@ -3906,16 +3964,22 @@ export default function PickleballTournamentApp() {
     // `c.teams`/`c.waitlist` tal como estaban en ese clon viejo pisaría cualquier inscripción
     // nueva que haya llegado mientras tanto. Por eso relee cada categoría FRESCA de Supabase
     // justo antes de escribir y manda ESE teams/waitlist, no el del clon.
-    clone.forEach(async (c) => {
-      const { data: freshRow } = await supabase.from("categories").select("teams, waitlist").eq("id", c.id).single();
-      persistCategoryWrite(c.id, {
-        tournament_id: tournament.id, name: c.name, modality: c.modality, gender: c.gender, level: c.level,
-        max_teams: c.maxTeams, min_teams: c.minTeams, seed_mode: c.seedMode, best_of: c.bestOf, bracket_size: c.bracketSize, format: c.format,
-        points_target: c.pointsTarget, scoring_type: c.scoringType, round_formats: c.roundFormats,
-        draw_generated: c.drawGenerated, groups_closed: c.groupsClosed,
-        teams: freshRow ? (freshRow.teams || []) : c.teams, waitlist: freshRow ? (freshRow.waitlist || []) : c.waitlist,
-        groups: c.groups, matches: c.matches,
-      }, true);
+    //
+    // v2.86.1 -- lo de arriba (releer teams/waitlist) no alcanzaba: seguía mandando `matches` y
+    // `groups` viejos del clon (pisando marcadores que otro admin acabara de cargar) y, al ser un
+    // upsert sin `rev`, tampoco avisaba a updateCategory de que la fila había cambiado. Ahora
+    // cada categoría pasa por updateCategory y solo se le aplican día/hora/cancha/fijado.
+    clone.forEach((c) => {
+      const orig = scoped.find((s) => s.id === c.id);
+      const changed = c.matches.some((m) => {
+        const o = orig?.matches.find((x) => x.id === m.id);
+        return !o || o.day !== m.day || o.time !== m.time || o.courtId !== m.courtId || !!o.locked !== !!m.locked;
+      });
+      if (!changed) return;
+      updateCategory(c.id, (fresh) => {
+        fresh.matches = mergeScheduleFields(fresh.matches, c.matches);
+        return fresh;
+      });
     });
   };
 
