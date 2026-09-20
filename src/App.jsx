@@ -1531,7 +1531,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.86.2";
+const APP_VERSION = "2.87.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2683,6 +2683,16 @@ export default function PickleballTournamentApp() {
       return c;
     });
   };
+  // "Cambiar juego" (v2.87.0) -- ver computeNextCalls. Solo toca las banderas de llamado
+  // (skipped/skippedAt/callCourtId/calledAt/checkedIn), NUNCA día/hora/cancha del calendario, y
+  // pasa por updateCategory (relee fresco + rev) igual que el resto de guardados de partidos.
+  const updateMatchCallFlags = (categoryId, matchId, patch) => {
+    if (currentUser?.role !== "admin") return;
+    updateCategory(categoryId, (c) => {
+      c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, ...patch } : m));
+      return c;
+    });
+  };
   // Reordenar arrastrando dentro de una cancha, o empujando en cadena entre dos (v2.73.0 /
   // v2.74.x) -- el partido soltado se inserta en el puesto elegido y TODOS los que quedaban
   // entre su horario viejo y el nuevo se corren un puesto para abrirle campo, en vez de
@@ -3347,6 +3357,7 @@ export default function PickleballTournamentApp() {
       const m = c.matches.find((mm) => mm.id === matchId);
       if (!m) return c;
       m.sets = sets;
+      m.skipped = false; m.callCourtId = null;
       let setsA = 0, setsB = 0;
       sets.forEach((s) => {
         if (Number(s.a) > Number(s.b)) setsA++;
@@ -4217,7 +4228,7 @@ export default function PickleballTournamentApp() {
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo} reflowSchedule={reflowSchedule}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
-                markMatchOnCourt={markMatchOnCourt}
+                markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
@@ -6815,7 +6826,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
     generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
-    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog,
   } = props;
@@ -6928,7 +6939,7 @@ function TorneosSection(props) {
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates}
-          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} role={role} />
+          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} role={role} />
       )}
 
       {subTab === "clasificacion" && (
@@ -10102,19 +10113,53 @@ function matchPlayerNames(m, cat) {
 // préstamo es el "ajuste de cancha" que pidió el club. Cada partido se reclama (`claimed`) en
 // cuanto se le asigna a una cancha para que dos canchas nunca se disputen el mismo próximo
 // turno en la misma pasada.
+//
+// v2.87.0, a pedido del club ("cambiar juego" cuando alguien no llegó): un partido puede quedar
+// "en espera" (`skipped`, con `skippedAt`) -- sale de la cancha y de la cola normal, y sube el
+// siguiente. Los partidos en espera NO se pierden: se listan aparte, siempre arriba y por orden
+// de salto (ver computeWaitingMatches), y el admin los "llama" a una cancha puntual
+// (`callCourtId`, con `calledAt`) -- ahí se insertan como el siguiente de esa cancha, justo
+// detrás del que ya está jugando, SIN tocar su día/hora/cancha del calendario. Un partido que ya
+// está en cancha (`checkedIn`) nunca es desplazado por uno llamado ni por uno que vuelve a su turno.
+function isCalledMatch(m, validCourtIds) {
+  return !!m.callCourtId && !m.winnerId && !m.skipped && validCourtIds.has(m.callCourtId);
+}
+function isWaitingMatch(m, validCourtIds) {
+  return !m.winnerId && !isCalledMatch(m, validCourtIds) && !!m.skipped;
+}
+function computeWaitingMatches(categories, courts, day) {
+  const validCourtIds = new Set(courts.map((c) => c.id));
+  return categories.flatMap((c) => c.matches
+    .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId && isWaitingMatch(m, validCourtIds))
+    .map((m) => ({ ...m, __cat: c })))
+    .sort((a, b) => (a.skippedAt || 0) - (b.skippedAt || 0));
+}
 function computeNextCalls(categories, courts, day) {
+  const validCourtIds = new Set(courts.map((c) => c.id));
   const todays = categories.flatMap((c) => c.matches
     .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId)
-    .map((m) => ({ ...m, __cat: c })));
+    .map((m) => ({ ...m, __cat: c })))
+    .filter((m) => !isWaitingMatch(m, validCourtIds));
 
-  const byCourt = {};
-  todays.forEach((m) => { (byCourt[m.courtId] = byCourt[m.courtId] || []).push(m); });
-  Object.values(byCourt).forEach((list) => list.sort((a, b) => a.time.localeCompare(b.time)));
+  // Cola de cada cancha: [el que ya está en cancha (`checkedIn`), si lo hay] + [los llamados a
+  // esta cancha, por orden de llamado] + [el resto de los suyos, por hora]. O sea: un llamado
+  // pasa DELANTE de cualquier partido que todavía no entró a cancha, y DETRÁS del que ya está
+  // jugando.
+  const queueByCourt = {};
+  courts.forEach((court) => {
+    const own = todays.filter((m) => m.courtId === court.id && !isCalledMatch(m, validCourtIds))
+      .sort((a, b) => a.time.localeCompare(b.time));
+    const calls = todays.filter((m) => isCalledMatch(m, validCourtIds) && m.callCourtId === court.id)
+      .sort((a, b) => (a.calledAt || 0) - (b.calledAt || 0));
+    const unplayed = own.filter((m) => !m.winnerId);
+    const head = unplayed.find((m) => m.checkedIn) || null;
+    queueByCourt[court.id] = [...(head ? [head] : []), ...calls, ...unplayed.filter((m) => m !== head)];
+  });
 
   const currentByCourt = {};
-  Object.entries(byCourt).forEach(([courtId, list]) => {
-    const current = list.find((m) => !m.winnerId);
-    if (current) currentByCourt[courtId] = current;
+  courts.forEach((court) => {
+    const first = queueByCourt[court.id][0];
+    if (first) currentByCourt[court.id] = isCalledMatch(first, validCourtIds) ? { ...first, courtId: court.id } : first;
   });
 
   const busy = new Set();
@@ -10122,7 +10167,7 @@ function computeNextCalls(categories, courts, day) {
 
   const currentIds = new Set(Object.values(currentByCourt).map((m) => m.id));
   const courtOrder = {}; courts.forEach((c, i) => (courtOrder[c.id] = i));
-  const pool = chronoSort(todays.filter((m) => !m.winnerId && !currentIds.has(m.id)), courtOrder);
+  const pool = chronoSort(todays.filter((m) => !m.winnerId && !isCalledMatch(m, validCourtIds) && !currentIds.has(m.id)), courtOrder);
   const claimed = new Set();
 
   return courts.map((court) => {
@@ -10133,7 +10178,7 @@ function computeNextCalls(categories, courts, day) {
     const busyForThisCourt = new Set(busy);
     if (current) matchPlayerNames(current, current.__cat).forEach((p) => busyForThisCourt.delete(p));
 
-    const own = (byCourt[court.id] || []).find((m) => !m.winnerId && m.id !== current?.id);
+    const own = queueByCourt[court.id][1] || null;
     let next = null;
     if (own && !claimed.has(own.id) && matchPlayerNames(own, own.__cat).every((p) => !busyForThisCourt.has(p))) {
       next = own;
@@ -10141,7 +10186,8 @@ function computeNextCalls(categories, courts, day) {
       next = pool.find((m) => !claimed.has(m.id) && matchPlayerNames(m, m.__cat).every((p) => !busyForThisCourt.has(p))) || null;
     }
     if (next) claimed.add(next.id);
-    return { court, current, next, borrowed: !!(next && next.courtId !== court.id) };
+    const called = !!(next && isCalledMatch(next, validCourtIds));
+    return { court, current, next, borrowed: !!(next && next.courtId !== court.id) && !called, called };
   });
 }
 
@@ -10217,7 +10263,7 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, role }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -10243,6 +10289,8 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // de categoría activo), porque las canchas se comparten entre categorías y el llamado tiene
   // que tener en cuenta a todo el mundo, no solo a la categoría que se está mirando ahora mismo.
   const nextCalls = useMemo(() => computeNextCalls(categories, courts, day), [categories, courts, day]);
+  // v2.87.0: partidos "en espera" (cambiar juego) -- siempre arriba del panel, por orden de salto.
+  const waitingMatches = useMemo(() => computeWaitingMatches(categories, courts, day), [categories, courts, day]);
   // v2.79.0: número de partido único por día, igual en la planilla impresa, en esta lista y en
   // "En cancha ahora" -- ver buildMatchIndex.
   const matchIndex = useMemo(() => buildMatchIndex(categories, courts, day), [categories, courts, day]);
@@ -10263,7 +10311,9 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     return Math.round((now - scheduled) / 60000);
   };
   const worstDelayMin = useMemo(() => {
-    const delays = nextCalls.map((nc) => (nc.current ? matchDelayMinutes(nc.current) : null)).filter((d) => d !== null);
+    // Un partido llamado a otra cancha conserva su hora original del calendario (a propósito, no
+    // se reprograma) -- contarlo inflaría el "retraso" con un atraso que no es del torneo.
+    const delays = nextCalls.map((nc) => (nc.current && !nc.current.callCourtId ? matchDelayMinutes(nc.current) : null)).filter((d) => d !== null);
     return delays.length ? Math.max(...delays) : null;
   }, [nextCalls, now]);
   const formatDelay = (min) => {
@@ -10344,7 +10394,42 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         )}
       </div>
       <div className="space-y-3 mt-2">
-        {nextCalls.map(({ court, current, next, borrowed }) => (
+        {waitingMatches.length > 0 && (
+          <div className="rounded-lg p-2.5" style={{ background: "#FBF3E4", border: "1.5px solid #C97A1B" }}>
+            <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: "#8A5A16" }}>
+              En espera ({waitingMatches.length}) -- tienen prioridad
+            </p>
+            <div className="space-y-2">
+              {waitingMatches.map((m) => (
+                <div key={m.id} className="rounded-lg p-2" style={{ background: "#fff", border: `1px solid ${COLORS.line}` }}>
+                  <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
+                    {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
+                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(m.__cat)}</span>
+                    <span>{teamLabelOf(m, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(m, "B")}</span>
+                  </div>
+                  <div className="flex items-center flex-wrap gap-1.5 mt-1.5">
+                    <span className="text-[10px] font-semibold text-gray-500">Llamar en:</span>
+                    {courts.map((c) => (
+                      <button key={c.id}
+                        onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() })}
+                        style={{ background: COLORS.court, color: "#fff" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                        {c.name}
+                      </button>
+                    ))}
+                    <button onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: null })}
+                      style={{ color: COLORS.court }} className="text-[11px] font-bold underline ml-1">
+                      Volver a su turno
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] mt-1.5" style={{ color: "#8A5A16" }}>
+              "Llamar en" lo pone de primero en esa cancha (si ya hay un partido dentro de la cancha, sigue detrás de él). No cambia su horario del calendario.
+            </p>
+          </div>
+        )}
+        {nextCalls.map(({ court, current, next, borrowed, called }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
             {current && !current.checkedIn ? (
@@ -10362,10 +10447,19 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                     <span>{teamLabelOf(current, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(current, "B")}</span>
                   </div>
                   {isAdmin && (
-                    <button onClick={() => markMatchOnCourt(current.__cat.id, current.id)}
-                      style={{ background: "#C97A1B", color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
-                      En cancha
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => {
+                        if (!window.confirm("¿Cambiar este juego? Sale de la cancha y sube el siguiente. NO se pierde: queda en \"En espera\", arriba de la lista, para llamarlo cuando lleguen.")) return;
+                        updateMatchCallFlags(current.__cat.id, current.id, { skipped: true, skippedAt: Date.now(), callCourtId: null, checkedIn: false });
+                      }}
+                        style={{ background: "#fff", color: "#8A5A16", border: "1.5px solid #C97A1B" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                        Cambiar juego
+                      </button>
+                      <button onClick={() => markMatchOnCourt(current.__cat.id, current.id)}
+                        style={{ background: "#C97A1B", color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                        En cancha
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -10383,6 +10477,17 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                   <span className="text-[11px]">Sigue: #{matchIndex.get(next.id)} -- {teamLabelOf(next, "A")} vs {teamLabelOf(next, "B")}</span>
                   {borrowed && (
                     <span className="text-[8px] font-extrabold px-1 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#FBF3E4", color: "#8A5A16" }}>Ajuste</span>
+                  )}
+                  {called && (
+                    <>
+                      <span className="text-[8px] font-extrabold px-1 py-0.5 rounded-full uppercase tracking-wide" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Llamado</span>
+                      {isAdmin && (
+                        <button onClick={() => updateMatchCallFlags(next.__cat.id, next.id, { skipped: true, skippedAt: Date.now(), callCourtId: null })}
+                          style={{ color: COLORS.court }} className="text-[10px] font-bold underline">
+                          Devolver a espera
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
                 {borrowed && <p className="text-[10px]">Estaba en {courts.find((c) => c.id === next.courtId)?.name}</p>}
