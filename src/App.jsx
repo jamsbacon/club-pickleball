@@ -1519,7 +1519,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.85.4";
+const APP_VERSION = "2.86.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -10088,6 +10088,10 @@ function computeNextCalls(categories, courts, day) {
 // sobre `cat.matches`), sin la carga de marcador ni el botón de "cerrar fase de grupos" -- eso
 // sigue viviendo en Resultados, esto es solo para mirar cómo va cada categoría de un vistazo.
 function ClasificacionTab({ categories }) {
+  // v2.86.0, a pedido del club: botones para ver una categoría a la vez (o "Todas"). Arranca en
+  // la primera categoría -- con 9 categorías, "todas juntas" era un scroll larguísimo.
+  const [filterId, setFilterId] = useState(null);
+
   if (categories.length === 0) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Crea una categoría primero.</p></Card>;
   }
@@ -10098,9 +10102,20 @@ function ClasificacionTab({ categories }) {
     return <Card className="mt-2"><p className="text-sm text-gray-400">Todavía ninguna categoría tiene un draw generado -- las clasificaciones aparecen acá apenas empiecen los partidos.</p></Card>;
   }
 
+  const activeId = filterId === "all" || withDraw.some((c) => c.id === filterId) ? filterId : withDraw[0].id;
+  const visible = activeId === "all" ? withDraw : withDraw.filter((c) => c.id === activeId);
+
   return (
     <div className="mt-2 space-y-5">
-      {withDraw.map((cat) => {
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setFilterId("all")} className="px-3 py-1.5 rounded-full text-xs font-semibold"
+          style={{ background: activeId === "all" ? COLORS.court : "#EAEEF5", color: activeId === "all" ? "#fff" : COLORS.ink }}>Todas</button>
+        {withDraw.map((c) => (
+          <button key={c.id} onClick={() => setFilterId(c.id)} className="px-3 py-1.5 rounded-full text-xs font-semibold"
+            style={{ background: activeId === c.id ? COLORS.court : "#EAEEF5", color: activeId === c.id ? "#fff" : COLORS.ink }}>{c.name}</button>
+        ))}
+      </div>
+      {visible.map((cat) => {
         const isDouble = cat.format === "doble_eliminacion";
         const hasSingleBracket = cat.matches.some((m) => m.phase === "bracket");
         return (
