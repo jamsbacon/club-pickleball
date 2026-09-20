@@ -1531,7 +1531,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.86.1";
+const APP_VERSION = "2.86.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -9438,7 +9438,7 @@ function CalendarioTab({ categories, courts, runScheduler, reflowSchedule, sched
                                   }}>
                                   <div className={`h-full p-2 text-xs rounded-lg overflow-hidden ${conflictMsg ? "match-conflict" : ""}`}
                                     style={{
-                                      background: conflictMsg ? "#FDEAEA" : (isSelected ? "#FBF3E4" : cc.bg),
+                                      background: isSelected ? "#FBF3E4" : cc.bg, // un choque conserva el color de su categoría -- solo suma la franja roja y el borde
                                       opacity: isDragging ? 0.35 : 1,
                                       boxShadow: isOver ? "0 4px 12px rgba(22,50,92,0.35), inset 0 0 0 2px #1B5FA0"
                                         : conflictMsg ? undefined // lo pone la animación conflictPulse
