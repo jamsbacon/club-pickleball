@@ -1400,6 +1400,27 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
     slotIndex++;
   }
 
+  // v2.88.0 -- INCIDENTE REAL: el "#" de cada partido (el mismo que la mesa técnica y los
+  // árbitros ven en la planilla impresa) se calculaba SOLO al vuelo, contando en orden
+  // cronológico (día+hora+cancha) cada vez que se dibujaba la pantalla -- ver el viejo
+  // buildMatchIndex. Un "Confirmar cambio de cancha" o cualquier otro reacomodo de horario
+  // corría ese orden y, con él, TODOS los números de ahí en adelante -- la planilla de papel
+  // dejaba de coincidir con lo que mostraba la app, y mesa técnica/árbitros se confundían.
+  // Ahora el número se asigna UNA sola vez, acá, apenas un partido consigue día/hora/cancha por
+  // primera vez -- se guarda en el propio partido (`matchNumber`) y de ahí en adelante ningún
+  // reacomodo (moveMatch, reorderColumn, "Confirmar cambio de cancha") lo vuelve a tocar, porque
+  // ninguno de esos escribe este campo. Los partidos que ya tenían número lo conservan tal
+  // cual -- los nuevos de esta corrida se numeran a partir del máximo ya usado ESE día, en el
+  // orden en que les tocó turno acá arriba, así que un llamado tardío nunca le roba el número a
+  // uno que ya estaba impreso.
+  const courtOrder = {}; courts.forEach((cc, i) => (courtOrder[cc.id] = i));
+  dates.forEach((date) => {
+    const dayMatches = categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === date));
+    let maxNum = 0;
+    dayMatches.forEach((m) => { if (m.matchNumber > maxNum) maxNum = m.matchNumber; });
+    chronoSort(dayMatches.filter((m) => m.matchNumber == null), courtOrder).forEach((m) => { m.matchNumber = ++maxNum; });
+  });
+
   const unscheduled = queue.length;
 
   const allScheduled = categories.flatMap((c) => c.matches).filter((m) => m.day);
@@ -1431,11 +1452,14 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
 // Para guardar eso NO se debe reenviar la categoría entera calculada sobre datos viejos (así se
 // pisaban inscripciones y marcadores que otro admin acababa de guardar): se aplican solo esos
 // cuatro campos sobre los partidos FRESCOS que devuelve updateCategory, por id de partido.
+// v2.88.0: agrega matchNumber -- buildSchedule puede haberle asignado uno recién al partido en
+// el clon (primera vez que consigue horario); si el fresco ya traía uno propio (alguien más lo
+// persistió en el medio), ese gana siempre, nunca se pisa uno ya asignado.
 function mergeScheduleFields(freshMatches, scheduledMatches) {
   const byId = new Map(scheduledMatches.map((m) => [m.id, m]));
   return freshMatches.map((m) => {
     const s = byId.get(m.id);
-    return s ? { ...m, day: s.day, time: s.time, courtId: s.courtId, locked: s.locked } : m;
+    return s ? { ...m, day: s.day, time: s.time, courtId: s.courtId, locked: s.locked, matchNumber: m.matchNumber ?? s.matchNumber } : m;
   });
 }
 
@@ -1531,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.87.0";
+const APP_VERSION = "2.88.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -10073,17 +10097,28 @@ function chronoSort(matches, courtOrder) {
 // Número de partido único por día (v2.79.0, a pedido del club) -- el MISMO número tiene que
 // verse en la planilla impresa que llevan los supervisores de cancha, en la lista "Cargar
 // resultados" y en "En cancha ahora", sea cual sea la categoría que se esté mirando en
-// pantalla en ese momento. Por eso NO se numera 1..N sobre la lista ya filtrada de cada vista
-// (eso le daría un número distinto al mismo partido según si se está viendo "Todas" o una sola
-// categoría) -- se numera UNA vez sobre TODOS los partidos jugables del día (todas las
-// categorías juntas, mismo chronoSort que ya usa el tablero de Calendario) y cada vista busca
-// el número de cada partido puntual en este mapa en vez de recontar desde cero.
+// pantalla en ese momento.
+//
+// v2.88.0 -- INCIDENTE REAL: este número se recontaba desde cero en cada render, así que un
+// reacomodo de horario (ej. "Confirmar cambio de cancha") corría el orden cronológico y con él
+// TODOS los números de ahí en adelante -- la planilla ya impresa dejaba de coincidir con la
+// app. Ahora el número real vive en el propio partido (`matchNumber`, asignado una sola vez por
+// buildSchedule/runScheduler la primera vez que consigue día/hora/cancha -- ver ese comentario)
+// y se conserva tal cual pase lo que pase después. Este mapa solo lee ese valor guardado; el
+// recuento cronológico de acá abajo queda SOLO como respaldo para un partido que por algún
+// motivo nunca pasó por el planificador (ej. movido a mano sin haber corrido nunca "Generar
+// calendario") y todavía no tiene número propio.
 function buildMatchIndex(categories, courts, day) {
   const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
   const todays = categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day));
-  const sorted = chronoSort(todays, courtOrder);
   const map = new Map();
-  sorted.forEach((m, i) => map.set(m.id, i + 1));
+  let maxNum = 0;
+  const missing = [];
+  todays.forEach((m) => {
+    if (m.matchNumber != null) { map.set(m.id, m.matchNumber); if (m.matchNumber > maxNum) maxNum = m.matchNumber; }
+    else missing.push(m);
+  });
+  chronoSort(missing, courtOrder).forEach((m) => map.set(m.id, ++maxNum));
   return map;
 }
 
