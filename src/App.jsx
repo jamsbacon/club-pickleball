@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.88.0";
+const APP_VERSION = "2.89.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3866,6 +3866,30 @@ export default function PickleballTournamentApp() {
     }
   };
 
+  // v2.89.0, a pedido del club: el admin puede asignarle una membresía a un socio directo desde
+  // Usuarios, sin que ese socio tenga que pasar por su propio checkout de Membresías -- pensado
+  // para cuando alguien paga en persona (efectivo en el club) o el admin quiere darle un plan de
+  // cortesía. Mismo modelo de datos que subscribeToPlan (una fila en `subscriptions`, la misma
+  // tabla que ya alimenta Finanzas/EstadisticasTab vía buildTransactions), la única diferencia
+  // real es que `user_id` es el socio elegido, no currentUser, y que el ADMIN declara el estado
+  // de pago directo (PaymentStatusSelect) en vez de que arranque "pendiente" como un checkout de
+  // verdad -- ya está frente al pago o decidiendo dar el plan gratis, no hace falta el paso extra
+  // de "verificar" algo que él mismo acaba de registrar. `checkout.priceUsd === 0` (gratis)
+  // siempre fuerza "confirmada", igual que en cualquier otro checkout $0 de la app.
+  const adminAssignPlan = async (targetUserId, planId, checkout) => {
+    const isFree = Number(checkout.priceUsd) === 0;
+    const paymentStatus = isFree ? "confirmada" : checkout.paymentStatus;
+    const { data: row, error } = await supabase.from("subscriptions").insert({
+      plan_id: planId, user_id: targetUserId, payment_method: isFree ? null : checkout.paymentMethod,
+      reference: isFree ? null : (checkout.reference || null), proof_name: null,
+      price_usd: checkout.priceUsd, price_bs: checkout.priceBs, payment_status: paymentStatus,
+    }).select().single();
+    if (error) { console.error("adminAssignPlan:", error.message); return { error: error.message }; }
+    setSubscriptions((p) => [...p, mapSubscriptionRow(row)]);
+    if (paymentStatus === "confirmada") await activateProfilePlan(targetUserId, planId);
+    return {};
+  };
+
   // El admin promueve/degrada el rol de OTRO socio (v2.47.0, pestaña Usuarios) -- optimista en
   // el estado local, luego el UPDATE real. Esto SÍ pasa el trigger profiles_prevent_role_self_
   // escalation (a diferencia de un UPDATE hecho por fuera de la app -- SQL directo, Table
@@ -4193,8 +4217,8 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "usuarios" && role === "admin" && (
-            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} setUserRole={setUserRole} currentUser={currentUser}
-              deleteUserAccount={deleteUserAccount} categories={categories} bookings={bookings} openPlays={openPlays} classes={classes} />
+            <UsuariosTab users={users} subscriptions={subscriptions} membershipPlans={membershipPlans} setSubscriptionPaymentStatus={setSubscriptionPaymentStatus} adminAssignPlan={adminAssignPlan} setUserRole={setUserRole} currentUser={currentUser}
+              deleteUserAccount={deleteUserAccount} categories={categories} bookings={bookings} openPlays={openPlays} classes={classes} club={club} />
           )}
 
           {effectiveTab === "estadisticas" && role === "admin" && (
@@ -6372,7 +6396,7 @@ function PagosTab({ tournaments, categories, openPlays, classes, setTeamPaymentS
    verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
    es el historial de altas, no se usa aquí más que para el contador de arriba.
    ========================================================================= */
-function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, setUserRole, currentUser, deleteUserAccount, categories, bookings, openPlays, classes }) {
+function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, adminAssignPlan, setUserRole, currentUser, deleteUserAccount, categories, bookings, openPlays, classes, club }) {
   const [query, setQuery] = useState("");
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -6418,6 +6442,14 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
     setDeleting(false);
     if (result?.error) { setDeleteError(result.error); return; }
     setDeleteTarget(null);
+  };
+
+  // v2.89.0: asignar membresía a mano -- ver AssignMembershipModal/adminAssignPlan.
+  const [assignTarget, setAssignTarget] = useState(null);
+  const confirmAssignPlan = async (planId, checkout) => {
+    const result = await adminAssignPlan(assignTarget.id, planId, checkout);
+    if (!result?.error) setAssignTarget(null);
+    return result;
   };
 
   const planFor = (u) => (membershipPlans.find((p) => p.id === u.planId) || membershipPlans[0] || null);
@@ -6520,9 +6552,11 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                       )}
                     </td>
                     <td className="py-2 pr-3">
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
+                      <button onClick={() => setAssignTarget(u)} title="Asignar membresía"
+                        className="px-2 py-0.5 rounded-full text-[11px] font-bold hover:opacity-80"
+                        style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
                         {plan?.name || "Sin membresía"}{isExpired ? " (vencida)" : ""}
-                      </span>
+                      </button>
                     </td>
                     <td className="py-2 pr-3 text-gray-500">{u.createdAt ? formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10)) : "—"}</td>
                     <td className="py-2 pr-3">
@@ -6570,6 +6604,11 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
           ].filter(Boolean).join(" ")}
           options={[{ label: deleting ? "Eliminando…" : "Eliminar permanentemente", variant: "danger", onClick: confirmDeleteUser }]}
           onCancel={() => { setDeleteTarget(null); setDeleteError(""); }} />
+      )}
+
+      {assignTarget && (
+        <AssignMembershipModal user={assignTarget} membershipPlans={membershipPlans} club={club}
+          onConfirm={confirmAssignPlan} onCancel={() => setAssignTarget(null)} />
       )}
     </div>
   );
@@ -10981,6 +11020,105 @@ function CheckoutPanel({ title, baseUsd, discountPct = 0, club, requireName = tr
         {onCancel && <button onClick={onCancel} className="px-4 rounded-xl text-sm text-gray-400">Cancelar</button>}
       </div>
     </div>
+  );
+}
+
+// v2.89.0, a pedido del club: asignar membresía desde Usuarios, tipo checkout pero del lado del
+// admin -- a diferencia de CheckoutPanel (precio fijo del plan, comprobante obligatorio para
+// Pago Móvil, arranca "pendiente" hasta que alguien lo verifique), acá el admin escribe el monto
+// que de verdad cobró (puede ser distinto al de lista -- cortesías, ajustes) y declara el estado
+// de pago él mismo con PaymentStatusSelect, porque es él quien está registrando algo que ya
+// pasó, no un jugador esperando que se lo confirmen. "Asignar gratis" pone el monto en $0 y
+// oculta método/estado -- ese caso siempre queda "confirmada" (mismo criterio que cualquier
+// checkout $0 de la app, ver initialPaymentStatus).
+function AssignMembershipModal({ user, membershipPlans, club, onConfirm, onCancel }) {
+  const paidPlans = membershipPlans.filter((p) => (p.monthlyPrice || 0) > 0);
+  const [planId, setPlanId] = useState(user.planId || paidPlans[0]?.id || membershipPlans[0]?.id || "");
+  const [free, setFree] = useState(false);
+  const [priceUsd, setPriceUsd] = useState(() => membershipPlans.find((p) => p.id === (user.planId || paidPlans[0]?.id))?.monthlyPrice || 0);
+  const [method, setMethod] = useState("efectivo");
+  const [reference, setReference] = useState("");
+  const [status, setStatus] = useState("confirmada");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const plan = membershipPlans.find((p) => p.id === planId);
+  const bs = (Number(priceUsd) || 0) * (Number(club.bsPerUsd) || 0);
+  const canConfirm = !!planId && (free || Number(priceUsd) >= 0);
+
+  const submit = async () => {
+    if (!canConfirm || saving) return;
+    setSaving(true); setError("");
+    const result = await onConfirm(planId, {
+      priceUsd: free ? 0 : Number(priceUsd) || 0, priceBs: free ? 0 : bs,
+      paymentMethod: method, reference, paymentStatus: status,
+    });
+    setSaving(false);
+    if (result?.error) setError("No se pudo asignar -- revisa tu conexión e intenta de nuevo.");
+  };
+
+  return (
+    <Modal onClose={onCancel} maxWidth={440}>
+      <div className="p-5">
+        <p className="font-bold text-sm mb-1" style={{ color: COLORS.courtDark }}>Asignar membresía a {user.name}</p>
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>
+          {user.planId ? `Actualmente: ${membershipPlans.find((p) => p.id === user.planId)?.name || "un plan"}.` : "Actualmente sin membresía."} Esto reemplaza el checkout normal -- úsalo para pagos en persona o cortesías.
+        </p>
+
+        <div className="mb-3">
+          <Label>Plan</Label>
+          <select style={inputStyle} value={planId} onChange={(e) => { setPlanId(e.target.value); const p = membershipPlans.find((pp) => pp.id === e.target.value); setPriceUsd(p?.monthlyPrice || 0); }}>
+            {membershipPlans.map((p) => <option key={p.id} value={p.id}>{p.name}{p.monthlyPrice > 0 ? ` -- ${formatMoney(p.monthlyPrice)}/mes` : " -- Gratis"}</option>)}
+          </select>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm font-semibold mb-3 cursor-pointer" style={{ color: COLORS.ink }}>
+          <input type="checkbox" checked={free} onChange={(e) => setFree(e.target.checked)} />
+          Asignar gratis (cortesía)
+        </label>
+
+        {free ? (
+          <div className="text-xs px-3 py-2.5 rounded-lg flex items-center gap-1.5 mb-3" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>
+            <Check size={14} strokeWidth={3} /> Se activa de inmediato, sin ningún cobro.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <Label>Monto pagado (USD)</Label>
+                <input type="number" min={0} step="0.01" style={inputStyle} value={priceUsd} onChange={(e) => setPriceUsd(e.target.value)} />
+              </div>
+              <div>
+                <Label>≈ Bs</Label>
+                <input disabled style={{ ...inputStyle, background: "#F2F3F6", color: "#78829A" }} value={formatMoney(bs, "Bs. ")} />
+              </div>
+            </div>
+            <div className="mb-3">
+              <Label>Método de pago</Label>
+              <Segmented value={method} onChange={setMethod} options={[{ value: "efectivo", label: "Efectivo" }, { value: "movil", label: "Pago Móvil" }]} />
+            </div>
+            {method === "movil" && (
+              <div className="mb-3"><Label>N° de referencia (opcional)</Label><input style={inputStyle} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Últimos dígitos de la operación" /></div>
+            )}
+            <div className="mb-3">
+              <Label>Estado del pago</Label>
+              <div className="mt-1"><PaymentStatusSelect status={status} onChange={setStatus} /></div>
+            </div>
+          </>
+        )}
+
+        {error && <p className="text-xs mb-3" style={{ color: COLORS.clay }}>{error}</p>}
+
+        <div className="flex gap-2 mt-2">
+          <button disabled={!canConfirm || saving} onClick={submit}
+            style={{ background: canConfirm ? COLORS.clay : "#E5E5E5", color: canConfirm ? "#fff" : "#999" }}
+            className="flex-1 py-2.5 rounded-xl font-bold text-sm">
+            {saving ? "Asignando…" : "Asignar membresía"}
+          </button>
+          <button onClick={onCancel} className="px-4 rounded-xl text-sm text-gray-400">Cancelar</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
