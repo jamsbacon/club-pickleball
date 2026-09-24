@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.89.0";
+const APP_VERSION = "2.90.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3408,6 +3408,16 @@ export default function PickleballTournamentApp() {
     if (error) { console.error("createBooking:", error.message); return null; }
     const booking = mapBookingRow(row);
     setBookings((p) => [...p, booking]);
+    // v2.90.0, a pedido del club: mismo tipo "new_registration" que ya usan las inscripciones a
+    // torneo/Open Play/clase -- el servidor ya sabe mandarlo solo a los admins (menos a quien lo
+    // disparó, ver ADMIN_ONLY_TYPES/userIds en api/send-push.js), así que no hace falta tocar ese
+    // archivo para sumar este aviso.
+    const courtName = courts.find((c) => c.id === data.courtId)?.name || "una cancha";
+    sendPush("new_registration", {
+      title: "Nueva reserva",
+      body: `${data.userName || "Alguien"} reservó ${courtName} -- ${formatDateHuman(data.date)} ${formatTimeAmPm(minutesToTime(data.timeMin))}.`,
+      url: "/",
+    });
     return booking;
   };
   const cancelBooking = (id) => {
@@ -3848,6 +3858,16 @@ export default function PickleballTournamentApp() {
     if (error) { console.error("subscribeToPlan:", error.message); return; }
     setSubscriptions((p) => [...p, mapSubscriptionRow(row)]);
     if (paymentStatus === "confirmada") await activateProfilePlan(currentUser?.id, planId);
+    // v2.90.0, a pedido del club -- mismo tipo "new_registration" que el resto de avisos de
+    // "alguien se inscribió" (ver comentario en createBooking): el servidor ya lo manda solo a
+    // los admins. No se dispara para adminAssignPlan -- ese lo hace un admin a propósito, no
+    // tiene sentido avisarle a él mismo de su propia acción.
+    const planName = membershipPlans.find((p) => p.id === planId)?.name || "un plan";
+    sendPush("new_registration", {
+      title: "Nueva suscripción a membresía",
+      body: `${currentUser?.name || "Alguien"} se suscribió al plan "${planName}".`,
+      url: "/",
+    });
   };
 
   // Cambia el estado de pago de una suscripción (admin, Usuarios -- v2.37.0). A diferencia del
