@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.90.0";
+const APP_VERSION = "2.90.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2792,11 +2792,18 @@ export default function PickleballTournamentApp() {
       seed_mode: "ranking", best_of: 1, bracket_size: 4,
       teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
     }).select().single();
-    if (error) { console.error("addCategory:", error.message); return; }
+    if (error) {
+      // v2.90.1 -- antes solo iba a consola: al admin simplemente "no lo dejaba crear" sin ningún
+      // aviso (ej. el género "Libre" fallaba contra el CHECK de la columna). Ahora se ve el motivo.
+      console.error("addCategory:", error.message);
+      alert(`No se pudo crear la categoría: ${error.message}`);
+      return { error: error.message };
+    }
     const cat = mapCategoryRow(row);
     setCategories((p) => [...p, cat]);
     setActiveCatId(cat.id);
     setTab("torneos"); // "categorias" es una sub-pestaña de TorneosSection, no un tab de nivel superior
+    return {};
   };
 
   const removeCategory = (id) => {
@@ -7136,7 +7143,7 @@ function CategoriasTab({ categories, activeCat, setActiveCatId, addCategory, rem
 
       <div>
         {showNew ? (
-          <NewCategoryForm onCreate={(...args) => { addCategory(...args); setShowNew(false); }} onCancel={() => setShowNew(false)} />
+          <NewCategoryForm onCreate={async (...args) => { const r = await addCategory(...args); if (!r?.error) setShowNew(false); }} onCancel={() => setShowNew(false)} />
         ) : activeCat ? (
           <Card>
             <div className="flex items-start justify-between gap-3">
