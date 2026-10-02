@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.90.1";
+const APP_VERSION = "2.91.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12541,6 +12541,14 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
       // categorías todavía" con "hay categorías pero nadie se anotó aún" -- distinguir los
       // dos casos importa más ahora que hay varias tarjetas de torneo a la vez.
       const noCatsYet = tCats.length === 0;
+      // v2.91.0, a pedido del club: el contador de inscripciones solo se muestra una vez que
+      // llega al 30% del cupo TOTAL de jugadores del torneo (suma de categoryMaxPlayers de todas
+      // sus categorías -- ej. 50 duplas = 100 personas, se muestra desde 30) -- un "0
+      // inscripciones" o "3 inscripciones" al inicio le resta atractivo al torneo. Una categoría
+      // sin cupo definido no suma al total; si ninguna lo tiene no hay base para el 30% y no se
+      // muestra el contador.
+      const totalCapacity = tCats.reduce((s, c) => s + (categoryMaxPlayers(c) || 0), 0);
+      const showRegistrationCount = totalCapacity > 0 && registrationCount >= totalCapacity * 0.3;
       // Precio de inscripción (v2.33.0): antes decía "Ver detalles", sin ninguna cifra, a
       // diferencia de Open Play/Clase que sí muestran su precio en la card. Se usa el precio
       // de la 1ra categoría (tournamentRegPrice con catCount=1) como entrada -- "Desde" porque
@@ -12555,7 +12563,9 @@ function EventosTab({ club, courts, openPlays, classes, addOpenPlay, addClass, u
         // primer día.
         date: t.startDate, endDate: t.endDate, startTime: t.dailyStart, endTime: t.dailyEnd,
         price: entryPrice > 0 ? `Desde ${formatMoney(entryPrice)}` : "Gratis", image: t.image || null, recurring: false,
-        meta: { text: noCatsYet ? "Sin categorías aún" : `${registrationCount} inscripción${registrationCount === 1 ? "" : "es"}` },
+        meta: noCatsYet ? { text: "Sin categorías aún" }
+          : showRegistrationCount ? { text: `${registrationCount} inscripción${registrationCount === 1 ? "" : "es"}` }
+          : null,
         onClick: () => openTournament(t.id),
         // "Editar" un torneo YA es abrirlo -- Generalidades es la pantalla de edición del
         // admin, no hace falta un modo edición aparte como Open Play/Clase.
