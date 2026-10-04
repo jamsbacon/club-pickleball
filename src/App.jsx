@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.91.0";
+const APP_VERSION = "2.92.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1621,6 +1621,69 @@ const GENDER_LABELS = { masculino: "Masculino", femenino: "Femenino", mixto: "Mi
 // prioridad de cancha entre categorías -- ver comentario ahí).
 const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open", "Master (+50)"];
 
+// v2.92.0, a pedido del club: categoría "Master-Pro" -- cada dupla es 1 Master (50+ años) + 1 Pro
+// (por nivel DUPR). Solo existe como NIVEL de categoría de torneo (no aplica a Open Play/Clase,
+// por eso no vive en LEVEL_OPTIONS, que esas pantallas también usan); se agrega al final para no
+// mover el índice de ningún nivel existente (ver comentario de LEVEL_OPTIONS).
+// Cada jugador anotado lleva `role: "master" | "pro"` dentro de su objeto en `team.players`
+// (JSONB, sin migración). El cupo se cuenta POR ROL: `maxTeams` es cuántos Master Y cuántos Pro
+// caben (ej. 8 = 8 Master + 8 Pro = 8 duplas) -- no hay lista de espera en esta categoría, un rol
+// lleno rechaza la inscripción. `cat.proMinDupr` es el DUPR mínimo para anotarse como Pro.
+const MASTER_PRO_LEVEL = "Master-Pro";
+const CATEGORY_LEVEL_OPTIONS = [...LEVEL_OPTIONS, MASTER_PRO_LEVEL];
+const MASTER_MIN_AGE = 50;
+const MP_ROLE_LABELS = { master: "Master", pro: "Pro" };
+const isMasterPro = (cat) => cat?.level === MASTER_PRO_LEVEL;
+const oppositeMpRole = (role) => (role === "master" ? "pro" : role === "pro" ? "master" : null);
+
+function countMasterProRoles(cat) {
+  const out = { master: 0, pro: 0 };
+  (cat.teams || []).forEach((t) => (t.players || []).forEach((p) => { if (p.role in out) out[p.role]++; }));
+  return out;
+}
+
+function ageFromBirthDate(birthDate) {
+  if (!birthDate) return null;
+  const b = new Date(`${birthDate}T00:00:00`);
+  if (Number.isNaN(b.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  if (now.getMonth() < b.getMonth() || (now.getMonth() === b.getMonth() && now.getDate() < b.getDate())) age--;
+  return age;
+}
+
+// null si el jugador puede anotarse con ese rol; si no, el motivo. `profile` es su fila de
+// `users` (undefined = invitado sin cuenta que anota el admin a mano -- ahí no hay datos con qué
+// validar y se confía en el admin, mismo criterio de "si no se conoce, no se filtra" del resto
+// de la app). Master se valida por edad y Pro por DUPR mínimo; un jugador registrado sin DUPR
+// cargado NO puede anotarse como Pro (no hay forma de saber si califica).
+function masterProEligibilityError(cat, role, profile) {
+  if (role !== "master" && role !== "pro") return "Elige si te anotas como Master o como Pro.";
+  if (!profile) return null;
+  if (role === "master") {
+    const age = ageFromBirthDate(profile.birthDate);
+    if (age != null && age < MASTER_MIN_AGE) return `Master es para jugadores de ${MASTER_MIN_AGE} años o más (tu perfil indica ${age}).`;
+    return null;
+  }
+  if (cat.proMinDupr != null) {
+    if (profile.duprRating == null) return `Para anotarte como Pro necesitas cargar tu nivel DUPR en el Perfil (mínimo ${Number(cat.proMinDupr).toFixed(2)}).`;
+    if (Number(profile.duprRating) < Number(cat.proMinDupr)) return `Pro requiere DUPR de ${Number(cat.proMinDupr).toFixed(2)} o más -- el tuyo es ${Number(profile.duprRating).toFixed(2)}.`;
+  }
+  return null;
+}
+
+// Cupo por rol sobre una categoría ya fresca (se llama DENTRO del updater de updateCategory, así
+// ve lo que otra persona acabe de guardar). `incoming` = roles que se están por sumar.
+function masterProCapacityError(cat, incoming) {
+  if (!cat.maxTeams) return null;
+  const counts = countMasterProRoles(cat);
+  for (const role of ["master", "pro"]) {
+    const adding = incoming.filter((r) => r === role).length;
+    if (adding > 0 && counts[role] + adding > cat.maxTeams) return `Ya se completaron los ${cat.maxTeams} cupos de ${MP_ROLE_LABELS[role]}.`;
+  }
+  return null;
+}
+
 function makeCategoryName(modality, gender, level) {
   return `${MODALITY_LABELS[modality]} ${GENDER_LABELS[gender]} ${level}`.replace("Individual (single)", "Individual");
 }
@@ -1637,7 +1700,7 @@ function catBadgeLabel(cat) {
 // Orden compartido por Resultados y Clasificación (v2.77.0/v2.77.1) -- nivel primero (mismo
 // orden que LEVEL_OPTIONS), después modalidad y género, en vez del orden de creación.
 function sortCategoriesByLevel(categories) {
-  const levelRank = {}; LEVEL_OPTIONS.forEach((l, i) => { levelRank[l] = i; });
+  const levelRank = {}; CATEGORY_LEVEL_OPTIONS.forEach((l, i) => { levelRank[l] = i; });
   return [...categories].sort((a, b) => {
     const byLevel = (levelRank[a.level] ?? 999) - (levelRank[b.level] ?? 999);
     if (byLevel !== 0) return byLevel;
@@ -1694,8 +1757,8 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
   const othersDemand = siblings.reduce((sum, c) => sum + estimateMatches(c.format || "grupos_eliminatoria", c.teams.length), 0);
   const remaining = Math.max(0, capacity - othersDemand);
 
-  const myLevelIdx = LEVEL_OPTIONS.indexOf(cat.level);
-  const higherPriority = siblings.filter((c) => LEVEL_OPTIONS.indexOf(c.level) > myLevelIdx).length;
+  const myLevelIdx = CATEGORY_LEVEL_OPTIONS.indexOf(cat.level);
+  const higherPriority = siblings.filter((c) => CATEGORY_LEVEL_OPTIONS.indexOf(c.level) > myLevelIdx).length;
   const budget = higherPriority === 0 ? remaining : remaining / (higherPriority + 1);
 
   const candidates = FORMAT_RICHNESS.map((format) => ({ format, matches: estimateMatches(format, n) }));
@@ -2392,6 +2455,7 @@ export default function PickleballTournamentApp() {
     teams: r.teams || [], waitlist: r.waitlist || [], groups: r.groups || [], matches: r.matches || [],
     drawGenerated: r.draw_generated, groupsClosed: r.groups_closed,
     rev: r.rev || 0,
+    proMinDupr: r.pro_min_dupr != null ? Number(r.pro_min_dupr) : null,
   });
   // `categories` trae TODAS las categorías de TODOS los torneos del club (no se filtra en la
   // query) -- necesario para que occupiedKeys (más abajo) bloquee canchas cruzando torneos.
@@ -2785,10 +2849,11 @@ export default function PickleballTournamentApp() {
     });
   };
 
-  const addCategory = async (modality, gender, level, maxTeams, minTeams) => {
+  const addCategory = async (modality, gender, level, maxTeams, minTeams, proMinDupr) => {
     const { data: row, error } = await supabase.from("categories").insert({
       tournament_id: tournament.id, name: makeCategoryName(modality, gender, level),
       modality, gender, level, max_teams: maxTeams ? Number(maxTeams) : null, min_teams: minTeams ? Number(minTeams) : null,
+      pro_min_dupr: level === MASTER_PRO_LEVEL && proMinDupr !== "" && proMinDupr != null ? Number(proMinDupr) : null,
       seed_mode: "ranking", best_of: 1, bracket_size: 4,
       teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
     }).select().single();
@@ -2842,7 +2907,20 @@ export default function PickleballTournamentApp() {
     const teamId = uid("team");
     const name = players.map((p) => p.name).join(" / ");
     players.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
+    // v2.92.0 -- categoría Master-Pro: cada jugador lleva su rol y el cupo es POR ROL. Se valida
+    // DENTRO del updater (sobre la categoría fresca, ver updateCategory) para que dos personas
+    // anotándose a la vez no puedan pasarse del cupo; si algo falla el updater devuelve la
+    // categoría igual que estaba y el motivo sale por `blocked`.
+    let blocked = null;
     const result = await updateCategory(catId, (c) => {
+      blocked = null;
+      if (isMasterPro(c)) {
+        const roles = players.map((p) => p.role);
+        if (roles.some((r) => r !== "master" && r !== "pro")) { blocked = "Falta indicar si cada jugador va como Master o como Pro."; return c; }
+        if (players.length === 2 && roles[0] === roles[1]) { blocked = "Una dupla Master-Pro necesita 1 Master y 1 Pro."; return c; }
+        const capError = masterProCapacityError(c, roles);
+        if (capError) { blocked = capError; return c; }
+      }
       // Sin checkout (organizador anotando un walk-in a mano, ver InscripcionAdminForm) arranca
       // igual que un pago en efectivo -- "por pagar" -- nunca se asume cobrado solo por
       // registrarse; el admin lo pasa a "pago verificado" cuando de verdad reciba el dinero.
@@ -2858,6 +2936,7 @@ export default function PickleballTournamentApp() {
       }
       return c;
     });
+    if (blocked) return { teamId, error: blocked };
     // Push a los admins con cada inscripción real (v2.52.0) -- "admins_except_caller" en
     // api/send-push.js decide el destino: si quien llama es admin (auto-registro, o un
     // walk-in anotado a mano en Duplas), no se manda a sí mismo un aviso de su propia acción.
@@ -2910,13 +2989,36 @@ export default function PickleballTournamentApp() {
         return { error: `Esta categoría es mixta -- necesita 1 hombre y 1 mujer. ${creator?.name || "Quien creó este cupo"} ya está anotado/a, así que no te puedes unir con el mismo género.` };
       }
     }
+    // v2.92.0 -- Master-Pro: quien se une toma SIEMPRE el rol contrario al de quien creó el cupo
+    // (no lo elige), y tiene que cumplir ese rol (edad/DUPR, ver masterProEligibilityError).
+    let joinRole = null;
+    if (isMasterPro(cat)) {
+      const creatorRole = team.players[0]?.role;
+      if (creatorRole !== "master" && creatorRole !== "pro") return { error: "Este cupo no tiene rol (Master/Pro) asignado -- avísale al admin para revisarlo." };
+      joinRole = oppositeMpRole(creatorRole);
+      const eligibility = masterProEligibilityError(cat, joinRole, users.find((u) => u.id === player.userId));
+      if (eligibility) return { error: `${team.players[0]?.name || "Tu pareja"} se anotó como ${MP_ROLE_LABELS[creatorRole]}, así que tú entrarías como ${MP_ROLE_LABELS[joinRole]}. ${eligibility}` };
+      player = { ...player, role: joinRole };
+    }
     upsertPlayerRanking(player.name, player.ranking, true);
     const paymentStatus = initialPaymentStatus(checkout.paymentMethod, checkout.priceUsd);
     const joinedPlayer = {
       ...player, priceUsd: checkout.priceUsd, priceBs: checkout.priceBs, paymentMethod: checkout.paymentMethod,
       reference: checkout.reference, proofName: checkout.proofName, paymentStatus, joinedAt: Date.now(),
     };
+    let blocked = null;
     const result = await updateCategory(catId, (c) => {
+      blocked = null;
+      // v2.92.0 -- Master-Pro: sobre la categoría FRESCA, que el cupo siga con 1 solo jugador del
+      // rol esperado y que el rol del que se une todavía tenga lugar.
+      if (isMasterPro(c)) {
+        const freshTeam = c.teams.find((t) => t.id === teamId);
+        if (!freshTeam || (freshTeam.players || []).length !== 1 || freshTeam.players[0]?.role !== oppositeMpRole(joinRole)) {
+          blocked = "Este cupo ya cambió -- alguien más se anotó primero o ya no está disponible."; return c;
+        }
+        const capError = masterProCapacityError(c, [joinRole]);
+        if (capError) { blocked = capError; return c; }
+      }
       const patch = (t) => {
         if (t.id !== teamId) return t;
         const players = [...t.players, joinedPlayer];
@@ -2926,6 +3028,7 @@ export default function PickleballTournamentApp() {
       c.waitlist = c.waitlist.map(patch);
       return c;
     });
+    if (blocked) return { error: blocked };
     // Push a los admins (v2.52.0) -- mismo criterio que addTeam, ver ese comentario.
     if (!result?.error) {
       const tournament = tournaments.find((t) => t.id === cat.tournamentId);
@@ -3075,6 +3178,9 @@ export default function PickleballTournamentApp() {
     if (!fromCat) return { error: "La categoría de origen ya no existe." };
     const toCat = categories.find((c) => c.id === toCatId);
     if (!toCat) return { error: "La categoría destino ya no existe." };
+    // v2.92.0 -- Master-Pro necesita un rol (Master/Pro) validado por jugador; moverlo acá lo
+    // saltaría. Hay que anotarlo desde Inscripción eligiendo su rol.
+    if (isMasterPro(toCat)) return { error: `"${toCat.name}" es Master-Pro y necesita elegir un rol -- anótalo desde Inscripción en vez de moverlo.` };
     const inWaitlist = (fromCat.waitlist || []).some((t) => t.id === teamId);
     const list = inWaitlist ? (fromCat.waitlist || []) : (fromCat.teams || []);
     if (list.filter((t) => t.id === teamId).length > 1) {
@@ -3143,6 +3249,13 @@ export default function PickleballTournamentApp() {
       const g2 = users.find((u) => u.id === source.players[0].userId)?.gender;
       if (g1 && g2 && g1 === g2) {
         return { error: "Esta categoría es mixta -- necesita 1 hombre y 1 mujer, no puedes emparejar a dos del mismo género." };
+      }
+    }
+    // v2.92.0 -- Master-Pro: solo se puede emparejar 1 Master con 1 Pro.
+    if (isMasterPro(cat)) {
+      const r1 = target.players[0]?.role, r2 = source.players[0]?.role;
+      if ((r1 !== "master" && r1 !== "pro") || (r2 !== "master" && r2 !== "pro") || r1 === r2) {
+        return { error: "Esta categoría es Master-Pro -- cada dupla necesita 1 Master y 1 Pro, no se pueden emparejar dos del mismo rol." };
       }
     }
     const mergedPlayer = {
@@ -4650,13 +4763,23 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
   // sigue siendo la validación real (esto es apenas la UI adelantándose).
   const genderMismatch = cat.gender === "mixto" && creator.userId && currentUser.gender
     && users.find((u) => u.id === creator.userId)?.gender === currentUser.gender;
-  const blocked = full || drawStarted || isOwnTeam || alreadyInCat || genderMismatch;
+  // v2.92.0 -- Master-Pro: quien se une toma el rol contrario al de quien creó el cupo; se avisa
+  // de entrada si no lo cumple (edad/DUPR) o si ese rol ya se llenó -- joinTeam sigue siendo la
+  // validación real, esto solo adelanta el aviso antes del checkout.
+  const mpJoinRole = isMasterPro(cat) ? oppositeMpRole(creator.role) : null;
+  const mpJoinError = mpJoinRole
+    ? (masterProEligibilityError(cat, mpJoinRole, users.find((u) => u.id === currentUser.id))
+      || (cat.maxTeams && countMasterProRoles(cat)[mpJoinRole] >= cat.maxTeams ? `Ya se completaron los ${cat.maxTeams} cupos de ${MP_ROLE_LABELS[mpJoinRole]}.` : null))
+    : null;
+  const blocked = full || drawStarted || isOwnTeam || alreadyInCat || genderMismatch || !!mpJoinError;
 
   // Mismo criterio de elegibilidad que InscripcionTab.eligible -- otras categorías de ESTE
   // torneo (nunca la del link, esa se une aparte con joinTeam) todavía abiertas y en las que
-  // este jugador no esté ya inscrito.
+  // este jugador no esté ya inscrito. Master-Pro queda fuera de las extras: necesita elegir un
+  // rol, eso se hace desde Inscripción.
   const extraEligible = blocked ? [] : categories.filter((c) => {
     if (c.tournamentId !== tournament.id || c.id === cat.id) return false;
+    if (isMasterPro(c)) return false;
     if ((c.matches || []).length > 0) return false;
     const already = [...(c.teams || []), ...(c.waitlist || [])].some((t) => (t.players || []).some((p) => p.userId === currentUser.id));
     if (already) return false;
@@ -4742,6 +4865,7 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
               {isOwnTeam ? "Este es tu propio cupo -- comparte el link con tu pareja, no contigo mismo."
                 : alreadyInCat ? "Ya estás inscrito en esta categoría con otro equipo."
                 : genderMismatch ? `Esta categoría es mixta -- necesita 1 hombre y 1 mujer. ${creator.name} ya está anotado/a, así que no te puedes unir con el mismo género.`
+                : mpJoinError ? `${creator.name} se anotó como ${MP_ROLE_LABELS[creator.role]}, así que tú entrarías como ${MP_ROLE_LABELS[mpJoinRole]}. ${mpJoinError}`
                 : full ? "Este cupo ya se completó -- alguien más se anotó primero."
                 : "Esta categoría ya cerró su inscripción."}
             </p>
@@ -4751,6 +4875,11 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
           <>
             <p className="disp text-lg mb-1" style={{ color: COLORS.courtDark }}>Únete a {creator.name}</p>
             <p className="text-sm mb-4" style={{ color: "#6B7688" }}><CategoryLabel cat={cat} /> · {tournament.name}</p>
+            {mpJoinRole && (
+              <p className="text-xs font-semibold mb-4 px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                {creator.name} se anotó como {MP_ROLE_LABELS[creator.role]} -- tú entras como <b>{MP_ROLE_LABELS[mpJoinRole]}</b>.
+              </p>
+            )}
 
             {extraLevelGroups.length > 0 && (
               <div className="mb-4">
@@ -8058,7 +8187,11 @@ function NewCategoryForm({ onCreate, onCancel }) {
   const [level, setLevel] = useState(LEVEL_OPTIONS[2]);
   const [maxTeams, setMaxTeams] = useState("");
   const [minTeams, setMinTeams] = useState("");
-  const previewName = makeCategoryName(modality, gender, level);
+  const [proMinDupr, setProMinDupr] = useState("");
+  const masterPro = level === MASTER_PRO_LEVEL;
+  // Master-Pro es siempre de dobles (cada dupla = 1 Master + 1 Pro) -- se fuerza al elegirlo.
+  const effectiveModality = masterPro ? "dobles" : modality;
+  const previewName = makeCategoryName(effectiveModality, gender, level);
 
   // "Mixto" es un género de pareja (un hombre + una mujer por equipo) -- no existe en
   // Individual, donde cada jugador compite solo. Cambiar a Individual con "Mixto" ya
@@ -8090,17 +8223,29 @@ function NewCategoryForm({ onCreate, onCancel }) {
         <div>
           <Label>3. Nivel de habilidad</Label>
           <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
-            {LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+            {CATEGORY_LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
         </div>
-        <CategoryCapacityFields modality={modality} maxTeams={maxTeams} setMaxTeams={setMaxTeams} minTeams={minTeams} setMinTeams={setMinTeams} />
+        {masterPro && (
+          <div className="rounded-xl p-3 space-y-2" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            <p className="text-xs font-semibold">
+              Master-Pro: cada dupla es 1 Master ({MASTER_MIN_AGE}+ años, se verifica con la fecha de nacimiento del perfil) + 1 Pro. El cupo de abajo se cuenta POR ROL: con 8 entran 8 Master y 8 Pro (8 duplas), sin lista de espera.
+            </p>
+            <div>
+              <Label>DUPR mínimo para anotarse como Pro</Label>
+              <input type="number" step="0.01" min="2" max="8" style={inputStyle} value={proMinDupr} onChange={(e) => setProMinDupr(e.target.value)} placeholder="Ej. 4.50 -- vacío = sin requisito" />
+              <p className="text-[11px] mt-1">Quien no tenga su DUPR cargado en el perfil no podrá anotarse como Pro si pones un mínimo.</p>
+            </div>
+          </div>
+        )}
+        <CategoryCapacityFields modality={effectiveModality} maxTeams={maxTeams} setMaxTeams={setMaxTeams} minTeams={minTeams} setMinTeams={setMinTeams} />
 
         <div className="text-sm px-4 py-3 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
           Nombre automático: <b>{previewName}</b>
         </div>
         <p className="text-xs" style={{ color: "#6B7688" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
         <div className="flex gap-2 pt-1">
-          <button onClick={() => onCreate(modality, gender, level, maxTeams, minTeams)}
+          <button onClick={() => onCreate(effectiveModality, gender, level, maxTeams, minTeams, proMinDupr)}
             style={{ background: COLORS.court, color: COLORS.chalk }}
             className="px-6 py-2.5 rounded-xl font-bold text-sm">Crear categoría</button>
           <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
@@ -8135,7 +8280,13 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
   const [error, setError] = useState("");
-  const full = categoryIsFull(cat); // v2.57.0 -- cupo real en jugadores, no en filas (ver categoryIsFull)
+  // v2.92.0 -- Master-Pro: rol de cada jugador (el admin lo elige a mano, sin validar edad/DUPR --
+  // ahí se confía en el admin) y sin lista de espera.
+  const mp = isMasterPro(cat);
+  const mpCounts = mp ? countMasterProRoles(cat) : null;
+  const [role1, setRole1] = useState("master");
+  const [role2, setRole2] = useState("pro");
+  const full = !mp && categoryIsFull(cat); // v2.57.0 -- cupo real en jugadores, no en filas (ver categoryIsFull)
 
   // Ahora espera el resultado real de addTeam (v2.44.4) -- antes disparaba y limpiaba los
   // campos de una, sin chequear si el guardado en Supabase de verdad llegó a pasar.
@@ -8143,10 +8294,10 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
     if (!p1.trim()) return;
     if (isDoubles && !p2.trim()) return;
     setError("");
-    const players = [{ name: p1.trim(), ranking: suggestedRanking(p1) || 0 }];
-    if (isDoubles) players.push({ name: p2.trim(), ranking: suggestedRanking(p2) || 0 });
+    const players = [{ name: p1.trim(), ranking: suggestedRanking(p1) || 0, ...(mp ? { role: role1 } : {}) }];
+    if (isDoubles) players.push({ name: p2.trim(), ranking: suggestedRanking(p2) || 0, ...(mp ? { role: role2 } : {}) });
     const result = await addTeam(cat.id, players);
-    if (result?.error) { setError("No se pudo guardar -- revisa tu conexión e intenta de nuevo."); return; }
+    if (result?.error) { setError(mp ? result.error : "No se pudo guardar -- revisa tu conexión e intenta de nuevo."); return; }
     setP1(""); setP2("");
   };
 
@@ -8158,7 +8309,9 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
   // vuelve a chequear esto igual del lado del guardado, esto es solo para no mostrar una opción
   // que de todos modos va a fallar.
   const compatiblePartners = (t) => {
-    const candidates = (cat.teams || []).filter((o) => o.id !== t.id && (o.players || []).length === 1);
+    let candidates = (cat.teams || []).filter((o) => o.id !== t.id && (o.players || []).length === 1);
+    // Master-Pro: solo se puede emparejar con alguien del rol contrario.
+    if (mp) candidates = candidates.filter((o) => o.players[0]?.role === oppositeMpRole(t.players[0]?.role));
     if (cat.gender !== "mixto") return candidates;
     const myGender = users?.find((u) => u.id === t.players[0]?.userId)?.gender;
     if (!myGender) return candidates;
@@ -8204,9 +8357,31 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
         {isDoubles ? "Duplas inscritas" : "Jugadores inscritos"} {cat.maxTeams ? `-- ${categoryCountLabel(cat)}` : ""}
       </SectionTitle>
 
+      {mp && (
+        <p className="text-xs font-semibold mb-2" style={{ color: COLORS.courtDark }}>
+          Master {mpCounts.master}{cat.maxTeams ? `/${cat.maxTeams}` : ""} · Pro {mpCounts.pro}{cat.maxTeams ? `/${cat.maxTeams}` : ""}
+          {cat.proMinDupr != null ? ` · Pro: DUPR ${Number(cat.proMinDupr).toFixed(2)}+` : ""} -- sin lista de espera, un rol lleno rechaza la inscripción.
+        </p>
+      )}
       <div className={`grid gap-2 items-start mb-4 ${isDoubles ? "md:grid-cols-[1fr_1fr_auto]" : "md:grid-cols-[1fr_auto]"}`}>
-        <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} />
-        {isDoubles && <PlayerField label="Jugador 2" name={p2} setName={setP2} />}
+        <div>
+          <PlayerField label={isDoubles ? "Jugador 1" : "Jugador"} name={p1} setName={setP1} />
+          {mp && (
+            <select style={{ ...inputStyle, marginTop: 6 }} value={role1} onChange={(e) => { setRole1(e.target.value); setRole2(oppositeMpRole(e.target.value)); }}>
+              <option value="master">Master</option><option value="pro">Pro</option>
+            </select>
+          )}
+        </div>
+        {isDoubles && (
+          <div>
+            <PlayerField label="Jugador 2" name={p2} setName={setP2} />
+            {mp && (
+              <select style={{ ...inputStyle, marginTop: 6 }} value={role2} onChange={(e) => { setRole2(e.target.value); setRole1(oppositeMpRole(e.target.value)); }}>
+                <option value="master">Master</option><option value="pro">Pro</option>
+              </select>
+            )}
+          </div>
+        )}
         <button onClick={submit} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-1 h-[38px] self-end">
           <Plus size={16} /> {full ? "Añadir (espera)" : "Añadir"}
         </button>
@@ -8248,7 +8423,7 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
               <div className="min-w-0">
                 {(t.players || []).map((p, idx) => (
                   <span key={idx} className="font-semibold" style={{ color: statusFor(p, idx) === "confirmada" ? COLORS.ink : COLORS.clay }}>
-                    {idx > 0 ? " · " : ""}{p.name} ({p.ranking || 0})
+                    {idx > 0 ? " · " : ""}{p.name} ({p.ranking || 0}){p.role ? ` · ${MP_ROLE_LABELS[p.role]}` : ""}
                   </span>
                 ))}
                 {waitingPartner && (
@@ -9795,6 +9970,11 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   // card mientras se elegían categorías -- se sentía como un paso de más antes de llegar a
   // pagar, y quitar ese paso deja el checkout más simple: elige, paga, comparte. ----
   const [selectedIds, setSelectedIds] = useState([]);
+  // v2.92.0 -- rol (Master/Pro) elegido por categoría Master-Pro del carrito, y el perfil del
+  // registrant para validarlo (edad/DUPR) -- undefined si es un invitado sin cuenta que anota el
+  // admin a mano, en cuyo caso no hay con qué validar y se confía en el admin.
+  const [roleByCat, setRoleByCat] = useState({});
+  const registrantProfile = registrant?.userId ? users.find((u) => u.id === registrant.userId) : undefined;
   const [myRanking, setMyRanking] = useState(registrant ? suggestedRanking(registrant.name) || "" : "");
   const [showCheckout, setShowCheckout] = useState(false);
   const [done, setDone] = useState(null); // { names, pendingTeams: [{catId, catName, teamId}], registrantName, isSelf } de la última confirmación
@@ -9864,14 +10044,20 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     // (algo más en qué pensar antes de pagar).
     const pendingTeams = [];
     const failedCatNames = [];
+    // v2.92.0 -- Master-Pro: ANTES de guardar nada, que cada una tenga rol y que el jugador lo
+    // cumpla -- si no, no se inscribe en ninguna (así nunca queda a medias un carrito pagado).
+    for (const c of selectedCats.filter(isMasterPro)) {
+      const err = masterProEligibilityError(c, roleByCat[c.id], registrantProfile);
+      if (err) { setConfirming(false); setConfirmError(`${c.name}: ${err}`); return; }
+    }
     for (const c of selectedCats) {
-      const players = [{ name: registrant.name, ranking: Number(myRanking) || 0, ...(registrant.userId ? { userId: registrant.userId } : {}) }];
+      const players = [{ name: registrant.name, ranking: Number(myRanking) || 0, ...(registrant.userId ? { userId: registrant.userId } : {}), ...(isMasterPro(c) ? { role: roleByCat[c.id] } : {}) }];
       // priceUsd/priceBs se pisan por categoría -- el checkout trae el TOTAL del carrito (para
       // mostrarlo), pero cada equipo debe quedar con su parte proporcional. userId queda el de
       // la persona registrada (registrant), NUNCA el del admin que hizo el checkout -- es lo
       // que usa buildClientActivity() para atribuirle el pago a ella, no a quien lo cobró.
       const result = await addTeam(c.id, players, { ...checkout, priceUsd: pricePerTeam, priceBs: pricePerTeam * (Number(club.bsPerUsd) || 0), ...(registrant.userId ? { userId: registrant.userId } : {}) });
-      if (result.error) { failedCatNames.push(c.name); continue; }
+      if (result.error) { failedCatNames.push(isMasterPro(c) ? `${c.name} (${result.error})` : c.name); continue; }
       if (c.modality !== "individual") pendingTeams.push({ catId: c.id, catName: c.name, teamId: result.teamId });
     }
     setConfirming(false);
@@ -9990,7 +10176,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
               {isExpanded && (
                 <div className="px-3 pb-3 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   {cats.map((c) => {
-                    const isFull = categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas
+                    const mp = isMasterPro(c);
+                    const mpCounts = mp ? countMasterProRoles(c) : null;
+                    const isFull = !mp && categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas (Master-Pro no tiene lista de espera, ver MASTER_PRO_LEVEL)
                     const isSelected = selectedIds.includes(c.id);
                     return (
                       <button key={c.id} type="button" onClick={() => toggleCat(c.id)}
@@ -10002,7 +10190,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-semibold" style={{ color: COLORS.ink }}>{c.modality === "individual" ? "Individual" : "Dobles"} {GENDER_LABELS[c.gender]}</p>
                           <p className="text-[11px] mt-0.5" style={{ color: "#6B7688" }}>
-                            {categoryCountLabel(c)}{isFull ? " · Lista de espera" : ""}
+                            {mp
+                              ? `Master ${mpCounts.master}${c.maxTeams ? `/${c.maxTeams}` : ""} · Pro ${mpCounts.pro}${c.maxTeams ? `/${c.maxTeams}` : ""}`
+                              : <>{categoryCountLabel(c)}{isFull ? " · Lista de espera" : ""}</>}
                           </p>
                         </div>
                       </button>
@@ -10096,7 +10286,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                      mismo criterio que tournamentRegPrice, así el jugador ve exactamente cómo
                      se arma la suma antes de pagar. */}
                   {selectedCats.map((c, i) => {
-                    const isFull = categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas
+                    const mp = isMasterPro(c);
+                    const mpCounts = mp ? countMasterProRoles(c) : null;
+                    const isFull = !mp && categoryIsFull(c); // v2.57.0 -- cupo real en jugadores, no en filas
                     // v2.56.0: si ya tenía categorías de un checkout anterior (alreadyRegisteredCount),
                     // esta línea es la (alreadyRegisteredCount+i+1)-ésima de verdad -- solo la
                     // primerísima categoría de todas (nunca tuvo ninguna antes) paga tier 1, el
@@ -10113,6 +10305,28 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
                           </p>
                           {c.modality !== "individual" && (
                             <p className="text-[11px]" style={{ color: "#6B7688" }}>Dobles -- invitas a tu pareja después de pagar</p>
+                          )}
+                          {mp && (
+                            <div className="mt-1.5">
+                              <p className="text-[11px] font-semibold mb-1" style={{ color: COLORS.courtDark }}>¿Con qué rol te anotas?</p>
+                              <div className="flex gap-1.5 flex-wrap">
+                                {["master", "pro"].map((role) => {
+                                  const roleFull = !!c.maxTeams && mpCounts[role] >= c.maxTeams;
+                                  const chosen = roleByCat[c.id] === role;
+                                  return (
+                                    <button key={role} type="button" disabled={roleFull}
+                                      onClick={() => { setConfirmError(""); setRoleByCat((prev) => ({ ...prev, [c.id]: role })); }}
+                                      className="px-3 py-1.5 rounded-lg text-xs font-bold disabled:cursor-not-allowed"
+                                      style={{ background: chosen ? COLORS.court : "#fff", color: chosen ? "#fff" : (roleFull ? "#B7BFCE" : COLORS.ink), border: `1.5px solid ${chosen ? COLORS.court : COLORS.line}` }}>
+                                      {MP_ROLE_LABELS[role]}{role === "master" ? ` (${MASTER_MIN_AGE}+)` : (c.proMinDupr != null ? ` (DUPR ${Number(c.proMinDupr).toFixed(2)}+)` : "")} · {mpCounts[role]}{c.maxTeams ? `/${c.maxTeams}` : ""}{roleFull ? " · lleno" : ""}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              {roleByCat[c.id] && masterProEligibilityError(c, roleByCat[c.id], registrantProfile) && (
+                                <p className="text-[11px] font-semibold mt-1" style={{ color: COLORS.clay }}>{masterProEligibilityError(c, roleByCat[c.id], registrantProfile)}</p>
+                              )}
+                            </div>
                           )}
                         </div>
                         <span className="mono text-xs font-bold shrink-0" style={{ color: "#6B7688" }}>{i === 0 ? formatMoney(tierPrice) : `+${formatMoney(tierPrice)}`}</span>
