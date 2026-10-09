@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.92.0";
+const APP_VERSION = "2.93.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1766,6 +1766,65 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
   if (!pick) pick = candidates[candidates.length - 1];
 
   return { format: pick.format, matches: pick.matches, capacity, othersDemand, remaining, budget, n };
+}
+
+/* =========================================================================
+   RANKINGS (v2.93.0) -- clasificación acumulada entre torneos. Ver migración rankings.
+   ========================================================================= */
+function normalizePersonName(name) {
+  return (name || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// Tabla de un ranking método "partidos", calculada desde cero a partir de los partidos YA
+// JUGADOS (con ganador) de los torneos vinculados -- nunca se guarda. Cada partido cuenta para
+// los 4 jugadores (2 por dupla): todos suman `pointsPlayed` por jugar, y los de la dupla ganadora
+// suman además `pointsWin`. Identidad de un jugador: su userId si tiene cuenta; si no (anotado a
+// mano por el admin) el nombre sin mayúsculas/tildes/espacios de más -- y si el mismo nombre
+// aparece una vez con cuenta y otra sin ella, se unen en una sola fila en vez de duplicarse.
+function computeRankingTable(ranking, tournaments, categories) {
+  const linked = tournaments.filter((t) => t.rankingId === ranking.id)
+    .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""));
+  const byUser = new Map(), byName = new Map(), rows = [];
+  const rowFor = (p) => {
+    const nameKey = normalizePersonName(p.name);
+    let row = (p.userId && byUser.get(p.userId)) || byName.get(nameKey);
+    if (!row) {
+      row = { userId: p.userId || null, name: p.name, pts: 0, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, ptsF: 0, ptsC: 0, byTournament: {} };
+      rows.push(row);
+    }
+    if (p.userId && !row.userId) row.userId = p.userId;
+    if (p.userId) byUser.set(p.userId, row);
+    if (nameKey) byName.set(nameKey, row);
+    return row;
+  };
+  linked.forEach((t) => {
+    categories.filter((c) => c.tournamentId === t.id).forEach((c) => {
+      (c.matches || []).forEach((m) => {
+        if (isByeMatch(m) || !m.winnerId || !m.teamAId || !m.teamBId) return;
+        if (ranking.groupPhaseOnly && m.phase !== "group") return;
+        const teamA = (c.teams || []).find((x) => x.id === m.teamAId);
+        const teamB = (c.teams || []).find((x) => x.id === m.teamBId);
+        if (!teamA || !teamB) return;
+        let setsA = 0, setsB = 0, ptsA = 0, ptsB = 0;
+        (m.sets || []).forEach((s) => {
+          ptsA += Number(s.a) || 0; ptsB += Number(s.b) || 0;
+          if (Number(s.a) > Number(s.b)) setsA++; else if (Number(s.b) > Number(s.a)) setsB++;
+        });
+        [[teamA, m.winnerId === teamA.id, setsA, setsB, ptsA, ptsB], [teamB, m.winnerId === teamB.id, setsB, setsA, ptsB, ptsA]].forEach(([team, won, sf, sc, pf, pc]) => {
+          (team.players || []).forEach((p) => {
+            const row = rowFor(p);
+            const earned = ranking.pointsPlayed + (won ? ranking.pointsWin : 0);
+            row.pts += earned; row.pj++; if (won) row.pg++; else row.pp++;
+            row.setsF += sf; row.setsC += sc; row.ptsF += pf; row.ptsC += pc;
+            row.byTournament[t.id] = (row.byTournament[t.id] || 0) + earned;
+          });
+        });
+      });
+    });
+  });
+  rows.sort((a, b) => b.pts - a.pts || b.pg - a.pg || (b.setsF - b.setsC) - (a.setsF - a.setsC) || (b.ptsF - b.ptsC) - (a.ptsF - a.ptsC) || a.name.localeCompare(b.name));
+  rows.forEach((r, i) => { r.rank = i + 1; });
+  return { rows, tournaments: linked };
 }
 
 /* =========================================================================
@@ -2297,6 +2356,7 @@ export default function PickleballTournamentApp() {
     regStart: r.reg_start || "", regEnd: r.reg_end || "",
     regularPrice1: r.regular_price_1 ?? "", regularPrice2: r.regular_price_2 ?? "", regularPrice3: r.regular_price_3 ?? "",
     courtIds: r.court_ids || [], image: r.image || "",
+    rankingId: r.ranking_id || null,
   });
   // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
   // (antes esto era una fila única fija, `.limit(1)`, y no había forma de crear uno nuevo
@@ -2312,6 +2372,52 @@ export default function PickleballTournamentApp() {
     });
   }, []);
   useEffect(() => { saveCache("tournaments", tournaments); }, [tournaments]);
+
+  // Rankings (v2.93.0) -- ver migración rankings y computeRankingTable. Los puntos nunca se
+  // guardan: la tabla se calcula de los partidos jugados de los torneos vinculados.
+  const mapRankingRow = (r) => ({
+    id: r.id, name: r.name, method: r.method || "partidos",
+    pointsPlayed: r.points_played ?? 1, pointsWin: r.points_win ?? 2,
+    groupPhaseOnly: r.group_phase_only !== false, qualifyCount: r.qualify_count ?? null,
+  });
+  const [rankings, setRankings] = useState(() => loadCache("rankings", []));
+  useEffect(() => {
+    supabase.from("rankings").select("*").order("created_at").then(({ data, error }) => {
+      if (error) { console.error("fetch rankings:", error.message); return; }
+      setRankings((data || []).map(mapRankingRow));
+    });
+  }, []);
+  useEffect(() => { saveCache("rankings", rankings); }, [rankings]);
+  const rankingToRow = (f) => ({
+    name: f.name.trim(), method: "partidos",
+    points_played: Number(f.pointsPlayed) || 0, points_win: Number(f.pointsWin) || 0,
+    group_phase_only: !!f.groupPhaseOnly,
+    qualify_count: f.qualifyCount === "" || f.qualifyCount == null ? null : Number(f.qualifyCount),
+  });
+  const createRanking = async (form) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede crear rankings." };
+    const { data, error } = await supabase.from("rankings").insert(rankingToRow(form)).select().single();
+    if (error) { console.error("createRanking:", error.message); return { error: error.message }; }
+    setRankings((prev) => [...prev, mapRankingRow(data)]);
+    return {};
+  };
+  const updateRanking = async (id, form) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede editar rankings." };
+    const { data, error } = await supabase.from("rankings").update(rankingToRow(form)).eq("id", id).select().single();
+    if (error) { console.error("updateRanking:", error.message); return { error: error.message }; }
+    setRankings((prev) => prev.map((r) => (r.id === id ? mapRankingRow(data) : r)));
+    return {};
+  };
+  // Borrar un ranking solo desvincula sus torneos (ON DELETE SET NULL) -- no borra ningún torneo
+  // ni resultado; el estado local se alinea a mano igual que en removeTournament.
+  const removeRanking = async (id) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede borrar rankings." };
+    const { error } = await supabase.from("rankings").delete().eq("id", id);
+    if (error) { console.error("removeRanking:", error.message); return { error: error.message }; }
+    setRankings((prev) => prev.filter((r) => r.id !== id));
+    setTournaments((prev) => prev.map((t) => (t.rankingId === id ? { ...t, rankingId: null } : t)));
+    return {};
+  };
   // Mismo criterio que `tab` arriba (v2.53.1) -- si al actualizar la página estaba DENTRO de
   // un torneo puntual (viendo Inscritos, Calendario, etc.), que la recargue vuelva a abrir ESE
   // torneo en vez de mandarlo a la lista de Torneos. Se valida contra `tournaments` recién
@@ -2402,6 +2508,7 @@ export default function PickleballTournamentApp() {
     if ("regularPrice3" in patch) dbPatch.regular_price_3 = patch.regularPrice3 === "" ? null : patch.regularPrice3;
     if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
     if ("image" in patch) dbPatch.image = patch.image || null;
+    if ("rankingId" in patch) dbPatch.ranking_id = patch.rankingId || null;
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
@@ -4402,7 +4509,7 @@ export default function PickleballTournamentApp() {
           {effectiveTab === "torneos" && (
             activeTournamentId && tournament ? (
               <TorneosSection
-                role={role} currentUser={currentUser} users={users} club={club} setTab={setTab}
+                role={role} currentUser={currentUser} users={users} club={club} setTab={setTab} rankings={rankings}
                 tournament={tournament} setTournament={updateTournament} uploadTournamentImage={uploadTournamentImage} dates={dates}
                 registrationLog={registrationLog.filter((r) => r.tournament_id === tournament.id)}
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
@@ -4429,6 +4536,11 @@ export default function PickleballTournamentApp() {
                 onCreate={createTournament} onRemove={removeTournament}
                 showForm={tournamentFormOpen} setShowForm={setTournamentFormOpen} />
             )
+          )}
+
+          {effectiveTab === "rankings" && (
+            <RankingsTab rankings={rankings} tournaments={tournaments} categories={categories} users={users} role={role} currentUser={currentUser}
+              createRanking={createRanking} updateRanking={updateRanking} removeRanking={removeRanking} />
           )}
 
           {effectiveTab === "membresias" && (
@@ -5279,6 +5391,9 @@ const NAV_ITEMS = [
   // TournamentsListTab).
   { id: "torneos", label: "Torneos", short: "Torneos", icon: Trophy, sub: "Organiza el torneo del club", roles: ["admin"] },
   { id: "torneos", label: "Mis Torneos", short: "Mis Torneos", icon: Trophy, sub: "Los torneos en los que estás inscrito", roles: ["cliente"] },
+  // v2.93.0 -- clasificación acumulada entre torneos (ver RankingsTab): el admin crea rankings y
+  // vincula torneos desde Generalidades; el jugador solo mira la tabla.
+  { id: "rankings", label: "Rankings", short: "Rankings", icon: ListOrdered, sub: "Clasificación acumulada por jornadas", roles: ["admin", "cliente"] },
   { id: "membresias", label: "Membresías", short: "Planes", icon: Award, sub: "Planes, beneficios y suscripción", roles: ["cliente"] },
   { id: "club", label: "Mi Club", short: "Mi Club", icon: Building2, sub: "Horario, canchas, precios y membresías", roles: ["admin"] },
   { id: "perfil", label: "Perfil", short: "Perfil", icon: UserCircle, sub: "Tus datos y tu membresía", roles: ["admin", "cliente"] },
@@ -5593,7 +5708,7 @@ function TieredPriceFields({ tournament, set, field }) {
   );
 }
 
-function TorneoTab({ tournament, setTournament: updateTournament, uploadTournamentImage, dates, courts, club, categories, occupiedKeys }) {
+function TorneoTab({ tournament, setTournament: updateTournament, uploadTournamentImage, dates, courts, club, categories, occupiedKeys, rankings = [] }) {
   const set = (k, v) => updateTournament({ [k]: v });
   const selectedCourts = (tournament.courtIds || []).length ? courts.filter((c) => tournament.courtIds.includes(c.id)) : courts;
   const isPublished = tournament.status === "published";
@@ -5692,6 +5807,19 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
             </div>
             {imageError && <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>{imageError}</p>}
             <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Se muestra en la tarjeta del torneo en Actividades, igual que la imagen de un Open Play.</p>
+          </div>
+          {/* v2.93.0 -- a qué ranking suman los resultados de este torneo (ver RankingsTab). Solo se
+             guarda el vínculo: los puntos se calculan solos de los partidos jugados, así que
+             cambiarlo (o vincular un torneo ya jugado) actualiza el ranking al instante. */}
+          <div>
+            <Label>Ranking al que suman los resultados</Label>
+            <select style={inputStyle} value={tournament.rankingId || ""} onChange={(e) => set("rankingId", e.target.value || null)} disabled={rankings.length === 0}>
+              <option value="">Ninguno</option>
+              {rankings.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+              {rankings.length === 0 ? "Todavía no hay rankings -- créalos en la pestaña Rankings." : "Los partidos jugados de este torneo suman puntos a ese ranking según sus reglas."}
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -6770,6 +6898,200 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
   );
 }
 
+/* =========================================================================
+   TAB: RANKINGS (v2.93.0) -- el admin crea rankings y vincula torneos desde Generalidades; los
+   jugadores ven la tabla. La tabla se calcula con computeRankingTable, nunca se guarda.
+   ========================================================================= */
+function RankingForm({ initial, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [pointsPlayed, setPointsPlayed] = useState(initial?.pointsPlayed ?? 1);
+  const [pointsWin, setPointsWin] = useState(initial?.pointsWin ?? 2);
+  const [groupPhaseOnly, setGroupPhaseOnly] = useState(initial?.groupPhaseOnly ?? true);
+  const [qualifyCount, setQualifyCount] = useState(initial?.qualifyCount ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const played = Number(pointsPlayed) || 0, win = Number(pointsWin) || 0;
+
+  const submit = async () => {
+    if (!name.trim() || saving) return;
+    setSaving(true); setError("");
+    const result = await onSave({ name, pointsPlayed, pointsWin, groupPhaseOnly, qualifyCount });
+    setSaving(false);
+    if (result?.error) setError("No se pudo guardar -- revisa tu conexión e intenta de nuevo.");
+  };
+
+  return (
+    <Card>
+      <SectionTitle sub="Los puntos se calculan solos con los partidos jugados de los torneos que elijan este ranking.">{initial ? "Editar ranking" : "Nuevo ranking"}</SectionTitle>
+      <div className="space-y-4 max-w-xl">
+        <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Liga de Desarrollo Open" /></div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label>Puntos por partido jugado (asistencia)</Label>
+            <input type="number" min={0} style={inputStyle} value={pointsPlayed} onChange={(e) => setPointsPlayed(e.target.value)} />
+          </div>
+          <div>
+            <Label>Puntos extra por victoria</Label>
+            <input type="number" min={0} style={inputStyle} value={pointsWin} onChange={(e) => setPointsWin(e.target.value)} />
+          </div>
+        </div>
+        <p className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+          Cada partido: <b>perder suma {played}</b> · <b>ganar suma {played + win}</b> (por jugador, aplica a los dos de la dupla).
+        </p>
+        <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer" style={{ color: COLORS.ink }}>
+          <input type="checkbox" checked={groupPhaseOnly} onChange={(e) => setGroupPhaseOnly(e.target.checked)} />
+          Solo cuentan los partidos de fase de grupos / liga (los de fase final no suman)
+        </label>
+        <div>
+          <Label>¿Cuántos clasifican? (opcional)</Label>
+          <input type="number" min={1} style={inputStyle} value={qualifyCount} onChange={(e) => setQualifyCount(e.target.value)} placeholder="Ej. 16 -- se resaltan en la tabla" />
+        </div>
+        {error && <p className="text-xs font-semibold" style={{ color: COLORS.clay }}>{error}</p>}
+        <div className="flex gap-2">
+          <button disabled={!name.trim() || saving} onClick={submit}
+            style={{ background: name.trim() ? COLORS.court : "#E5E5E5", color: name.trim() ? COLORS.chalk : "#999" }}
+            className="px-6 py-2.5 rounded-xl font-bold text-sm">{saving ? "Guardando…" : "Guardar ranking"}</button>
+          <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function RankingsTab({ rankings, tournaments, categories, users, role, currentUser, createRanking, updateRanking, removeRanking }) {
+  const isAdmin = role === "admin";
+  const [activeId, setActiveId] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const active = rankings.find((r) => r.id === activeId) || rankings[0] || null;
+  const table = useMemo(() => (active ? computeRankingTable(active, tournaments, categories) : null), [active, tournaments, categories]);
+
+  const confirmDelete = async () => {
+    if (deleting || !deleteTarget) return;
+    setDeleting(true);
+    await removeRanking(deleteTarget.id);
+    setDeleting(false); setDeleteTarget(null); setActiveId(null);
+  };
+
+  return (
+    <div className="mt-2 space-y-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <SectionTitle sub={isAdmin ? "Clasificaciones acumuladas entre torneos. Vincula cada torneo a su ranking desde Generalidades." : "Tu posición acumulada jornada tras jornada."}>Rankings</SectionTitle>
+        {isAdmin && !showForm && (
+          <button onClick={() => { setShowForm(true); setEditing(false); }} style={{ background: COLORS.court, color: COLORS.chalk }}
+            className="px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-1.5"><Plus size={15} /> Nuevo ranking</button>
+        )}
+      </div>
+
+      {showForm && (
+        <RankingForm onCancel={() => setShowForm(false)}
+          onSave={async (form) => { const r = await createRanking(form); if (!r?.error) setShowForm(false); return r; }} />
+      )}
+
+      {rankings.length === 0 && !showForm && (
+        <Card><p className="text-sm text-gray-400">{isAdmin ? "Todavía no hay rankings. Crea el primero con \"Nuevo ranking\"." : "Todavía no hay rankings activos."}</p></Card>
+      )}
+
+      {rankings.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {rankings.map((r) => (
+            <button key={r.id} onClick={() => { setActiveId(r.id); setEditing(false); }} className="px-3 py-1.5 rounded-full text-xs font-semibold"
+              style={{ background: active?.id === r.id ? COLORS.court : "#EAEEF5", color: active?.id === r.id ? "#fff" : COLORS.ink }}>{r.name}</button>
+          ))}
+        </div>
+      )}
+
+      {active && editing && (
+        <RankingForm initial={active} onCancel={() => setEditing(false)}
+          onSave={async (form) => { const r = await updateRanking(active.id, form); if (!r?.error) setEditing(false); return r; }} />
+      )}
+
+      {active && !editing && table && (
+        <Card>
+          <div className="flex items-start justify-between gap-3 mb-1">
+            <div className="min-w-0">
+              <h3 className="disp text-xl" style={{ color: COLORS.courtDark }}>{active.name}</h3>
+              <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
+                Jugar suma {active.pointsPlayed} · ganar suma {active.pointsPlayed + active.pointsWin} en total
+                {active.groupPhaseOnly ? " · solo fase de grupos" : ""}
+                {active.qualifyCount ? ` · clasifican ${active.qualifyCount}` : ""}
+              </p>
+            </div>
+            {isAdmin && (
+              <div className="flex items-center gap-3 shrink-0">
+                <button onClick={() => setEditing(true)} title="Editar reglas" className="text-gray-300 hover:text-gray-600"><Pencil size={15} /></button>
+                <button onClick={() => setDeleteTarget(active)} title="Borrar ranking" className="text-gray-300 hover:text-red-500"><Trash2 size={15} /></button>
+              </div>
+            )}
+          </div>
+          {isAdmin && (
+            <p className="text-[11px] mb-3" style={{ color: "#9AA6BC" }}>
+              {table.tournaments.length === 0
+                ? "Ningún torneo suma a este ranking todavía -- elígelo en Generalidades de cada torneo."
+                : `Torneos que suman: ${table.tournaments.map((t) => t.name).join(" · ")}`}
+            </p>
+          )}
+
+          {table.rows.length === 0 ? (
+            <p className="text-sm text-gray-400 py-3">Todavía no hay partidos jugados en los torneos de este ranking.</p>
+          ) : (
+            <div className="overflow-x-auto mt-2">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-400 uppercase">
+                    <th className="py-1.5 pr-3">#</th>
+                    <th className="py-1.5 pr-3">Jugador</th>
+                    <th className="py-1.5 pr-3 text-center">Pts</th>
+                    <th className="py-1.5 pr-3 text-center">PJ</th>
+                    <th className="py-1.5 pr-3 text-center">PG</th>
+                    <th className="py-1.5 pr-3 text-center">PP</th>
+                    <th className="py-1.5 pr-3 text-center">Sets</th>
+                    {table.tournaments.map((t) => (
+                      <th key={t.id} className="py-1.5 pr-3 text-center whitespace-nowrap" title={t.name}>{t.startDate ? formatDateHuman(t.startDate) : t.name}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {table.rows.map((r) => {
+                    const qualifies = active.qualifyCount && r.rank <= active.qualifyCount;
+                    const isMe = !!currentUser && !!r.userId && r.userId === currentUser.id;
+                    const cutLine = active.qualifyCount && r.rank === active.qualifyCount;
+                    return (
+                      <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
+                        <td className="py-2 pr-3 font-bold">{r.rank}</td>
+                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{users.find((u) => u.id === r.userId)?.name || r.name}{isMe ? " (tú)" : ""}</td>
+                        <td className="py-2 pr-3 text-center font-extrabold mono" style={{ color: COLORS.courtDark }}>{r.pts}</td>
+                        <td className="py-2 pr-3 text-center">{r.pj}</td>
+                        <td className="py-2 pr-3 text-center">{r.pg}</td>
+                        <td className="py-2 pr-3 text-center">{r.pp}</td>
+                        <td className="py-2 pr-3 text-center mono">{r.setsF}-{r.setsC}</td>
+                        {table.tournaments.map((t) => (
+                          <td key={t.id} className="py-2 pr-3 text-center mono text-gray-500">{r.byTournament[t.id] ?? "—"}</td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {active.qualifyCount && <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>Resaltados en verde: los {active.qualifyCount} que clasifican. PJ = partidos jugados, PG = ganados, PP = perdidos.</p>}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {deleteTarget && (
+        <ConfirmDeleteModal
+          title={`¿Borrar el ranking "${deleteTarget.name}"?`}
+          message="Los torneos que lo usaban no se borran ni pierden ningún resultado -- solo dejan de estar vinculados a este ranking."
+          options={[{ label: deleting ? "Borrando…" : "Borrar ranking", variant: "danger", onClick: confirmDelete }]}
+          onCancel={() => setDeleteTarget(null)} />
+      )}
+    </div>
+  );
+}
+
 function EstadisticasTab({ bookings, openPlays, classes, subscriptions, membershipPlans, users, club, courts, categories, refreshStats,
   removeOpenPlayRegistration, removeClassRegistration, setOpenPlayAttendance, setClassAttendance, setOpenPlayPaymentStatus, setClassPaymentStatus }) {
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -7047,7 +7369,7 @@ function TorneosSection(props) {
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
-    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog,
+    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings,
   } = props;
   const isAdmin = role === "admin";
 
@@ -7115,7 +7437,7 @@ function TorneosSection(props) {
 
       {subTab === "config" && role === "admin" && (
         <TorneoTab tournament={tournament} setTournament={setTournament} uploadTournamentImage={uploadTournamentImage} dates={dates} courts={courts}
-          club={club} categories={categories} occupiedKeys={occupiedKeys} />
+          club={club} categories={categories} occupiedKeys={occupiedKeys} rankings={rankings} />
       )}
 
       {subTab === "categorias" && role === "admin" && (
