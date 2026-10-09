@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.93.0";
+const APP_VERSION = "2.94.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1782,6 +1782,7 @@ function normalizePersonName(name) {
 // mano por el admin) el nombre sin mayúsculas/tildes/espacios de más -- y si el mismo nombre
 // aparece una vez con cuenta y otra sin ella, se unen en una sola fila en vez de duplicarse.
 function computeRankingTable(ranking, tournaments, categories) {
+  if (ranking.method === "posicion") return computePositionTable(ranking, tournaments, categories);
   const linked = tournaments.filter((t) => t.rankingId === ranking.id)
     .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""));
   const byUser = new Map(), byName = new Map(), rows = [];
@@ -1798,7 +1799,7 @@ function computeRankingTable(ranking, tournaments, categories) {
     return row;
   };
   linked.forEach((t) => {
-    categories.filter((c) => c.tournamentId === t.id).forEach((c) => {
+    categories.filter((c) => c.tournamentId === t.id && (!ranking.categoryLevel || c.level === ranking.categoryLevel)).forEach((c) => {
       (c.matches || []).forEach((m) => {
         if (isByeMatch(m) || !m.winnerId || !m.teamAId || !m.teamBId) return;
         if (ranking.groupPhaseOnly && m.phase !== "group") return;
@@ -1824,7 +1825,127 @@ function computeRankingTable(ranking, tournaments, categories) {
   });
   rows.sort((a, b) => b.pts - a.pts || b.pg - a.pg || (b.setsF - b.setsC) - (a.setsF - a.setsC) || (b.ptsF - b.ptsC) - (a.ptsF - a.ptsC) || a.name.localeCompare(b.name));
   rows.forEach((r, i) => { r.rank = i + 1; });
-  return { rows, tournaments: linked };
+  return { rows, tournaments: linked, pending: new Set() };
+}
+
+// ---- Método "posicion" (v2.94.0) -- puntos según el PUESTO FINAL de cada equipo en cada
+// categoría del torneo (para un Tour: campeón, subcampeón, semifinalista...). Los que pierden en
+// la misma ronda comparten puesto y puntos. `key` es la llave que usa ranking.positionPoints.
+const POSITION_TIERS = [
+  { key: "champion", label: "Campeón", short: "Campeón" },
+  { key: "runnerUp", label: "Subcampeón", short: "Sub" },
+  { key: "semifinal", label: "Semifinalista (3°-4°)", short: "Semis" },
+  { key: "quarterfinal", label: "Cuartos de final (5°-8°)", short: "Cuartos" },
+  { key: "round16", label: "Octavos de final (9°-16°)", short: "Octavos" },
+  { key: "round32", label: "16avos de final (17°-32°)", short: "16avos" },
+  { key: "participation", label: "Participación (el resto)", short: "Part." },
+];
+const DEFAULT_POSITION_POINTS = { champion: 100, runnerUp: 70, semifinal: 45, quarterfinal: 25, round16: 12, round32: 6, participation: 5 };
+
+function tierForPlacement(bestPlacement) {
+  if (bestPlacement === 1) return "champion";
+  if (bestPlacement === 2) return "runnerUp";
+  if (bestPlacement <= 4) return "semifinal";
+  if (bestPlacement <= 8) return "quarterfinal";
+  if (bestPlacement <= 16) return "round16";
+  if (bestPlacement <= 32) return "round32";
+  return "participation";
+}
+
+// Puesto final de cada equipo de una categoría: { [teamId]: tierKey }, o null si todavía no se
+// puede saber (sin draw, torneo en curso, o formato sin un campeón único). Un equipo que no
+// aparece en el mapa pero sí está inscrito cuenta como "participation".
+//  - Eliminatoria / Grupos + Eliminatoria: lo da el cuadro -- se perdió en la ronda r de R rondas
+//    => el mejor puesto posible es 2^(R-r)+1 (la final perdida = 2°, semifinal = 3°, cuartos = 5°...).
+//    Solo cuenta cuando la final ya tiene ganador.
+//  - Doble eliminación: campeón/subcampeón de la final de la Llave A y 3°/4° de la final de la
+//    Llave B; el resto queda como participación (no se reconstruye su orden de eliminación).
+//  - Liga / un solo grupo: la tabla de posiciones, cuando todos los partidos ya se jugaron.
+//  - Varios grupos sin fase final: no hay campeón único => null.
+function computeFinalPlacements(cat) {
+  const matches = (cat.matches || []).filter((m) => !isByeMatch(m));
+  if (!cat.drawGenerated || matches.length === 0) return null;
+  const tier = {};
+  const bracket = matches.filter((m) => m.phase === "bracket");
+  if (bracket.length > 0) {
+    const R = Math.max(...bracket.map((m) => m.round));
+    const final = bracket.find((m) => m.round === R);
+    if (!final?.winnerId) return null;
+    tier[final.winnerId] = "champion";
+    bracket.forEach((m) => {
+      if (!m.winnerId) return;
+      const loser = m.winnerId === m.teamAId ? m.teamBId : m.teamAId;
+      if (loser) tier[loser] = tierForPlacement(2 ** (R - m.round) + 1);
+    });
+    return tier;
+  }
+  if (matches.some((m) => m.phase === "bracket_wr")) {
+    const wrFinal = matches.find((m) => m.phase === "bracket_wr" && m.isFinalMatch);
+    const lbFinal = matches.find((m) => m.phase === "bracket_lb" && m.isThirdPlaceMatch);
+    if (!wrFinal?.winnerId || (lbFinal && !lbFinal.winnerId)) return null;
+    tier[wrFinal.winnerId] = "champion";
+    tier[wrFinal.winnerId === wrFinal.teamAId ? wrFinal.teamBId : wrFinal.teamAId] = "runnerUp";
+    if (lbFinal) {
+      tier[lbFinal.winnerId] = "semifinal";
+      tier[lbFinal.winnerId === lbFinal.teamAId ? lbFinal.teamBId : lbFinal.teamAId] = "semifinal";
+    }
+    return tier;
+  }
+  const groups = cat.groups || [];
+  const groupMatches = matches.filter((m) => m.phase === "group");
+  if (groups.length !== 1 || groupMatches.length === 0 || groupMatches.some((m) => !m.winnerId)) return null;
+  computeStandings(cat.teams || [], groups[0].teamIds, groupMatches).forEach((row, i) => { tier[row.teamId] = tierForPlacement(i + 1); });
+  return tier;
+}
+
+// Tabla de un ranking método "posicion": por cada torneo vinculado y cada categoría YA TERMINADA
+// (ver computeFinalPlacements), cada jugador del equipo suma los puntos de su puesto × el peso del
+// torneo. Si el ranking tiene `bestN`, de cada jugador solo cuentan sus N mejores torneos (los
+// demás se muestran pero no suman). Una categoría sin terminar no suma nada todavía (el torneo
+// queda en `pending`).
+function computePositionTable(ranking, tournaments, categories) {
+  const linked = tournaments.filter((t) => t.rankingId === ranking.id)
+    .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""));
+  const byUser = new Map(), byName = new Map(), rows = [], pending = new Set();
+  const rowFor = (p) => {
+    const nameKey = normalizePersonName(p.name);
+    let row = (p.userId && byUser.get(p.userId)) || byName.get(nameKey);
+    if (!row) { row = { userId: p.userId || null, name: p.name, pts: 0, byTournament: {}, tierByTournament: {}, counted: {} }; rows.push(row); }
+    if (p.userId && !row.userId) row.userId = p.userId;
+    if (p.userId) byUser.set(p.userId, row);
+    if (nameKey) byName.set(nameKey, row);
+    return row;
+  };
+  const tierOrder = (key) => POSITION_TIERS.findIndex((x) => x.key === key);
+  linked.forEach((t) => {
+    const weight = t.rankingMultiplier != null && Number(t.rankingMultiplier) >= 0 ? Number(t.rankingMultiplier) : 1;
+    categories.filter((c) => c.tournamentId === t.id && (!ranking.categoryLevel || c.level === ranking.categoryLevel)).forEach((c) => {
+      const tiers = computeFinalPlacements(c);
+      if (!tiers) { if (c.drawGenerated) pending.add(t.id); return; }
+      (c.teams || []).forEach((team) => {
+        const tierKey = tiers[team.id] || "participation";
+        const pts = Math.round((Number(ranking.positionPoints?.[tierKey]) || 0) * weight * 100) / 100;
+        (team.players || []).forEach((p) => {
+          const row = rowFor(p);
+          row.byTournament[t.id] = (row.byTournament[t.id] || 0) + pts;
+          const prev = row.tierByTournament[t.id];
+          if (!prev || tierOrder(tierKey) < tierOrder(prev)) row.tierByTournament[t.id] = tierKey;
+        });
+      });
+    });
+  });
+  rows.forEach((r) => {
+    const entries = Object.entries(r.byTournament).sort((a, b) => b[1] - a[1]);
+    const used = ranking.bestN ? entries.slice(0, ranking.bestN) : entries;
+    used.forEach(([tid, v]) => { r.counted[tid] = true; r.pts += v; });
+    r.pts = Math.round(r.pts * 100) / 100;
+    r.titles = Object.values(r.tierByTournament).filter((k) => k === "champion").length;
+    r.finals = Object.values(r.tierByTournament).filter((k) => k === "runnerUp").length;
+    r.events = entries.length;
+  });
+  rows.sort((a, b) => b.pts - a.pts || b.titles - a.titles || b.finals - a.finals || a.name.localeCompare(b.name));
+  rows.forEach((r, i) => { r.rank = i + 1; });
+  return { rows, tournaments: linked, pending };
 }
 
 /* =========================================================================
@@ -2357,6 +2478,8 @@ export default function PickleballTournamentApp() {
     regularPrice1: r.regular_price_1 ?? "", regularPrice2: r.regular_price_2 ?? "", regularPrice3: r.regular_price_3 ?? "",
     courtIds: r.court_ids || [], image: r.image || "",
     rankingId: r.ranking_id || null,
+    // v2.94.0 -- peso del torneo en un ranking método "posicion" (×1 = normal, ×2 = vale doble).
+    rankingMultiplier: r.ranking_multiplier != null ? Number(r.ranking_multiplier) : 1,
   });
   // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
   // (antes esto era una fila única fija, `.limit(1)`, y no había forma de crear uno nuevo
@@ -2379,6 +2502,11 @@ export default function PickleballTournamentApp() {
     id: r.id, name: r.name, method: r.method || "partidos",
     pointsPlayed: r.points_played ?? 1, pointsWin: r.points_win ?? 2,
     groupPhaseOnly: r.group_phase_only !== false, qualifyCount: r.qualify_count ?? null,
+    // v2.94.0 -- método "posicion": tabla de puntos por puesto final (se completa con los
+    // defaults si falta alguna llave), cuántos mejores torneos cuentan por jugador (null = todos)
+    // y filtro opcional por nivel de categoría (null = todas).
+    positionPoints: { ...DEFAULT_POSITION_POINTS, ...(r.position_points || {}) },
+    bestN: r.best_n ?? null, categoryLevel: r.category_level || null,
   });
   const [rankings, setRankings] = useState(() => loadCache("rankings", []));
   useEffect(() => {
@@ -2389,10 +2517,13 @@ export default function PickleballTournamentApp() {
   }, []);
   useEffect(() => { saveCache("rankings", rankings); }, [rankings]);
   const rankingToRow = (f) => ({
-    name: f.name.trim(), method: "partidos",
+    name: f.name.trim(), method: f.method === "posicion" ? "posicion" : "partidos",
     points_played: Number(f.pointsPlayed) || 0, points_win: Number(f.pointsWin) || 0,
     group_phase_only: !!f.groupPhaseOnly,
     qualify_count: f.qualifyCount === "" || f.qualifyCount == null ? null : Number(f.qualifyCount),
+    position_points: Object.fromEntries(POSITION_TIERS.map((t) => [t.key, Number(f.positionPoints?.[t.key]) || 0])),
+    best_n: f.bestN === "" || f.bestN == null ? null : Number(f.bestN),
+    category_level: f.categoryLevel || null,
   });
   const createRanking = async (form) => {
     if (currentUser?.role !== "admin") return { error: "Solo un admin puede crear rankings." };
@@ -2509,6 +2640,7 @@ export default function PickleballTournamentApp() {
     if ("courtIds" in patch) dbPatch.court_ids = patch.courtIds;
     if ("image" in patch) dbPatch.image = patch.image || null;
     if ("rankingId" in patch) dbPatch.ranking_id = patch.rankingId || null;
+    if ("rankingMultiplier" in patch) dbPatch.ranking_multiplier = patch.rankingMultiplier === "" || patch.rankingMultiplier == null ? 1 : Number(patch.rankingMultiplier);
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
@@ -5820,6 +5952,14 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
             <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
               {rankings.length === 0 ? "Todavía no hay rankings -- créalos en la pestaña Rankings." : "Los partidos jugados de este torneo suman puntos a ese ranking según sus reglas."}
             </p>
+            {rankings.find((r) => r.id === tournament.rankingId)?.method === "posicion" && (
+              <div className="mt-3">
+                <Label>Peso de este torneo en el ranking</Label>
+                <input type="number" min={0} step="0.1" style={{ ...inputStyle, maxWidth: 140 }} value={tournament.rankingMultiplier ?? 1}
+                  onChange={(e) => set("rankingMultiplier", e.target.value)} />
+                <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>×1 = puntos normales, ×2 = vale el doble, ×0.5 = la mitad. Multiplica los puntos de cada puesto de este torneo.</p>
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -6908,6 +7048,10 @@ function RankingForm({ initial, onSave, onCancel }) {
   const [pointsWin, setPointsWin] = useState(initial?.pointsWin ?? 2);
   const [groupPhaseOnly, setGroupPhaseOnly] = useState(initial?.groupPhaseOnly ?? true);
   const [qualifyCount, setQualifyCount] = useState(initial?.qualifyCount ?? "");
+  const [method, setMethod] = useState(initial?.method || "partidos");
+  const [positionPoints, setPositionPoints] = useState(initial?.positionPoints || DEFAULT_POSITION_POINTS);
+  const [bestN, setBestN] = useState(initial?.bestN ?? "");
+  const [categoryLevel, setCategoryLevel] = useState(initial?.categoryLevel || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const played = Number(pointsPlayed) || 0, win = Number(pointsWin) || 0;
@@ -6915,7 +7059,7 @@ function RankingForm({ initial, onSave, onCancel }) {
   const submit = async () => {
     if (!name.trim() || saving) return;
     setSaving(true); setError("");
-    const result = await onSave({ name, pointsPlayed, pointsWin, groupPhaseOnly, qualifyCount });
+    const result = await onSave({ name, method, pointsPlayed, pointsWin, groupPhaseOnly, qualifyCount, positionPoints, bestN, categoryLevel });
     setSaving(false);
     if (result?.error) setError("No se pudo guardar -- revisa tu conexión e intenta de nuevo.");
   };
@@ -6925,23 +7069,63 @@ function RankingForm({ initial, onSave, onCancel }) {
       <SectionTitle sub="Los puntos se calculan solos con los partidos jugados de los torneos que elijan este ranking.">{initial ? "Editar ranking" : "Nuevo ranking"}</SectionTitle>
       <div className="space-y-4 max-w-xl">
         <div><Label>Nombre</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Liga de Desarrollo Open" /></div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label>Puntos por partido jugado (asistencia)</Label>
-            <input type="number" min={0} style={inputStyle} value={pointsPlayed} onChange={(e) => setPointsPlayed(e.target.value)} />
-          </div>
-          <div>
-            <Label>Puntos extra por victoria</Label>
-            <input type="number" min={0} style={inputStyle} value={pointsWin} onChange={(e) => setPointsWin(e.target.value)} />
-          </div>
+        <div>
+          <Label>¿Cómo se puntúa?</Label>
+          <Segmented value={method} onChange={setMethod} options={[{ value: "partidos", label: "Por partidos (liga)" }, { value: "posicion", label: "Por posición final (tour)" }]} />
+          <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+            {method === "partidos"
+              ? "Suma por cada partido jugado y ganado, sin importar en qué puesto termine el torneo."
+              : "Suma según el puesto final de cada equipo en el torneo (campeón, subcampeón, semifinalista...). Solo cuenta cuando la final ya se jugó."}
+          </p>
         </div>
-        <p className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
-          Cada partido: <b>perder suma {played}</b> · <b>ganar suma {played + win}</b> (por jugador, aplica a los dos de la dupla).
-        </p>
-        <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer" style={{ color: COLORS.ink }}>
-          <input type="checkbox" checked={groupPhaseOnly} onChange={(e) => setGroupPhaseOnly(e.target.checked)} />
-          Solo cuentan los partidos de fase de grupos / liga (los de fase final no suman)
-        </label>
+        {method === "partidos" ? (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Puntos por partido jugado (asistencia)</Label>
+                <input type="number" min={0} style={inputStyle} value={pointsPlayed} onChange={(e) => setPointsPlayed(e.target.value)} />
+              </div>
+              <div>
+                <Label>Puntos extra por victoria</Label>
+                <input type="number" min={0} style={inputStyle} value={pointsWin} onChange={(e) => setPointsWin(e.target.value)} />
+              </div>
+            </div>
+            <p className="text-xs px-3 py-2 rounded-lg" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+              Cada partido: <b>perder suma {played}</b> · <b>ganar suma {played + win}</b> (por jugador, aplica a los dos de la dupla).
+            </p>
+            <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer" style={{ color: COLORS.ink }}>
+              <input type="checkbox" checked={groupPhaseOnly} onChange={(e) => setGroupPhaseOnly(e.target.checked)} />
+              Solo cuentan los partidos de fase de grupos / liga (los de fase final no suman)
+            </label>
+          </>
+        ) : (
+          <>
+            <div>
+              <Label>Puntos por puesto final (para cada jugador de la dupla)</Label>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                {POSITION_TIERS.map((t) => (
+                  <div key={t.key} className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold" style={{ color: COLORS.ink }}>{t.label}</span>
+                    <input type="number" min={0} style={{ ...inputStyle, width: 80 }} value={positionPoints[t.key] ?? 0}
+                      onChange={(e) => setPositionPoints((prev) => ({ ...prev, [t.key]: e.target.value }))} />
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>Quienes pierden en la misma ronda comparten puesto y puntos. Cada torneo puede valer más o menos con su peso (se elige en Generalidades del torneo).</p>
+            </div>
+            <div>
+              <Label>¿Cuántos mejores torneos cuentan por jugador? (opcional)</Label>
+              <input type="number" min={1} style={inputStyle} value={bestN} onChange={(e) => setBestN(e.target.value)} placeholder="Vacío = cuentan todos" />
+            </div>
+          </>
+        )}
+        <div>
+          <Label>¿Solo cuenta un nivel de categoría? (opcional)</Label>
+          <select style={inputStyle} value={categoryLevel} onChange={(e) => setCategoryLevel(e.target.value)}>
+            <option value="">Todas las categorías del torneo</option>
+            {CATEGORY_LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </div>
         <div>
           <Label>¿Cuántos clasifican? (opcional)</Label>
           <input type="number" min={1} style={inputStyle} value={qualifyCount} onChange={(e) => setQualifyCount(e.target.value)} placeholder="Ej. 16 -- se resaltan en la tabla" />
@@ -7014,8 +7198,10 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
             <div className="min-w-0">
               <h3 className="disp text-xl" style={{ color: COLORS.courtDark }}>{active.name}</h3>
               <p className="text-xs mt-1" style={{ color: "#6B7688" }}>
-                Jugar suma {active.pointsPlayed} · ganar suma {active.pointsPlayed + active.pointsWin} en total
-                {active.groupPhaseOnly ? " · solo fase de grupos" : ""}
+                {active.method === "posicion"
+                  ? `Por posición final · campeón ${active.positionPoints.champion} · sub ${active.positionPoints.runnerUp} · semis ${active.positionPoints.semifinal}${active.bestN ? ` · cuentan los ${active.bestN} mejores torneos` : ""}`
+                  : `Jugar suma ${active.pointsPlayed} · ganar suma ${active.pointsPlayed + active.pointsWin} en total${active.groupPhaseOnly ? " · solo fase de grupos" : ""}`}
+                {active.categoryLevel ? ` · solo ${active.categoryLevel}` : ""}
                 {active.qualifyCount ? ` · clasifican ${active.qualifyCount}` : ""}
               </p>
             </div>
@@ -7030,12 +7216,60 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
             <p className="text-[11px] mb-3" style={{ color: "#9AA6BC" }}>
               {table.tournaments.length === 0
                 ? "Ningún torneo suma a este ranking todavía -- elígelo en Generalidades de cada torneo."
-                : `Torneos que suman: ${table.tournaments.map((t) => t.name).join(" · ")}`}
+                : `Torneos que suman: ${table.tournaments.map((t) => `${t.name}${t.rankingMultiplier !== 1 && active.method === "posicion" ? ` (×${t.rankingMultiplier})` : ""}${table.pending.has(t.id) ? " (en curso)" : ""}`).join(" · ")}`}
             </p>
           )}
 
           {table.rows.length === 0 ? (
-            <p className="text-sm text-gray-400 py-3">Todavía no hay partidos jugados en los torneos de este ranking.</p>
+            <p className="text-sm text-gray-400 py-3">
+              {active.method === "posicion" ? "Todavía no hay ningún torneo terminado en este ranking -- suma cuando se juega la final." : "Todavía no hay partidos jugados en los torneos de este ranking."}
+            </p>
+          ) : active.method === "posicion" ? (
+            <div className="overflow-x-auto mt-2">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-400 uppercase">
+                    <th className="py-1.5 pr-3">#</th>
+                    <th className="py-1.5 pr-3">Jugador</th>
+                    <th className="py-1.5 pr-3 text-center">Pts</th>
+                    <th className="py-1.5 pr-3 text-center">Torneos</th>
+                    {table.tournaments.map((t) => (
+                      <th key={t.id} className="py-1.5 pr-3 text-center whitespace-nowrap" title={t.name}>{t.startDate ? formatDateHuman(t.startDate) : t.name}{table.pending.has(t.id) ? "*" : ""}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {table.rows.map((r) => {
+                    const qualifies = active.qualifyCount && r.rank <= active.qualifyCount;
+                    const isMe = !!currentUser && !!r.userId && r.userId === currentUser.id;
+                    const cutLine = active.qualifyCount && r.rank === active.qualifyCount;
+                    return (
+                      <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
+                        <td className="py-2 pr-3 font-bold">{r.rank}</td>
+                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{users.find((u) => u.id === r.userId)?.name || r.name}{isMe ? " (tú)" : ""}</td>
+                        <td className="py-2 pr-3 text-center font-extrabold mono" style={{ color: COLORS.courtDark }}>{r.pts}</td>
+                        <td className="py-2 pr-3 text-center">{r.events}</td>
+                        {table.tournaments.map((t) => {
+                          const v = r.byTournament[t.id];
+                          const tier = POSITION_TIERS.find((x) => x.key === r.tierByTournament[t.id]);
+                          return (
+                            <td key={t.id} className="py-2 pr-3 text-center mono" style={{ color: v == null ? "#9AA6BC" : r.counted[t.id] ? COLORS.ink : "#B7BFCE", textDecoration: v != null && !r.counted[t.id] ? "line-through" : "none" }}
+                              title={v != null && !r.counted[t.id] ? "No cuenta: fuera de sus mejores torneos" : undefined}>
+                              {v == null ? "—" : <>{v}<span className="block text-[9px] font-semibold uppercase" style={{ color: "#8A93A6", textDecoration: "none" }}>{tier?.short}</span></>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>
+                {table.pending.size > 0 ? "* Torneo en curso: suma cuando se juega su final. " : ""}
+                {active.bestN ? "Tachados: no cuentan (solo valen los mejores torneos de cada jugador). " : ""}
+                {active.qualifyCount ? `Verde: los ${active.qualifyCount} que clasifican.` : ""}
+              </p>
+            </div>
           ) : (
             <div className="overflow-x-auto mt-2">
               <table className="w-full text-sm">
