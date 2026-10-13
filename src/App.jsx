@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.98.0";
+const APP_VERSION = "2.99.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3829,6 +3829,7 @@ export default function PickleballTournamentApp() {
       c.groups.forEach((g) => {
         const standings = computeStandings(c.teams, g.teamIds, c.matches.filter((m) => m.groupId === g.id));
         g.standings = standings;
+        g.advanced = true;
       });
       c.matches.forEach((m) => {
         if (m.phase === "bracket" && m.teamASrc && m.teamASrc.type !== "winner" && !m.teamAId) {
@@ -3844,6 +3845,33 @@ export default function PickleballTournamentApp() {
       });
       propagateWinner(c.matches, null);
       c.groupsClosed = true;
+      return c;
+    });
+    setScheduleInfo(null);
+  };
+
+  // v2.99.0, a pedido del club: pasar a los clasificados GRUPO POR GRUPO, apenas ese grupo termina,
+  // sin esperar a que terminen los demás ni salir de Resultados hacia Formatos. Igual que
+  // closeGroupsAndSeedBracket pero solo toca los cupos del cuadro que dependen de ESTE grupo
+  // (`teamASrc/teamBSrc.groupId`) y nunca pisa un cupo ya lleno. Cuando todos los grupos pasaron, la
+  // fase queda cerrada (`groupsClosed`), exactamente como si se hubiera usado el botón de Formatos.
+  const advanceGroupQualifiers = (catId, groupId) => {
+    updateCategory(catId, (c) => {
+      const g = c.groups.find((gr) => gr.id === groupId);
+      if (!g) return c;
+      g.standings = computeStandings(c.teams, g.teamIds, c.matches.filter((m) => m.groupId === g.id));
+      g.advanced = true;
+      c.matches.forEach((m) => {
+        if (m.phase !== "bracket") return;
+        [["A", "teamASrc"], ["B", "teamBSrc"]].forEach(([side, srcKey]) => {
+          const src = m[srcKey];
+          if (!src || src.type === "winner" || src.groupId !== groupId || m[`team${side}Id`]) return;
+          const row = g.standings[src.rank - 1];
+          if (row) { m[`team${side}Id`] = row.teamId; m[`team${side}Label`] = row.name; }
+        });
+      });
+      propagateWinner(c.matches, null);
+      if (c.groups.every((gr) => gr.advanced)) c.groupsClosed = true;
       return c;
     });
     setScheduleInfo(null);
@@ -4796,7 +4824,7 @@ export default function PickleballTournamentApp() {
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
                 addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
-                generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
+                generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} advanceGroupQualifiers={advanceGroupQualifiers} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} entryRankCheck={entryRankCheck}
                 setCategoryFormat={setCategoryFormat} courts={courts}
                 matchDuration={matchDuration} breakM={breakM}
@@ -7872,7 +7900,7 @@ function TorneosSection(props) {
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
-    generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
+    generateDraw, closeGroupsAndSeedBracket, advanceGroupQualifiers, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
@@ -7986,7 +8014,7 @@ function TorneosSection(props) {
 
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
-          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates}
+          closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} advanceGroupQualifiers={advanceGroupQualifiers} tournament={tournament} dates={dates}
           moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} role={role} />
       )}
 
@@ -11449,12 +11477,13 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, role }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, advanceGroupQualifiers, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
   // Filtrar a una categoría puntual (con sus tablas/bracket) sigue disponible como antes.
   const [catId, setCatId] = useState("all");
+  const [dismissedGroups, setDismissedGroups] = useState([]); // "catId:groupId" ya pospuestos o pasados (v2.99.0)
   // v2.77.0: filtro por día, mismo patrón que CalendarioTab -- "Cargar resultados" mezclaba
   // todos los días del torneo en una sola lista larga; el club pidió poder ver un día a la vez,
   // igual que ya se puede en Calendario.
@@ -11772,12 +11801,65 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
 
   const printTitle = tournament?.name && day ? `${tournament.name} -- ${formatDateHuman(day)}` : (tournament?.name || "Torneo");
 
+  // v2.99.0 -- grupos TERMINADOS (todos sus partidos con resultado) que todavía no pasaron al cuadro:
+  // aparece un popup con la clasificación y "Pasar a los clasificados". Si se pospone ("Más tarde")
+  // queda un aviso fijo arriba con el mismo botón, así no hay que ir a Formatos.
+  const readyGroups = isAdmin ? categories.flatMap((c) => (c.format !== "grupos_eliminatoria" || c.groupsClosed ? [] : c.groups
+    .filter((g) => !g.advanced && g.teamIds.length > 0 && g.teamIds.every(Boolean))
+    .filter((g) => {
+      const gm = c.matches.filter((m) => m.groupId === g.id && m.phase === "group" && !isByeMatch(m));
+      return gm.length > 0 && gm.every((m) => !!m.winnerId);
+    })
+    .map((g) => ({ cat: c, group: g })))) : [];
+  const popupGroup = readyGroups.find((r) => !dismissedGroups.includes(`${r.cat.id}:${r.group.id}`)) || null;
+  const doAdvance = (r) => { advanceGroupQualifiers(r.cat.id, r.group.id); setDismissedGroups((d) => [...d, `${r.cat.id}:${r.group.id}`]); };
+  const groupReadyUI = readyGroups.length > 0 && (
+    <>
+      {popupGroup && (() => {
+        const { cat: pc, group: pg } = popupGroup;
+        const rows = computeStandings(pc.teams, pg.teamIds, pc.matches.filter((m) => m.groupId === pg.id));
+        const q = pg.qualifiers || 0;
+        const tiedAtCut = q > 0 && rows[q - 1] && rows[q] && rows[q - 1].pg === rows[q].pg
+          && (rows[q - 1].setsF - rows[q - 1].setsC) === (rows[q].setsF - rows[q].setsC) && (rows[q - 1].ptsF - rows[q - 1].ptsC) === (rows[q].ptsF - rows[q].ptsC);
+        return (
+          <Modal onClose={() => setDismissedGroups((d) => [...d, `${pc.id}:${pg.id}`])} maxWidth={560}>
+            <div className="p-5">
+              <p className="text-[11px] font-extrabold uppercase tracking-wide" style={{ color: COLORS.court }}>{catBadgeLabel(pc)}</p>
+              <p className="disp text-xl mb-1" style={{ color: COLORS.courtDark }}>{pg.name} terminó</p>
+              <p className="text-xs mb-3" style={{ color: "#6B7688" }}>Ya están todos los resultados de este grupo. Clasifican {q}: pasan al cuadro de eliminación con el puesto que tienen en esta tabla.</p>
+              <StandingsTable rows={rows} qualifiers={q} />
+              {tiedAtCut && <p className="text-xs font-semibold mt-2" style={{ color: "#B23A1B" }}>Ojo: hay empate exacto entre el último que clasifica y el primero que queda fuera (ya se desempató por enfrentamiento directo). Revisa antes de pasar.</p>}
+              <div className="flex items-center gap-2 mt-4">
+                <button onClick={() => doAdvance(popupGroup)} style={{ background: COLORS.court, color: COLORS.chalk }} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-1.5">
+                  <CheckCircle2 size={15} /> Pasar a los clasificados
+                </button>
+                <button onClick={() => setDismissedGroups((d) => [...d, `${pc.id}:${pg.id}`])} className="px-4 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Más tarde</button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
+      {!popupGroup && (
+        <div className="rounded-xl p-3 space-y-1.5" style={{ background: "#EAF3E6", border: `1.5px solid ${COLORS.court}` }}>
+          <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: COLORS.courtDark }}>Grupos terminados -- listos para pasar al cuadro</p>
+          {readyGroups.map((r) => (
+            <div key={`${r.cat.id}:${r.group.id}`} className="flex items-center justify-between gap-2 text-sm">
+              <span>{catBadgeLabel(r.cat)} · {r.group.name}</span>
+              <button onClick={() => doAdvance(r)} style={{ background: COLORS.court, color: COLORS.chalk }} className="px-3 py-1.5 rounded-lg text-xs font-bold">Pasar a los clasificados</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+
   if (catId === "all") {
     // Cliente: sin filtro por día (eso revelaría el horario) y solo partidos ya jugados.
     const allPlayable = chronoSort(categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && (isAdmin ? m.day === day : !!m.winnerId)).map((m) => ({ ...m, __cat: c }))), courtOrder);
     return (
       <div className="mt-2 space-y-5">
         {dayTabs}
+        {groupReadyUI}
         {nextCallsPanel}
         <div className="flex items-center justify-between flex-wrap gap-2">
           {catChips}
@@ -11814,6 +11896,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   return (
     <div className="mt-2 space-y-5">
       {dayTabs}
+      {groupReadyUI}
       {nextCallsPanel}
       <div className="flex items-center justify-between flex-wrap gap-2">
         {catChips}
