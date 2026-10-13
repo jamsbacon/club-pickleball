@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.94.0";
+const APP_VERSION = "2.95.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1775,6 +1775,47 @@ function normalizePersonName(name) {
   return (name || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+// Uniones manuales de nombres (v2.95.0) -- `ranking.nameLinks` = { [nombre normalizado]: { userId? , name? } }.
+// Une a un jugador SIN cuenta escrito distinto en dos torneos ("Pedro Gomez" / "Pedro Gómez R.") en
+// una sola fila del ranking. Solo se aplica al calcular la tabla: no toca ninguna inscripción ni
+// resultado, y deshacer la unión es borrar la entrada. Un jugador con cuenta nunca se redirige
+// (su userId manda). Se sigue la cadena hasta 5 saltos por si el destino fue unido a otro después.
+function resolveLinkedPlayer(ranking, p) {
+  if (p.userId) return p;
+  const links = ranking.nameLinks;
+  if (!links) return p;
+  let cur = p;
+  for (let hop = 0; hop < 5 && !cur.userId; hop++) {
+    const link = links[normalizePersonName(cur.name)];
+    if (!link) break;
+    if (link.userId) return { ...cur, userId: link.userId };
+    if (!link.name || normalizePersonName(link.name) === normalizePersonName(cur.name)) break;
+    cur = { ...cur, name: link.name };
+  }
+  return cur;
+}
+
+// Pares de nombres parecidos entre filas sin cuenta, para sugerirle al admin qué unir. Heurística
+// barata (no decide nada sola): mismas palabras en otro orden, una contenida en la otra
+// ("Pedro Gomez" / "Pedro Gomez R"), o a una o dos letras de distancia.
+function editDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return dp[a.length][b.length];
+}
+function namesLookSimilar(a, b) {
+  const na = normalizePersonName(a), nb = normalizePersonName(b);
+  if (!na || !nb || na === nb) return false;
+  const ta = na.split(" "), tb = nb.split(" ");
+  if ([...ta].sort().join(" ") === [...tb].sort().join(" ")) return true;
+  const [small, big] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  if (small.length >= 2 && small.every((t) => big.some((u) => u === t || (t.length >= 3 && u.startsWith(t)) || (u.length >= 3 && t.startsWith(u))))) return true;
+  return Math.min(na.length, nb.length) >= 5 && editDistance(na, nb) <= 2;
+}
+
 // Tabla de un ranking método "partidos", calculada desde cero a partir de los partidos YA
 // JUGADOS (con ganador) de los torneos vinculados -- nunca se guarda. Cada partido cuenta para
 // los 4 jugadores (2 por dupla): todos suman `pointsPlayed` por jugar, y los de la dupla ganadora
@@ -1786,7 +1827,8 @@ function computeRankingTable(ranking, tournaments, categories) {
   const linked = tournaments.filter((t) => t.rankingId === ranking.id)
     .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""));
   const byUser = new Map(), byName = new Map(), rows = [];
-  const rowFor = (p) => {
+  const rowFor = (raw) => {
+    const p = resolveLinkedPlayer(ranking, raw);
     const nameKey = normalizePersonName(p.name);
     let row = (p.userId && byUser.get(p.userId)) || byName.get(nameKey);
     if (!row) {
@@ -1907,7 +1949,8 @@ function computePositionTable(ranking, tournaments, categories) {
   const linked = tournaments.filter((t) => t.rankingId === ranking.id)
     .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""));
   const byUser = new Map(), byName = new Map(), rows = [], pending = new Set();
-  const rowFor = (p) => {
+  const rowFor = (raw) => {
+    const p = resolveLinkedPlayer(ranking, raw);
     const nameKey = normalizePersonName(p.name);
     let row = (p.userId && byUser.get(p.userId)) || byName.get(nameKey);
     if (!row) { row = { userId: p.userId || null, name: p.name, pts: 0, byTournament: {}, tierByTournament: {}, counted: {} }; rows.push(row); }
@@ -2507,6 +2550,8 @@ export default function PickleballTournamentApp() {
     // y filtro opcional por nivel de categoría (null = todas).
     positionPoints: { ...DEFAULT_POSITION_POINTS, ...(r.position_points || {}) },
     bestN: r.best_n ?? null, categoryLevel: r.category_level || null,
+    // v2.95.0 -- uniones manuales de nombres sin cuenta, ver resolveLinkedPlayer.
+    nameLinks: r.name_links && typeof r.name_links === "object" ? r.name_links : {},
   });
   const [rankings, setRankings] = useState(() => loadCache("rankings", []));
   useEffect(() => {
@@ -2536,6 +2581,25 @@ export default function PickleballTournamentApp() {
     if (currentUser?.role !== "admin") return { error: "Solo un admin puede editar rankings." };
     const { data, error } = await supabase.from("rankings").update(rankingToRow(form)).eq("id", id).select().single();
     if (error) { console.error("updateRanking:", error.message); return { error: error.message }; }
+    setRankings((prev) => prev.map((r) => (r.id === id ? mapRankingRow(data) : r)));
+    return {};
+  };
+  // Unir / deshacer la unión de un nombre sin cuenta (v2.95.0). Relee `name_links` fresco de la base
+  // antes de escribir, para no pisar la unión que otro admin haya hecho mientras tanto. `target`
+  // = { userId } o { name }; null deshace la unión de `variantName`. No toca inscripciones.
+  const setRankingNameLink = async (id, variantName, target) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede unir nombres." };
+    const key = normalizePersonName(variantName);
+    if (!key) return { error: "Nombre vacío." };
+    const { data: fresh, error: readErr } = await supabase.from("rankings").select("name_links").eq("id", id).single();
+    if (readErr) { console.error("setRankingNameLink read:", readErr.message); return { error: readErr.message }; }
+    const links = { ...(fresh?.name_links && typeof fresh.name_links === "object" ? fresh.name_links : {}) };
+    if (target) {
+      if (target.name && normalizePersonName(target.name) === key) return { error: "Es el mismo nombre." };
+      links[key] = target.userId ? { userId: target.userId } : { name: target.name };
+    } else delete links[key];
+    const { data, error } = await supabase.from("rankings").update({ name_links: links }).eq("id", id).select().single();
+    if (error) { console.error("setRankingNameLink:", error.message); return { error: error.message }; }
     setRankings((prev) => prev.map((r) => (r.id === id ? mapRankingRow(data) : r)));
     return {};
   };
@@ -4672,7 +4736,7 @@ export default function PickleballTournamentApp() {
 
           {effectiveTab === "rankings" && (
             <RankingsTab rankings={rankings} tournaments={tournaments} categories={categories} users={users} role={role} currentUser={currentUser}
-              createRanking={createRanking} updateRanking={updateRanking} removeRanking={removeRanking} />
+              createRanking={createRanking} updateRanking={updateRanking} removeRanking={removeRanking} setRankingNameLink={setRankingNameLink} />
           )}
 
           {effectiveTab === "membresias" && (
@@ -7142,7 +7206,86 @@ function RankingForm({ initial, onSave, onCancel }) {
   );
 }
 
-function RankingsTab({ rankings, tournaments, categories, users, role, currentUser, createRanking, updateRanking, removeRanking }) {
+// Panel admin para unir a mano jugadores SIN cuenta escritos distinto (v2.95.0). Opera sobre las
+// filas ya calculadas de la tabla: cada fila sin cuenta se puede unir a otra fila (o a un usuario
+// con cuenta). Las uniones ya hechas se listan para deshacerlas.
+function NameLinksPanel({ ranking, table, users, onLink }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const unlinked = table.rows.filter((r) => !r.userId);
+  const links = Object.entries(ranking.nameLinks || {});
+  const suggestions = [];
+  unlinked.forEach((a, i) => {
+    table.rows.forEach((b, j) => {
+      if ((b.userId || j > i) && a !== b && namesLookSimilar(a.name, b.name)) suggestions.push([a, b]);
+    });
+  });
+  const targets = [
+    ...table.rows.filter((r) => normalizePersonName(r.name) !== normalizePersonName(from)).map((r) => ({ v: r.userId ? `u:${r.userId}` : `n:${r.name}`, label: `${users.find((u) => u.id === r.userId)?.name || r.name}${r.userId ? " (con cuenta)" : ""} · #${r.rank}` })),
+    ...users.filter((u) => u.role === "cliente" && !table.rows.some((r) => r.userId === u.id)).map((u) => ({ v: `u:${u.id}`, label: `${u.name} (con cuenta, sin partidos aquí)` })),
+  ];
+  const doLink = async (variant, targetVal) => {
+    if (busy || !variant || !targetVal) return;
+    setBusy(true); setErr("");
+    const target = targetVal.startsWith("u:") ? { userId: targetVal.slice(2) } : { name: targetVal.slice(2) };
+    const r = await onLink(variant, target);
+    setBusy(false);
+    if (r?.error) setErr(r.error); else { setFrom(""); setTo(""); }
+  };
+  const describe = (link) => link.userId ? `${users.find((u) => u.id === link.userId)?.name || "usuario"} (con cuenta)` : link.name;
+  return (
+    <Card>
+      <SectionTitle sub="Si un jugador sin cuenta quedó escrito distinto en dos torneos, únelos aquí para que sumen en una sola fila. No cambia ninguna inscripción ni resultado; se puede deshacer.">Unir nombres</SectionTitle>
+      {suggestions.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs font-bold text-gray-500 mb-1">Posibles duplicados</p>
+          <div className="space-y-1">
+            {suggestions.slice(0, 8).map(([a, b]) => (
+              <div key={a.name + b.name} className="flex items-center justify-between gap-2 text-sm rounded-lg px-3 py-1.5" style={{ background: "#F5F7FB" }}>
+                <span className="min-w-0 truncate">{a.name} <span className="text-gray-400">→</span> {users.find((u) => u.id === b.userId)?.name || b.name}</span>
+                <button disabled={busy} onClick={() => doLink(a.name, b.userId ? `u:${b.userId}` : `n:${b.name}`)} className="text-xs font-bold shrink-0" style={{ color: COLORS.court }}>Unir</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="grid sm:grid-cols-[1fr_1fr_auto] gap-2 items-end">
+        <label className="text-xs font-semibold text-gray-500">Este nombre (sin cuenta)
+          <select value={from} onChange={(e) => { setFrom(e.target.value); setTo(""); }} className="w-full mt-1 border rounded-lg px-2 py-2 text-sm font-normal text-gray-800">
+            <option value="">Elegir…</option>
+            {unlinked.map((r) => <option key={r.name} value={r.name}>{r.name} · #{r.rank}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-semibold text-gray-500">es la misma persona que
+          <select value={to} onChange={(e) => setTo(e.target.value)} disabled={!from} className="w-full mt-1 border rounded-lg px-2 py-2 text-sm font-normal text-gray-800">
+            <option value="">Elegir…</option>
+            {targets.map((t) => <option key={t.v} value={t.v}>{t.label}</option>)}
+          </select>
+        </label>
+        <button disabled={busy || !from || !to} onClick={() => doLink(from, to)} className="px-4 py-2 rounded-xl font-bold text-sm"
+          style={{ background: COLORS.court, color: COLORS.chalk, opacity: busy || !from || !to ? 0.5 : 1 }}>{busy ? "Uniendo…" : "Unir"}</button>
+      </div>
+      {err && <p className="text-xs mt-2" style={{ color: "#B42318" }}>{err}</p>}
+      {links.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs font-bold text-gray-500 mb-1">Uniones hechas</p>
+          <div className="space-y-1">
+            {links.map(([variant, link]) => (
+              <div key={variant} className="flex items-center justify-between gap-2 text-sm rounded-lg px-3 py-1.5" style={{ background: "#F5F7FB" }}>
+                <span className="min-w-0 truncate">{variant} <span className="text-gray-400">→</span> {describe(link)}</span>
+                <button disabled={busy} onClick={async () => { setBusy(true); setErr(""); const r = await onLink(variant, null); setBusy(false); if (r?.error) setErr(r.error); }} className="text-xs font-bold text-gray-400 hover:text-red-500 shrink-0">Deshacer</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function RankingsTab({ rankings, tournaments, categories, users, role, currentUser, createRanking, updateRanking, removeRanking, setRankingNameLink }) {
   const isAdmin = role === "admin";
   const [activeId, setActiveId] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -7313,6 +7456,10 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
             </div>
           )}
         </Card>
+      )}
+
+      {isAdmin && active && !editing && table && (table.rows.length > 0 || Object.keys(active.nameLinks || {}).length > 0) && (
+        <NameLinksPanel ranking={active} table={table} users={users} onLink={(variant, target) => setRankingNameLink(active.id, variant, target)} />
       )}
 
       {deleteTarget && (
