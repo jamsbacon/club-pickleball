@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.97.0";
+const APP_VERSION = "2.98.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3144,6 +3144,24 @@ export default function PickleballTournamentApp() {
     updateCategory(categoryId, (c) => {
       c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, ...patch } : m));
       return c;
+    });
+  };
+  // Varios cambios de banderas de llamado a la vez (v2.98.0, "Asignar a cancha": el partido elegido
+  // entra a la cancha Y el que estaba ahí pasa a "En espera"). Se agrupa por categoría para que cada
+  // una se guarde en UN solo updateCategory -- dos seguidos a la misma categoría se pisarían (ver
+  // reorderColumn). `updates` = [{ categoryId, matchId, patch }].
+  const updateMatchCallFlagsBatch = (updates) => {
+    if (currentUser?.role !== "admin") return;
+    const byCategory = {};
+    updates.forEach((u) => { (byCategory[u.categoryId] = byCategory[u.categoryId] || []).push(u); });
+    Object.entries(byCategory).forEach(([catId, ups]) => {
+      updateCategory(catId, (c) => {
+        c.matches = c.matches.map((m) => {
+          const u = ups.find((x) => x.matchId === m.id);
+          return u ? { ...m, ...u.patch } : m;
+        });
+        return c;
+      });
     });
   };
   // Reordenar arrastrando dentro de una cancha, o empujando en cadena entre dos (v2.73.0 /
@@ -4785,7 +4803,7 @@ export default function PickleballTournamentApp() {
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo} reflowSchedule={reflowSchedule}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
-                markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags}
+                markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
@@ -7856,7 +7874,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
     generateDraw, closeGroupsAndSeedBracket, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
-    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings, entryRankCheck,
   } = props;
@@ -7969,7 +7987,7 @@ function TorneosSection(props) {
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} tournament={tournament} dates={dates}
-          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} role={role} />
+          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} role={role} />
       )}
 
       {subTab === "clasificacion" && (
@@ -11268,61 +11286,95 @@ function computeWaitingMatches(categories, courts, day) {
     .map((m) => ({ ...m, __cat: c })))
     .sort((a, b) => (a.skippedAt || 0) - (b.skippedAt || 0));
 }
+// v2.98.0 -- INCIDENTE REAL: el partido "actual" de cada cancha era siempre el primero de su cola, SIN
+// mirar si alguno de sus jugadores seguía jugando en OTRA cancha (si una cancha termina antes que otra,
+// su siguiente partido programado puede incluir a alguien que todavía no sale de la otra). Y un partido
+// "llamado" (Cambiar juego) tampoco se revisaba. Ahora el actual de cada cancha se decide en tres
+// pasos: (1) los ya confirmados "En cancha" quedan fijos y sus jugadores pasan a "ocupados"; (2) cada
+// cancha restante toma el primero de su cola (llamados primero) cuyos jugadores NO estén ocupados -- si
+// el primero choca se salta al siguiente de su cola, y si ninguno sirve la cancha queda esperando
+// (`blocked`) en vez de llamar a alguien que ya está jugando; (3) el "sigue" se elige igual, ignorando
+// solo a los jugadores del actual de esa misma cancha (esos justo se liberan al cargar su resultado).
+function playerLabelsOf(m) {
+  const cat = m.__cat;
+  const a = cat.teams.find((t) => t.id === m.teamAId);
+  const b = cat.teams.find((t) => t.id === m.teamBId);
+  return [...(a ? a.players : []), ...(b ? b.players : [])].map((p) => ({ key: p.name.trim().toLowerCase(), name: p.name.trim() }));
+}
 function computeNextCalls(categories, courts, day) {
   const validCourtIds = new Set(courts.map((c) => c.id));
   const todays = categories.flatMap((c) => c.matches
     .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId)
     .map((m) => ({ ...m, __cat: c })))
     .filter((m) => !isWaitingMatch(m, validCourtIds));
+  const namesOf = (m) => matchPlayerNames(m, m.__cat);
+  const clashes = (m, busySet) => namesOf(m).some((p) => busySet.has(p));
 
-  // Cola de cada cancha: [el que ya está en cancha (`checkedIn`), si lo hay] + [los llamados a
-  // esta cancha, por orden de llamado] + [el resto de los suyos, por hora]. O sea: un llamado
-  // pasa DELANTE de cualquier partido que todavía no entró a cancha, y DETRÁS del que ya está
-  // jugando.
+  // Cola de cada cancha: [el ya confirmado "En cancha" (`checkedIn`), si lo hay] + [los llamados a esta
+  // cancha, por orden de llamado] + [el resto de los suyos, por hora].
   const queueByCourt = {};
   courts.forEach((court) => {
-    const own = todays.filter((m) => m.courtId === court.id && !isCalledMatch(m, validCourtIds))
+    const own = todays.filter((m) => m.courtId === court.id && !isCalledMatch(m, validCourtIds) && !m.winnerId)
       .sort((a, b) => a.time.localeCompare(b.time));
     const calls = todays.filter((m) => isCalledMatch(m, validCourtIds) && m.callCourtId === court.id)
       .sort((a, b) => (a.calledAt || 0) - (b.calledAt || 0));
-    const unplayed = own.filter((m) => !m.winnerId);
-    const head = unplayed.find((m) => m.checkedIn) || null;
-    queueByCourt[court.id] = [...(head ? [head] : []), ...calls, ...unplayed.filter((m) => m !== head)];
+    const all = [...calls, ...own];
+    const head = all.find((m) => m.checkedIn) || null;
+    queueByCourt[court.id] = [...(head ? [head] : []), ...all.filter((m) => m !== head)];
   });
 
   const currentByCourt = {};
+  const claimed = new Set();
+  const busy = new Set();
+  const take = (court, m) => {
+    currentByCourt[court.id] = m; claimed.add(m.id);
+    namesOf(m).forEach((p) => busy.add(p));
+  };
+  courts.forEach((court) => { const h = queueByCourt[court.id][0]; if (h && h.checkedIn) take(court, h); });
   courts.forEach((court) => {
-    const first = queueByCourt[court.id][0];
-    if (first) currentByCourt[court.id] = isCalledMatch(first, validCourtIds) ? { ...first, courtId: court.id } : first;
+    if (currentByCourt[court.id]) return;
+    const pick = queueByCourt[court.id].find((m) => !claimed.has(m.id) && !clashes(m, busy));
+    if (pick) take(court, pick);
   });
 
-  const busy = new Set();
-  Object.values(currentByCourt).forEach((m) => matchPlayerNames(m, m.__cat).forEach((p) => busy.add(p)));
-
-  const currentIds = new Set(Object.values(currentByCourt).map((m) => m.id));
   const courtOrder = {}; courts.forEach((c, i) => (courtOrder[c.id] = i));
-  const pool = chronoSort(todays.filter((m) => !m.winnerId && !isCalledMatch(m, validCourtIds) && !currentIds.has(m.id)), courtOrder);
-  const claimed = new Set();
+  const pool = chronoSort(todays.filter((m) => !m.winnerId && !isCalledMatch(m, validCourtIds) && !claimed.has(m.id)), courtOrder);
+  const nextClaimed = new Set();
 
   return courts.map((court) => {
-    const current = currentByCourt[court.id] || null;
-    // A los jugadores del partido actual de ESTA cancha no hay que tratarlos como "ocupados"
-    // para elegir el siguiente de esta misma cancha -- son justo los que están a punto de
-    // quedar libres apenas se cargue este resultado.
-    const busyForThisCourt = new Set(busy);
-    if (current) matchPlayerNames(current, current.__cat).forEach((p) => busyForThisCourt.delete(p));
-
-    const own = queueByCourt[court.id][1] || null;
-    let next = null;
-    if (own && !claimed.has(own.id) && matchPlayerNames(own, own.__cat).every((p) => !busyForThisCourt.has(p))) {
-      next = own;
-    } else {
-      next = pool.find((m) => !claimed.has(m.id) && matchPlayerNames(m, m.__cat).every((p) => !busyForThisCourt.has(p))) || null;
-    }
-    if (next) claimed.add(next.id);
+    const cur = currentByCourt[court.id] || null;
+    const current = cur && isCalledMatch(cur, validCourtIds) ? { ...cur, courtId: court.id } : cur;
+    // Los jugadores del partido actual de ESTA cancha no cuentan como "ocupados" para elegir su
+    // siguiente -- son justo los que quedan libres apenas se cargue este resultado.
+    const busyHere = new Set(busy);
+    if (cur) namesOf(cur).forEach((p) => busyHere.delete(p));
+    const candidates = [...queueByCourt[court.id].filter((m) => m !== cur), ...pool];
+    const next = candidates.find((m) => !claimed.has(m.id) && !nextClaimed.has(m.id) && !clashes(m, busyHere)) || null;
+    if (next) nextClaimed.add(next.id);
     const called = !!(next && isCalledMatch(next, validCourtIds));
-    return { court, current, next, borrowed: !!(next && next.courtId !== court.id) && !called, called };
+    // Cancha sin actual aunque tenga cola: su primer partido choca con alguien que sigue jugando en
+    // otra cancha -- se avisa quién y dónde, en vez de llamarlo igual.
+    let blocked = null;
+    if (!cur && queueByCourt[court.id].length > 0) {
+      const m = queueByCourt[court.id][0];
+      const mine = new Set(namesOf(m));
+      const who = [];
+      courts.forEach((c2) => { const o = currentByCourt[c2.id]; if (o) playerLabelsOf(o).forEach((p) => { if (mine.has(p.key)) who.push(`${p.name} (${c2.name})`); }); });
+      blocked = { match: m, who };
+    }
+    return { court, current, next, borrowed: !!(next && next.courtId !== court.id) && !called, called, blocked };
   });
+}
+
+// Partidos "llamados" a una cancha que no son ni el actual ni el "sigue" de ninguna (v2.98.0): sus
+// jugadores todavía están jugando en otro lado. Se listan aparte para que no desaparezcan de la vista.
+function computeBlockedCalls(categories, courts, day, nextCalls) {
+  const validCourtIds = new Set(courts.map((c) => c.id));
+  const shown = new Set();
+  nextCalls.forEach((nc) => { if (nc.current) shown.add(nc.current.id); if (nc.next) shown.add(nc.next.id); });
+  return categories.flatMap((c) => c.matches
+    .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId && isCalledMatch(m, validCourtIds) && !shown.has(m.id))
+    .map((m) => ({ ...m, __cat: c })));
 }
 
 // v2.77.1: vista de solo lectura con las clasificaciones de TODAS las categorías a la vez --
@@ -11397,7 +11449,7 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, role }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -11423,6 +11475,45 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // de categoría activo), porque las canchas se comparten entre categorías y el llamado tiene
   // que tener en cuenta a todo el mundo, no solo a la categoría que se está mirando ahora mismo.
   const nextCalls = useMemo(() => computeNextCalls(categories, courts, day), [categories, courts, day]);
+  // v2.98.0 -- llamados a una cancha cuyos jugadores siguen jugando en otra (no entran hasta liberarse).
+  const blockedCalls = useMemo(() => computeBlockedCalls(categories, courts, day, nextCalls), [categories, courts, day, nextCalls]);
+  // Quién está jugando AHORA (actual de cada cancha) y dónde -- para no ofrecer ni llamar a nadie que
+  // ya está en otra cancha.
+  const busyOn = useMemo(() => {
+    const map = new Map();
+    nextCalls.forEach((nc) => { if (nc.current) playerLabelsOf(nc.current).forEach((p) => map.set(p.key, { name: p.name, courtId: nc.court.id, courtName: nc.court.name, matchId: nc.current.id })); });
+    return map;
+  }, [nextCalls]);
+  // Jugadores de `mm` (con __cat) que están en otra cancha, sin contar la cancha destino (`exceptCourtId`:
+  // el partido que sale de ahí libera a los suyos) ni al propio partido.
+  const playingConflicts = (mm, exceptCourtId) => playerLabelsOf(mm)
+    .map((p) => ({ p, b: busyOn.get(p.key) }))
+    .filter(({ b }) => b && b.matchId !== mm.id && b.courtId !== exceptCourtId)
+    .map(({ p, b }) => `${p.name} (${b.courtName})`);
+  // "Asignar a cancha" (v2.98.0): cualquier partido pendiente del día puede sustituir al que está en una
+  // cancha mientras ese NO esté "en cancha" (checkedIn). El sustituido pasa a "En espera". Nunca se ofrece
+  // una cancha si alguno de los jugadores del partido ya está jugando en otra.
+  const assignFor = (m, c) => {
+    if (!isAdmin || m.winnerId || !m.teamAId || !m.teamBId || m.day !== day || m.checkedIn || isByeMatch(m)) return null;
+    const mm = { ...m, __cat: c };
+    const options = nextCalls.map(({ court, current }) => {
+      if (current && current.id === m.id) return { id: court.id, name: court.name, disabled: true, reason: "ya está aquí" };
+      if (current && current.checkedIn) return { id: court.id, name: court.name, disabled: true, reason: "en cancha" };
+      const who = playingConflicts(mm, court.id);
+      if (who.length) return { id: court.id, name: court.name, disabled: true, reason: `${who.join(", ")} ya está jugando` };
+      return { id: court.id, name: court.name, disabled: false, current };
+    });
+    const onAssign = (opt) => {
+      const cur = opt.current && opt.current.id !== m.id ? opt.current : null;
+      const labelOf = (x) => `${x.teamALabel || x.__cat.teams.find((t) => t.id === x.teamAId)?.name || "?"} vs ${x.teamBLabel || x.__cat.teams.find((t) => t.id === x.teamBId)?.name || "?"}`;
+      if (cur && !window.confirm(`¿Poner "${labelOf(mm)}" en ${opt.name}? "${labelOf(cur)}" sale de la cancha y pasa a "En espera" (no se pierde).`)) return;
+      const ups = [];
+      if (cur) ups.push({ categoryId: cur.__cat.id, matchId: cur.id, patch: { skipped: true, skippedAt: Date.now(), callCourtId: null, checkedIn: false } });
+      ups.push({ categoryId: c.id, matchId: m.id, patch: { skipped: false, callCourtId: opt.id, calledAt: Date.now(), checkedIn: false } });
+      updateMatchCallFlagsBatch(ups);
+    };
+    return { options, onAssign };
+  };
   // v2.87.0: partidos "en espera" (cambiar juego) -- siempre arriba del panel, por orden de salto.
   const waitingMatches = useMemo(() => computeWaitingMatches(categories, courts, day), [categories, courts, day]);
   // v2.79.0: número de partido único por día, igual en la planilla impresa, en esta lista y en
@@ -11543,13 +11634,20 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                   </div>
                   <div className="flex items-center flex-wrap gap-1.5 mt-1.5">
                     <span className="text-[10px] font-semibold text-gray-500">Llamar en:</span>
-                    {courts.map((c) => (
-                      <button key={c.id}
-                        onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() })}
-                        style={{ background: COLORS.court, color: "#fff" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
-                        {c.name}
-                      </button>
-                    ))}
+                    {courts.map((c) => {
+                      const who = playingConflicts(m, c.id);
+                      return (
+                        <button key={c.id} disabled={who.length > 0}
+                          title={who.length ? `${who.join(", ")} ya está jugando` : undefined}
+                          onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() })}
+                          style={{ background: who.length ? "#C9CEDA" : COLORS.court, color: "#fff", opacity: who.length ? 0.7 : 1 }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                          {c.name}
+                        </button>
+                      );
+                    })}
+                    {playingConflicts(m, null).length > 0 && (
+                      <span className="text-[10px] font-semibold w-full" style={{ color: "#B23A1B" }}>Ya está jugando: {playingConflicts(m, null).join(", ")} -- espera a que se libere.</span>
+                    )}
                     <button onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: null })}
                       style={{ color: COLORS.court }} className="text-[11px] font-bold underline ml-1">
                       Volver a su turno
@@ -11563,7 +11661,21 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
             </p>
           </div>
         )}
-        {nextCalls.map(({ court, current, next, borrowed, called }) => (
+        {blockedCalls.length > 0 && (
+          <div className="rounded-lg p-2.5" style={{ background: "#FCE9E4", border: "1.5px solid #B23A1B" }}>
+            <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: "#B23A1B" }}>Llamados que todavía no pueden entrar ({blockedCalls.length})</p>
+            <div className="space-y-1">
+              {blockedCalls.map((m) => (
+                <div key={m.id} className="text-[11px] flex items-center flex-wrap gap-x-2 gap-y-1">
+                  <span>{teamLabelOf(m, "A")} vs {teamLabelOf(m, "B")}</span>
+                  <span style={{ color: "#B23A1B" }}>-- {playingConflicts(m, null).join(", ") || "esperando turno"} ya está jugando</span>
+                  <button onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: true, skippedAt: Date.now(), callCourtId: null })} style={{ color: COLORS.court }} className="font-bold underline">Devolver a espera</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {nextCalls.map(({ court, current, next, borrowed, called, blocked }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
             {current && !current.checkedIn ? (
@@ -11603,7 +11715,11 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
                 onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} />
             ) : (
-              <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
+              blocked ? (
+                <p className="text-xs italic" style={{ color: "#B23A1B" }}>
+                  Esperando a que se libere: {blocked.who.join(", ")} -- su partido ({teamLabelOf(blocked.match, "A")} vs {teamLabelOf(blocked.match, "B")}) no se llama hasta entonces.
+                </p>
+              ) : <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
             )}
             {next ? (
               <div className="mt-1.5 pl-0.5" style={{ opacity: 0.55 }}>
@@ -11672,7 +11788,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           <div className="space-y-3">
             {allPlayable.map((m) => (
               <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
-                matchNumber={matchIndex.get(m.id)}
+                matchNumber={matchIndex.get(m.id)} assign={assignFor(m, m.__cat)}
                 teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
                 onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
             ))}
@@ -11738,7 +11854,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         <div className="space-y-3">
           {playableMatches.map((m) => (
             <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
-              matchNumber={matchIndex.get(m.id)}
+              matchNumber={matchIndex.get(m.id)} assign={assignFor(m, cat)}
               onSubmit={(sets) => submitScore(cat.id, m.id, sets)} />
           ))}
           {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{!isAdmin ? "Todavía no hay resultados cargados." : day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
@@ -11912,8 +12028,9 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber, isAdmin }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber, isAdmin, assign }) {
   const [open, setOpen] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
   // v2.84.0 -- el formato efectivo de ESTA fase/ronda (puede tener su propio override, ver
   // ScoringFormatCard/roundFormatFor) en vez del `bestOf` fijo de la categoría entera.
   const fmt = roundFormatFor(cat, roundKeyOf(m));
@@ -11970,8 +12087,25 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
               {m.winnerId ? "Editar" : "Cargar marcador"} <ChevronDown size={13} className={open ? "rotate-180" : ""} />
             </button>
           )}
+          {isAdmin && assign && (
+            <button onClick={() => setAssignOpen((o) => !o)} style={{ color: "#8A5A16" }} className="text-xs font-semibold flex items-center gap-1">
+              Asignar a cancha <ChevronDown size={13} className={assignOpen ? "rotate-180" : ""} />
+            </button>
+          )}
         </div>
       </div>
+      {isAdmin && assign && assignOpen && (
+        <div className="mt-2 pt-2 border-t flex items-center flex-wrap gap-1.5" style={{ borderColor: COLORS.line }}>
+          <span className="text-[10px] font-semibold text-gray-500">Poner en:</span>
+          {assign.options.map((o) => (
+            <button key={o.id} disabled={o.disabled} title={o.disabled ? o.reason : o.current ? "Sustituye al partido que está ahí (pasa a En espera)" : "Cancha libre"}
+              onClick={() => { assign.onAssign(o); setAssignOpen(false); }}
+              style={{ background: o.disabled ? "#E6E9F0" : COLORS.court, color: o.disabled ? "#8A93A6" : "#fff" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+              {o.name}{o.disabled ? ` · ${o.reason}` : ""}
+            </button>
+          ))}
+        </div>
+      )}
       {isAdmin && open && (
         <div className="mt-3 pt-3 border-t space-y-2" style={{ borderColor: COLORS.line }}>
           {sets.map((s, i) => (
