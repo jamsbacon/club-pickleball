@@ -1342,6 +1342,7 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
   // simplemente se les da un horario real como a cualquier otro.
   let slotIndex = 0;
   let overtimeGuard = 0;
+  const teamStats = {}; // `${catId}|${teamId}` -> { played, last } (franja del último partido de grupo), ver rotación equitativa
   while (queue.length > 0) {
     if (slotIndex >= slots.length) {
       if (overtimeGuard++ > 2000) break; // nunca debería hacer falta -- red de seguridad contra un loop infinito
@@ -1368,28 +1369,47 @@ function buildSchedule(categories, courts, dates, dailyStart, dailyEnd, matchDur
       // siempre -- esto es 100% opcional, no cambia nada para quien no lo use.
       const courtStart = plan?.courtStartTimes?.[courts[c].id];
       if (courtStart && slot.timeMin < timeToMinutes(courtStart)) continue;
-      let foundIdx = -1;
-      for (let i = 0; i < queue.length; i++) {
-        const m = queue[i];
-        if (!dateAllows(m.categoryId, slot.date)) continue;
+      // Elegible en esta franja/cancha: fecha permitida, fase anterior ya agendada y ningún jugador
+      // chocando con otro partido de esta misma franja (ver comentarios de matchBucket y usedPlayers).
+      const isEligible = (m) => {
+        if (!dateAllows(m.categoryId, slot.date)) return false;
         // v2.81.4 -- ver comentario de matchBucket/bucketRemaining arriba: nunca elegible
         // todavía si a su categoría le queda algún partido de una fase ANTERIOR sin agendar,
         // sin importar que este partido puntual no choque por jugador.
         const bucket = matchBucket.get(m);
-        if (bucketRemainingAtSlotStart[m.categoryId].slice(0, bucket).some((n) => n > 0)) continue;
+        if (bucketRemainingAtSlotStart[m.categoryId].slice(0, bucket).some((n) => n > 0)) return false;
         const ps = playersOf(m);
         // Un partido de bracket con equipos aún no definidos (rondas futuras, o
         // llave alimentada por grupos que todavía no cerraron) no tiene jugadores
         // conocidos -- se agenda igual sin chequeo de choque, como hacía el loop
         // de bracket original. Si ya se conocen, sí se exige que ninguno esté
         // jugando otro partido en esta misma franja (cruzando categorías incluso).
-        if (ps.length > 0 && !ps.every((p) => !usedPlayers.has(p))) continue;
-        foundIdx = i;
-        break;
+        return !(ps.length > 0 && !ps.every((p) => !usedPlayers.has(p)));
+      };
+      let foundIdx = queue.findIndex(isEligible);
+      // v2.97.0 -- ROTACIÓN EQUITATIVA en fase de grupos. INCIDENTE REAL (torneo de 2 grupos de 6):
+      // tomar siempre "el primer partido de la cola que no choque" jugaba un grupo entero de corrido
+      // y dejaba al otro esperando franjas y franjas para luego jugar todo seguido. Ahora, entre los
+      // partidos de grupo ELEGIBLES de la misma categoría que el que habría salido, se elige el de
+      // la dupla que lleva MÁS franjas esperando (luego la que menos ha jugado). El orden entre
+      // categorías, y las fases de eliminatoria, siguen exactamente como antes.
+      if (foundIdx !== -1 && queue[foundIdx].phase === "group") {
+        const base = queue[foundIdx];
+        const stat = (cid, tid) => teamStats[`${cid}|${tid}`] || { played: 0, last: -1 };
+        let best = null;
+        for (let i = foundIdx; i < queue.length; i++) {
+          const m = queue[i];
+          if (m.categoryId !== base.categoryId || m.phase !== "group" || !isEligible(m)) continue;
+          const a = stat(m.categoryId, m.teamAId), b = stat(m.categoryId, m.teamBId);
+          const score = [Math.min(a.last, b.last), Math.max(a.played, b.played), a.last + b.last, i];
+          if (!best || score.some((v, k) => v !== best.score[k] && (v < best.score[k]) && score.slice(0, k).every((u, kk) => u === best.score[kk]))) best = { i, score };
+        }
+        if (best) foundIdx = best.i;
       }
       if (foundIdx === -1) continue;
       const match = queue.splice(foundIdx, 1)[0];
       bucketRemaining[match.categoryId][matchBucket.get(match)]--;
+      if (match.phase === "group") [match.teamAId, match.teamBId].forEach((tid) => { const k = `${match.categoryId}|${tid}`; const st = teamStats[k] || (teamStats[k] = { played: 0, last: -1 }); st.played++; st.last = slotIndex; });
       playersOf(match).forEach((p) => usedPlayers.add(p));
       match.day = slot.date; match.time = minutesToTime(slot.timeMin); match.courtId = courts[c].id;
       // v2.69.0: el panel Planificar arma cada corrida para UN día -- que lo que acaba de
@@ -1555,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.96.0";
+const APP_VERSION = "2.97.0";
 
 /* =========================================================================
    DESIGN TOKENS
