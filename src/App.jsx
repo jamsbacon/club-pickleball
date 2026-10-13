@@ -1555,7 +1555,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.95.0";
+const APP_VERSION = "2.96.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1938,6 +1938,26 @@ function computeFinalPlacements(cat) {
   if (groups.length !== 1 || groupMatches.length === 0 || groupMatches.some((m) => !m.winnerId)) return null;
   computeStandings(cat.teams || [], groups[0].teamIds, groupMatches).forEach((row, i) => { tier[row.teamId] = tierForPlacement(i + 1); });
   return tier;
+}
+
+// Inscripción restringida por ranking (v2.96.0) -- el torneo solo deja anotarse a quienes estén
+// entre los puestos `entryRankFrom`..`entryRankTo` de un ranking. `table` = computeRankingTable del
+// ranking, EN VIVO. Se encuentra a la persona por userId o, si sus resultados los anotó el admin
+// sin cuenta, por nombre. Quien no aparece en la tabla (nunca jugó) queda fuera. Solo frena
+// inscripciones NUEVAS por cuenta propia: no toca las ya hechas ni la inscripción manual del admin.
+function entryRankStatus(tournament, ranking, table, person) {
+  const from = Number(tournament.entryRankFrom) > 0 ? Number(tournament.entryRankFrom) : 1;
+  const to = Number(tournament.entryRankTo) > 0 ? Number(tournament.entryRankTo) : Infinity;
+  const nameKey = normalizePersonName(person?.name);
+  const row = table.rows.find((r) => (person?.userId && r.userId === person.userId) || (nameKey && normalizePersonName(r.name) === nameKey));
+  return { allowed: !!row && row.rank >= from && row.rank <= to, rank: row ? row.rank : null, from, to, rankingName: ranking.name };
+}
+function entryRankMessage(st, name = null) {
+  const range = st.to === Infinity ? `del puesto ${st.from} en adelante` : `los puestos ${st.from} al ${st.to}`;
+  const who = st.rank
+    ? (name ? `${name} está en el puesto ${st.rank}.` : `Estás en el puesto ${st.rank}.`)
+    : (name ? `${name} todavía no aparece en ese ranking.` : "Todavía no apareces en ese ranking.");
+  return `Este torneo es solo para ${range} del ranking "${st.rankingName}". ${who}`;
 }
 
 // Tabla de un ranking método "posicion": por cada torneo vinculado y cada categoría YA TERMINADA
@@ -2523,6 +2543,8 @@ export default function PickleballTournamentApp() {
     rankingId: r.ranking_id || null,
     // v2.94.0 -- peso del torneo en un ranking método "posicion" (×1 = normal, ×2 = vale doble).
     rankingMultiplier: r.ranking_multiplier != null ? Number(r.ranking_multiplier) : 1,
+    // v2.96.0 -- inscripción solo para un rango de puestos de un ranking (null = abierta a todos).
+    entryRankingId: r.entry_ranking_id || null, entryRankFrom: r.entry_rank_from ?? "", entryRankTo: r.entry_rank_to ?? "",
   });
   // El club organiza torneos con frecuencia -- `tournaments` trae TODOS los que existan
   // (antes esto era una fila única fija, `.limit(1)`, y no había forma de crear uno nuevo
@@ -2610,7 +2632,7 @@ export default function PickleballTournamentApp() {
     const { error } = await supabase.from("rankings").delete().eq("id", id);
     if (error) { console.error("removeRanking:", error.message); return { error: error.message }; }
     setRankings((prev) => prev.filter((r) => r.id !== id));
-    setTournaments((prev) => prev.map((t) => (t.rankingId === id ? { ...t, rankingId: null } : t)));
+    setTournaments((prev) => prev.map((t) => ({ ...t, ...(t.rankingId === id ? { rankingId: null } : {}), ...(t.entryRankingId === id ? { entryRankingId: null } : {}) })));
     return {};
   };
   // Mismo criterio que `tab` arriba (v2.53.1) -- si al actualizar la página estaba DENTRO de
@@ -2705,6 +2727,9 @@ export default function PickleballTournamentApp() {
     if ("image" in patch) dbPatch.image = patch.image || null;
     if ("rankingId" in patch) dbPatch.ranking_id = patch.rankingId || null;
     if ("rankingMultiplier" in patch) dbPatch.ranking_multiplier = patch.rankingMultiplier === "" || patch.rankingMultiplier == null ? 1 : Number(patch.rankingMultiplier);
+    if ("entryRankingId" in patch) dbPatch.entry_ranking_id = patch.entryRankingId || null;
+    if ("entryRankFrom" in patch) dbPatch.entry_rank_from = patch.entryRankFrom === "" || patch.entryRankFrom == null ? null : Number(patch.entryRankFrom);
+    if ("entryRankTo" in patch) dbPatch.entry_rank_to = patch.entryRankTo === "" || patch.entryRankTo == null ? null : Number(patch.entryRankTo);
     supabase.from("tournaments").update(dbPatch).eq("id", id).then(({ error }) => {
       if (error) console.error("updateTournament:", error.message);
     });
@@ -2765,6 +2790,23 @@ export default function PickleballTournamentApp() {
   // Cada pantalla de un torneo puntual (TorneosSection) recibe el subconjunto ya filtrado por
   // `tournamentId` al armar sus props, nunca este array completo directo.
   const [categories, setCategories] = useState(() => loadCache("categories", []));
+  // v2.96.0 -- inscripción restringida por ranking (ver entryRankStatus). La tabla de cada ranking
+  // usado como filtro se calcula EN VIVO de los resultados, sin guardar ninguna lista: el torneo
+  // con filtro se arma después de las jornadas que definen el ranking.
+  const entryRankTables = useMemo(() => {
+    const out = {};
+    tournaments.forEach((t) => {
+      if (!t.entryRankingId || out[t.entryRankingId]) return;
+      const r = rankings.find((x) => x.id === t.entryRankingId);
+      if (r) out[r.id] = computeRankingTable(r, tournaments, categories);
+    });
+    return out;
+  }, [tournaments, rankings, categories]);
+  // null = el torneo no restringe la inscripción; si no, { allowed, rank, from, to, rankingName }.
+  const entryRankCheck = (t, person) => {
+    const r = t?.entryRankingId ? rankings.find((x) => x.id === t.entryRankingId) : null;
+    return r && entryRankTables[r.id] ? entryRankStatus(t, r, entryRankTables[r.id], person) : null;
+  };
   useEffect(() => {
     supabase.from("categories").select("*").order("created_at").then(({ data, error }) => {
       if (error) { console.error("fetch categories:", error.message); return; }
@@ -3276,6 +3318,10 @@ export default function PickleballTournamentApp() {
     const team = cat.teams.find((t) => t.id === teamId) || cat.waitlist.find((t) => t.id === teamId);
     if (!team) return { error: "Este cupo ya no existe -- puede que lo hayan borrado." };
     if ((team.players || []).length >= 2) return { error: "Este cupo ya se completó -- alguien más se anotó primero." };
+    // v2.96.0 -- torneo restringido por ranking: quien se une por el link también tiene que estar
+    // dentro del rango (la dupla completa sale del mismo grupo de clasificados).
+    const joinEntry = entryRankCheck(tournaments.find((t) => t.id === cat.tournamentId), { userId: player.userId, name: player.name });
+    if (joinEntry && !joinEntry.allowed) return { error: entryRankMessage(joinEntry) };
     // v2.61.0: una dupla MIXTA es 1 hombre + 1 mujer, nunca 2 del mismo género -- nada lo
     // impedía hasta ahora (el filtro de "categorías elegibles" en InscripcionTab/JoinTeamModal
     // deja pasar CUALQUIER género para "mixto" a propósito, porque cualquiera puede ARRANCAR un
@@ -4713,7 +4759,7 @@ export default function PickleballTournamentApp() {
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
                 addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
-                suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
+                suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} entryRankCheck={entryRankCheck}
                 setCategoryFormat={setCategoryFormat} courts={courts}
                 matchDuration={matchDuration} breakM={breakM}
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo} reflowSchedule={reflowSchedule}
@@ -4762,7 +4808,7 @@ export default function PickleballTournamentApp() {
          que se estaba viendo. */}
       {joinParam && !joinModalDismissed && (
         <JoinTeamModal info={resolveJoinInfo(joinParam, categories, tournaments)} currentUser={currentUser} club={club}
-          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking} users={users}
+          joinTeam={joinTeam} addTeam={addTeam} categories={categories} suggestedRanking={suggestedRanking} users={users} entryRankCheck={entryRankCheck}
           onClose={() => setJoinModalDismissed(true)} />
       )}
     </div>
@@ -5043,7 +5089,7 @@ function PublicCouponView({ couponInfo, club, registerUser, loginUser, resetPass
 // normal de InscripcionTab. Ahora la categoría del link cuenta como una más del mismo carrito
 // -- mismo tournamentRegPrice(tournament, catCount) que usa InscripcionTab, split en partes
 // iguales entre el join y cada equipo nuevo (ver confirm más abajo).
-function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, users, onClose }) {
+function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories, suggestedRanking, users, entryRankCheck, onClose }) {
   const [done, setDone] = useState(null); // { names, failedNames, pendingTeams } tras confirmar
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -5079,7 +5125,11 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
     ? (masterProEligibilityError(cat, mpJoinRole, users.find((u) => u.id === currentUser.id))
       || (cat.maxTeams && countMasterProRoles(cat)[mpJoinRole] >= cat.maxTeams ? `Ya se completaron los ${cat.maxTeams} cupos de ${MP_ROLE_LABELS[mpJoinRole]}.` : null))
     : null;
-  const blocked = full || drawStarted || isOwnTeam || alreadyInCat || genderMismatch || !!mpJoinError;
+  // v2.96.0 -- torneo restringido por ranking: se avisa de entrada si quien abre el link está fuera
+  // del rango (joinTeam repite la validación real).
+  const entryRank = entryRankCheck(tournament, { userId: currentUser.id, name: currentUser.name });
+  const entryRankError = entryRank && !entryRank.allowed ? entryRankMessage(entryRank) : null;
+  const blocked = full || drawStarted || isOwnTeam || alreadyInCat || genderMismatch || !!mpJoinError || !!entryRankError;
 
   // Mismo criterio de elegibilidad que InscripcionTab.eligible -- otras categorías de ESTE
   // torneo (nunca la del link, esa se une aparte con joinTeam) todavía abiertas y en las que
@@ -5174,6 +5224,7 @@ function JoinTeamModal({ info, currentUser, club, joinTeam, addTeam, categories,
                 : alreadyInCat ? "Ya estás inscrito en esta categoría con otro equipo."
                 : genderMismatch ? `Esta categoría es mixta -- necesita 1 hombre y 1 mujer. ${creator.name} ya está anotado/a, así que no te puedes unir con el mismo género.`
                 : mpJoinError ? `${creator.name} se anotó como ${MP_ROLE_LABELS[creator.role]}, así que tú entrarías como ${MP_ROLE_LABELS[mpJoinRole]}. ${mpJoinError}`
+                : entryRankError ? entryRankError
                 : full ? "Este cupo ya se completó -- alguien más se anotó primero."
                 : "Esta categoría ya cerró su inscripción."}
             </p>
@@ -6024,6 +6075,43 @@ function TorneoTab({ tournament, setTournament: updateTournament, uploadTourname
                 <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>×1 = puntos normales, ×2 = vale el doble, ×0.5 = la mitad. Multiplica los puntos de cada puesto de este torneo.</p>
               </div>
             )}
+          </div>
+          {/* v2.96.0 -- inscripción restringida por ranking: solo pueden anotarse por su cuenta (y por el
+             link de pareja) los jugadores entre los puestos desde..hasta de un ranking. Se calcula EN
+             VIVO; el admin siempre puede inscribir a mano. */}
+          <div>
+            <Label>Quién puede inscribirse</Label>
+            <select style={inputStyle} value={tournament.entryRankingId ? "ranking" : "todos"}
+              onChange={(e) => { if (e.target.value === "todos") { set("entryRankingId", null); set("entryRankFrom", ""); set("entryRankTo", ""); } else set("entryRankingId", rankings[0]?.id || null); }}
+              disabled={rankings.length === 0 && !tournament.entryRankingId}>
+              <option value="todos">Todos</option>
+              <option value="ranking">Por ranking</option>
+            </select>
+            {tournament.entryRankingId && (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <Label>Ranking</Label>
+                  <select style={inputStyle} value={tournament.entryRankingId} onChange={(e) => set("entryRankingId", e.target.value)}>
+                    {rankings.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Desde el puesto</Label>
+                    <input type="number" min={1} style={inputStyle} value={tournament.entryRankFrom} placeholder="1" onChange={(e) => set("entryRankFrom", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Hasta el puesto</Label>
+                    <input type="number" min={1} style={inputStyle} value={tournament.entryRankTo} placeholder="16" onChange={(e) => set("entryRankTo", e.target.value)} />
+                  </div>
+                </div>
+              </div>
+            )}
+            <p className="text-[11px] mt-1.5" style={{ color: "#6B7688" }}>
+              {tournament.entryRankingId
+                ? "Solo los jugadores en ese rango del ranking (tal como está hoy) pueden inscribirse por su cuenta o unirse por el link de su pareja. Tú, como admin, siempre puedes inscribir a cualquiera a mano. No se borra ninguna inscripción ya hecha."
+                : rankings.length === 0 ? "Todavía no hay rankings -- créalos en la pestaña Rankings." : "Cualquiera puede inscribirse."}
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -7750,7 +7838,7 @@ function TorneosSection(props) {
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
-    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings,
+    pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings, entryRankCheck,
   } = props;
   const isAdmin = role === "admin";
 
@@ -7847,7 +7935,7 @@ function TorneosSection(props) {
       )}
 
       {subTab === "inscripcion" && (
-        <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking}
+        <InscripcionTab categories={categories} addTeam={addTeam} suggestedRanking={suggestedRanking} entryRankCheck={entryRankCheck}
           role={role} currentUser={currentUser} users={users} club={club} tournament={tournament} setTab={setTab} />
       )}
 
@@ -10621,7 +10709,7 @@ function RegistrantPicker({ users, currentUser, onChange }) {
 // agrega al admin el RegistrantPicker de arriba para inscribir a cualquier socio o invitado por
 // el mismo checkout real (categorías, pareja, método de pago) que usaría esa persona sola. El
 // editor de roster manual y sin cobro sigue viviendo aparte, en Participantes (TeamRegistration).
-function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, users, club, tournament, setTab, role }) {
+function InscripcionTab({ categories, addTeam, suggestedRanking, entryRankCheck, currentUser, users, club, tournament, setTab, role }) {
   const isAdmin = role === "admin";
   // El cliente siempre se inscribe a sí mismo -- solo el admin ve el selector de arriba, así
   // que solo para él arranca sin elegir (null) hasta que pique una opción.
@@ -10633,6 +10721,9 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
   // free-text name for themselves, a searched/invited partner for doubles, and a real checkout
   // step. Si no se conoce el género (perfil incompleto, o invitado sin cuenta) no se puede
   // filtrar -- se muestran todas. ----
+  // v2.96.0 -- torneo restringido por ranking: quien esté fuera del rango no ve categorías. El admin
+  // sí (inscripción manual de excepciones), con el aviso de que está fuera.
+  const entryRank = registrant ? entryRankCheck(tournament, { userId: registrant.userId, name: registrant.name }) : null;
   const eligible = registrant ? categories.filter((c) => {
     const drawStarted = c.matches && c.matches.length > 0;
     if (drawStarted) return false;
@@ -10641,7 +10732,7 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
     if (alreadyIn) return false;
     if (registrant.gender && c.gender !== "mixto" && c.gender !== "libre" && c.gender !== registrant.gender) return false;
     return true;
-  }) : [];
+  }).filter(() => isAdmin || !entryRank || entryRank.allowed) : [];
 
   // Categorías de dobles en las que el registrant YA es TITULAR de un cupo "esperando pareja"
   // (v2.64.0) -- antes el único lugar para conseguir el link de invitar pareja era el popup de
@@ -10906,7 +10997,12 @@ function InscripcionTab({ categories, addTeam, suggestedRanking, currentUser, us
             </div>
           );
         })}
-        {levelGroups.length === 0 && (
+        {entryRank && !entryRank.allowed && (
+          <p className="text-xs font-semibold px-3 py-2 rounded-lg" style={{ background: "#FEF3C7", color: "#92400E" }}>
+            {entryRankMessage(entryRank, registrant.userId === currentUser.id ? null : registrant.name)}{isAdmin ? " Como admin puedes inscribirlo/a igual." : " Si crees que es un error, escríbele al club."}
+          </p>
+        )}
+        {levelGroups.length === 0 && !(entryRank && !entryRank.allowed && !isAdmin) && (
           <p className="text-xs text-gray-400 italic px-1">
             {registrant
               ? "No hay categorías disponibles en este momento -- ya está inscrito/a en todas las abiertas, o su calendario ya fue generado."
