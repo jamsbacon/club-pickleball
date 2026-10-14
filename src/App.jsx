@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.101.0";
+const APP_VERSION = "2.102.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7163,8 +7163,18 @@ function PagosTab({ tournaments, categories, openPlays, classes, setTeamPaymentS
    verdad de "qué plan tiene ahora" (lo pone subscribeToPlan); `subscriptions`
    es el historial de altas, no se usa aquí más que para el contador de arriba.
    ========================================================================= */
+// Días que faltan para `expiresIso` (YYYY-MM-DD) contando desde HOY en la fecha LOCAL del navegador
+// (v2.102.0) -- negativo = ya venció. Se compara en fechas de calendario, sin horas.
+function daysUntilDate(expiresIso) {
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const [y, m, d] = expiresIso.split("-").map(Number);
+  return Math.round((Date.UTC(y, m - 1, d) - today) / 86400000);
+}
+
 function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPaymentStatus, adminAssignPlan, setUserRole, currentUser, deleteUserAccount, categories, bookings, openPlays, classes, club }) {
   const [query, setQuery] = useState("");
+  const [expandedId, setExpandedId] = useState(null); // "carta" del jugador abierta (v2.102.0)
   const todayIso = new Date().toISOString().slice(0, 10);
 
   // Promover/degradar el rol de otro socio (v2.47.0) -- confirmación explícita antes de
@@ -7241,7 +7251,7 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
 
   return (
     <div className="mt-2 space-y-6">
-      <SectionTitle sub="Todos los que se han registrado en la app, su nivel DUPR, contacto y qué membresía tienen activa.">Usuarios</SectionTitle>
+      <SectionTitle sub="Quién tiene membresía, cuál y cuándo vence (en rojo cuando faltan 7 días o menos). Toca un jugador para ver su carta: contacto, zona y DUPR.">Usuarios</SectionTitle>
 
       <div className="grid sm:grid-cols-3 gap-4">
         <StatCard label="Jugadores registrados" value={clients.length} icon={Users} />
@@ -7283,12 +7293,9 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
             <thead>
               <tr className="text-left text-xs text-gray-400 uppercase">
                 <th className="py-1.5 pr-3">Jugador</th>
-                <th className="py-1.5 pr-3">Contacto</th>
-                <th className="py-1.5 pr-3">Zona</th>
-                <th className="py-1.5 pr-3">DUPR</th>
-                <th className="py-1.5 pr-3">Rol</th>
                 <th className="py-1.5 pr-3">Membresía</th>
-                <th className="py-1.5 pr-3">Miembro desde</th>
+                <th className="py-1.5 pr-3">Vence</th>
+                <th className="py-1.5 pr-3">Rol</th>
                 <th className="py-1.5 pr-3"></th>
               </tr>
             </thead>
@@ -7298,43 +7305,75 @@ function UsuariosTab({ users, subscriptions, membershipPlans, setSubscriptionPay
                 const isPaidPlan = (plan?.monthlyPrice || 0) > 0;
                 const isExpired = isPaidPlan && !isActiveMember(u, plan, todayIso);
                 const isSelf = u.id === currentUser.id;
+                const isOpen = expandedId === u.id;
+                // Vencimiento (v2.102.0): solo tiene sentido en un plan de pago. Rojo si faltan 7 días o
+                // menos (incluye hoy y ya vencida).
+                const days = isPaidPlan && u.planExpiresAt ? daysUntilDate(u.planExpiresAt) : null;
+                const urgent = days !== null && days <= 7;
                 return (
-                  <tr key={u.id} className="border-t" style={{ borderColor: COLORS.line }}>
-                    <td className="py-2 pr-3 font-semibold">{u.name}</td>
-                    <td className="py-2 pr-3 text-gray-500">
-                      <div>{u.email}</div>
-                      {u.phone && <div className="text-xs">{u.phone}</div>}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-500">{u.zone || "—"}</td>
-                    <td className="py-2 pr-3 mono">{u.duprRating != null ? Number(u.duprRating).toFixed(2) : "—"}</td>
-                    <td className="py-2 pr-3">
-                      {isSelf ? (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: "#FBEAE3", color: COLORS.clay }}>Admin (tú)</span>
-                      ) : (
-                        <button onClick={() => setRoleTarget(u)} title="Cambiar rol"
+                  <React.Fragment key={u.id}>
+                    <tr className="border-t cursor-pointer hover:bg-gray-50" style={{ borderColor: COLORS.line }} onClick={() => setExpandedId(isOpen ? null : u.id)}>
+                      <td className="py-2 pr-3 font-semibold">
+                        <span className="inline-flex items-center gap-1.5">
+                          <ChevronDown size={13} className={`shrink-0 transition-transform ${isOpen ? "" : "-rotate-90"}`} color="#9AA6BC" />
+                          {u.name}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3">
+                        <button onClick={(e) => { e.stopPropagation(); setAssignTarget(u); }} title="Asignar membresía"
                           className="px-2 py-0.5 rounded-full text-[11px] font-bold hover:opacity-80"
-                          style={{ background: u.role === "admin" ? "#FBEAE3" : "#EAF0F8", color: u.role === "admin" ? COLORS.clay : COLORS.court }}>
-                          {u.role === "admin" ? "Admin" : "Cliente"}
+                          style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
+                          {isPaidPlan ? plan.name : "Sin membresía"}{isExpired ? " (vencida)" : ""}
                         </button>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3">
-                      <button onClick={() => setAssignTarget(u)} title="Asignar membresía"
-                        className="px-2 py-0.5 rounded-full text-[11px] font-bold hover:opacity-80"
-                        style={{ background: isExpired ? "#FBEAE3" : isPaidPlan ? "#E4F3EC" : "#EDEFF4", color: isExpired ? COLORS.clay : isPaidPlan ? COLORS.court : "#6B7688" }}>
-                        {plan?.name || "Sin membresía"}{isExpired ? " (vencida)" : ""}
-                      </button>
-                    </td>
-                    <td className="py-2 pr-3 text-gray-500">{u.createdAt ? formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10)) : "—"}</td>
-                    <td className="py-2 pr-3">
-                      {/* Nunca sobre uno mismo; sobre otro admin hay que quitarle el rol primero
-                         (con el botón de la columna Rol) -- mismo bloqueo que ya aplica
-                         api/delete-user.js del lado del servidor. */}
-                      {!isSelf && u.role !== "admin" && (
-                        <button onClick={() => setDeleteTarget(u)} title="Eliminar usuario" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
-                      )}
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        {days === null ? (
+                          <span className="text-gray-300">{isPaidPlan ? "Sin fecha" : "—"}</span>
+                        ) : (
+                          <span style={{ color: urgent ? "#C0392B" : COLORS.ink, fontWeight: urgent ? 800 : 500 }}>
+                            {formatDateHuman(u.planExpiresAt)}
+                            <span className="block text-[10px] font-semibold" style={{ color: urgent ? "#C0392B" : "#9AA6BC" }}>
+                              {days < 0 ? `venció hace ${-days} día${days === -1 ? "" : "s"}` : days === 0 ? "vence hoy" : `en ${days} día${days === 1 ? "" : "s"}`}
+                            </span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {isSelf ? (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-bold" style={{ background: "#FBEAE3", color: COLORS.clay }}>Admin (tú)</span>
+                        ) : (
+                          <button onClick={(e) => { e.stopPropagation(); setRoleTarget(u); }} title="Cambiar rol"
+                            className="px-2 py-0.5 rounded-full text-[11px] font-bold hover:opacity-80"
+                            style={{ background: u.role === "admin" ? "#FBEAE3" : "#EAF0F8", color: u.role === "admin" ? COLORS.clay : COLORS.court }}>
+                            {u.role === "admin" ? "Admin" : "Cliente"}
+                          </button>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {/* Nunca sobre uno mismo; sobre otro admin hay que quitarle el rol primero
+                           (con el botón de la columna Rol) -- mismo bloqueo que ya aplica
+                           api/delete-user.js del lado del servidor. */}
+                        {!isSelf && u.role !== "admin" && (
+                          <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(u); }} title="Eliminar usuario" className="text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
+                        )}
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr style={{ background: "#F7F8FB" }}>
+                        <td colSpan={5} className="px-4 py-3">
+                          {/* "Carta" del jugador (v2.102.0): los datos de contacto ya no ocupan la lista. */}
+                          <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2 text-sm">
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">Correo</p><p className="break-all">{u.email || "—"}</p></div>
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">Teléfono</p><p>{u.phone || "—"}</p></div>
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">Zona</p><p>{u.zone || "—"}</p></div>
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">DUPR</p><p className="mono">{u.duprRating != null ? Number(u.duprRating).toFixed(2) : "—"}</p></div>
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">Registrado en la app</p><p>{u.createdAt ? formatDateHuman(new Date(u.createdAt).toISOString().slice(0, 10)) : "—"}</p></div>
+                            <div><p className="text-[10px] uppercase font-bold text-gray-400">Membresía vence</p><p>{isPaidPlan && u.planExpiresAt ? formatDateFull(u.planExpiresAt) : isPaidPlan ? "Sin fecha de vencimiento" : "No tiene membresía de pago"}</p></div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
