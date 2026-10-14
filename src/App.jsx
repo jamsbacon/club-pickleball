@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.99.0";
+const APP_VERSION = "2.100.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -3131,10 +3131,38 @@ export default function PickleballTournamentApp() {
   // updateCategory) para que cualquier dispositivo/refresh de la mesa técnica vea el mismo
   // estado -- no es un estado local del componente.
   const markMatchOnCourt = (categoryId, matchId) => {
+    const plan = freezePlanFor(categoryId, matchId);
     updateCategory(categoryId, (c) => {
       c.matches = c.matches.map((m) => (m.id === matchId ? { ...m, checkedIn: true } : m));
+      if (plan) applyDayNumbers(c, plan.numbers);
       return c;
     });
+    if (plan) plan.others.forEach((cid) => updateCategory(cid, (c) => { applyDayNumbers(c, plan.numbers); return c; }));
+  };
+  // Numeración por horario (v2.100.0) -- ver buildMatchIndex. Mientras la jornada no ha empezado el
+  // número se calcula en vivo; al llegar el primer resultado / "En cancha" se GUARDA la numeración
+  // cronológica de ese momento en todos los partidos del día (freezePlanFor), dentro del MISMO guardado
+  // de la categoría que dispara el cambio (dos updateCategory seguidos a una misma categoría se pisarían).
+  const applyDayNumbers = (c, numbers) => {
+    c.matches = c.matches.map((m) => (numbers.has(m.id) ? { ...m, matchNumber: numbers.get(m.id) } : m));
+  };
+  const freezePlanFor = (categoryId, matchId) => {
+    const cat = categories.find((c) => c.id === categoryId);
+    const m = cat?.matches.find((x) => x.id === matchId);
+    if (!cat || !m || !m.day) return null;
+    const scoped = categories.filter((c) => c.tournamentId === cat.tournamentId);
+    if (isDayStarted(scoped, m.day)) return null;
+    const numbers = dayNumberPlan(scoped, courts, m.day);
+    const others = scoped.filter((c) => c.id !== categoryId && c.matches.some((x) => numbers.has(x.id))).map((c) => c.id);
+    return { numbers, others };
+  };
+  // "Renumerar por horario": reasigna los números de un día en orden cronológico, también cuando la
+  // jornada ya empezó (el admin lo pide a propósito; las planillas ya impresas dejan de coincidir).
+  const renumberDay = (tournamentId, day) => {
+    if (currentUser?.role !== "admin") return;
+    const scoped = categories.filter((c) => c.tournamentId === tournamentId);
+    const numbers = dayNumberPlan(scoped, courts, day);
+    scoped.filter((c) => c.matches.some((x) => numbers.has(x.id))).forEach((c) => updateCategory(c.id, (fresh) => { applyDayNumbers(fresh, numbers); return fresh; }));
   };
   // "Cambiar juego" (v2.87.0) -- ver computeNextCalls. Solo toca las banderas de llamado
   // (skipped/skippedAt/callCourtId/calledAt/checkedIn), NUNCA día/hora/cancha del calendario, y
@@ -3912,9 +3940,12 @@ export default function PickleballTournamentApp() {
 
   const submitScore = (catId, matchId, sets) => {
     if (currentUser?.role !== "admin") return;
+    const plan = freezePlanFor(catId, matchId);
+    if (plan) plan.others.forEach((cid) => updateCategory(cid, (c) => { applyDayNumbers(c, plan.numbers); return c; }));
     updateCategory(catId, (c) => {
       const m = c.matches.find((mm) => mm.id === matchId);
       if (!m) return c;
+      if (plan) applyDayNumbers(c, plan.numbers);
       m.sets = sets;
       m.skipped = false; m.callCourtId = null;
       let setsA = 0, setsB = 0;
@@ -4831,7 +4862,7 @@ export default function PickleballTournamentApp() {
                 runScheduler={runScheduler} scheduleInfo={scheduleInfo} reflowSchedule={reflowSchedule}
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
-                markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch}
+                markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} renumberDay={renumberDay}
                 submitScore={submitScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
@@ -7902,7 +7933,7 @@ function TorneosSection(props) {
     addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
     generateDraw, closeGroupsAndSeedBracket, advanceGroupQualifiers, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
-    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch,
+    setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay,
     submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings, entryRankCheck,
   } = props;
@@ -8015,7 +8046,7 @@ function TorneosSection(props) {
       {subTab === "resultados" && (
         <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} advanceGroupQualifiers={advanceGroupQualifiers} tournament={tournament} dates={dates}
-          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} role={role} />
+          moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} renumberDay={renumberDay} role={role} />
       )}
 
       {subTab === "clasificacion" && (
@@ -11257,6 +11288,15 @@ function buildMatchIndex(categories, courts, day) {
   const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
   const todays = categories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day));
   const map = new Map();
+  // v2.100.0, a pedido del club: el número sigue el ORDEN CRONOLÓGICO del calendario (1 = el primero
+  // en jugarse). Mientras la jornada NO haya empezado (ningún partido con resultado ni "En cancha") se
+  // recuenta en vivo, así mover partidos a mano entre bloques de horario nunca deja números salteados.
+  // Una vez que empieza se respeta el número guardado (ver isDayStarted/dayNumberPlan y el incidente
+  // de v2.88.0: no correr números con la planilla ya impresa y los partidos en juego).
+  if (!isDayStarted(categories, day)) {
+    chronoSort([...todays], courtOrder).forEach((m, i) => map.set(m.id, i + 1));
+    return map;
+  }
   let maxNum = 0;
   const missing = [];
   todays.forEach((m) => {
@@ -11265,6 +11305,18 @@ function buildMatchIndex(categories, courts, day) {
   });
   chronoSort(missing, courtOrder).forEach((m) => map.set(m.id, ++maxNum));
   return map;
+}
+
+// Una jornada "empezó" cuando algún partido de ese día ya tiene resultado o ya fue confirmado "En cancha".
+function isDayStarted(categories, day) {
+  return categories.some((c) => c.matches.some((m) => !isByeMatch(m) && m.day === day && (!!m.winnerId || !!m.checkedIn)));
+}
+
+// Plan de numeración cronológica de un día: Map matchId -> número, sobre las categorías del torneo.
+function dayNumberPlan(scopedCategories, courts, day) {
+  const courtOrder = {}; courts.forEach((c, i) => { courtOrder[c.id] = i; });
+  const todays = scopedCategories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day === day));
+  return new Map(chronoSort([...todays], courtOrder).map((m, i) => [m.id, i + 1]));
 }
 
 // Mismo criterio de normalización que playersOf() dentro de buildSchedule -- nombre recortado
@@ -11477,7 +11529,7 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, advanceGroupQualifiers, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, role }) {
+function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, advanceGroupQualifiers, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -11598,13 +11650,20 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   );
 
   const dayTabs = isAdmin && dates.length > 0 && (
-    <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {dates.map((d) => (
         <button key={d} onClick={() => setSelectedDay(d)} className="px-3.5 py-2 rounded-xl text-sm font-bold"
           style={{ background: d === day ? COLORS.court : "#EAEEF5", color: d === day ? "#fff" : COLORS.ink }}>
           {formatDateHuman(d)}
         </button>
       ))}
+      {day && tournament && (
+        <button onClick={() => {
+          if (window.confirm(`¿Renumerar los partidos de ${formatDateHuman(day)} según su horario en el calendario (1 = el primero en jugarse)? Si ya imprimiste las planillas de este día, dejan de coincidir.`)) renumberDay(tournament.id, day);
+        }} style={{ color: COLORS.court }} className="text-xs font-bold underline ml-1">
+          Renumerar por horario
+        </button>
+      )}
     </div>
   );
 
