@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.100.0";
+const APP_VERSION = "2.101.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1786,6 +1786,76 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
   if (!pick) pick = candidates[candidates.length - 1];
 
   return { format: pick.format, matches: pick.matches, capacity, othersDemand, remaining, budget, n };
+}
+
+/* =========================================================================
+   SUSTITUIR JUGADORES DE UNA DUPLA (v2.101.0) -- cambia QUIÉNES juegan, no cuándo. El equipo conserva
+   su `id`, y como cada partido (`matches`) y cada grupo apuntan al equipo por ese id, el calendario, la
+   cancha, el número de partido y la posición en grupos/cuadro quedan exactamente como estaban. Solo se
+   reescriben los datos de identidad del jugador (nombre, userId, ranking); el pago registrado en ese cupo
+   (priceUsd/paymentStatus/referencia...) se queda tal cual, y el jugador anterior se guarda en
+   `replacedFrom` para poder rastrear el cambio. Pura (muta `c` solo si todo valida).
+   ========================================================================= */
+function substituteTeamPlayers(c, teamId, newPlayers) {
+  const norm = (n) => (n || "").trim().toLowerCase();
+  const found = [...(c.teams || []), ...(c.waitlist || [])].filter((t) => t.id === teamId);
+  if (found.length > 1) return { error: `Hay más de un equipo con el mismo identificador en "${c.name}" (dato corrupto) -- no se cambió nada para no arriesgarse a tocar al equivocado.` };
+  const team = found[0];
+  if (!team) return { error: "Este equipo ya no existe." };
+  if (newPlayers.length !== (team.players || []).length) return { error: "La cantidad de jugadores no coincide con la del equipo." };
+  if (newPlayers.some((p) => !norm(p.name))) return { error: "Falta el nombre de un jugador." };
+  if (newPlayers.length === 2 && (norm(newPlayers[0].name) === norm(newPlayers[1].name) || (newPlayers[0].userId && newPlayers[0].userId === newPlayers[1].userId))) {
+    return { error: "Los dos jugadores son la misma persona." };
+  }
+  const others = [...(c.teams || []), ...(c.waitlist || [])].filter((t) => t.id !== teamId);
+  for (const np of newPlayers) {
+    const clash = others.find((t) => (t.players || []).some((p) => (np.userId && p.userId === np.userId) || norm(p.name) === norm(np.name)));
+    if (clash) return { error: `${np.name.trim()} ya está inscrito/a en esta categoría (${clash.name}).` };
+  }
+  const players = team.players.map((old, i) => {
+    const np = newPlayers[i];
+    if (norm(old.name) === norm(np.name) && (old.userId || null) === (np.userId || null)) return old;
+    const { userId: _oldUser, ...rest } = old;
+    return {
+      ...rest, name: np.name.trim(), ranking: Number(np.ranking) || 0, ...(np.userId ? { userId: np.userId } : {}),
+      replacedFrom: [...(old.replacedFrom || []), { name: old.name, userId: old.userId || null, at: Date.now() }],
+    };
+  });
+  const name = players.map((p) => p.name).join(" / ");
+  const apply = (t) => (t.id === teamId ? { ...t, players, name } : t);
+  c.teams = (c.teams || []).map(apply);
+  c.waitlist = (c.waitlist || []).map(apply);
+  // Etiquetas con el nombre ya escrito (cupos del cuadro sembrados desde grupos) y filas guardadas de
+  // la tabla de posiciones: se alinean al nombre nuevo. Día/hora/cancha no se tocan.
+  c.matches = (c.matches || []).map((m) => {
+    let nm = m;
+    if (m.teamAId === teamId && m.teamALabel) nm = { ...nm, teamALabel: name };
+    if (m.teamBId === teamId && m.teamBLabel) nm = { ...nm, teamBLabel: name };
+    return nm;
+  });
+  c.groups = (c.groups || []).map((g) => (g.standings ? { ...g, standings: g.standings.map((r) => (r.teamId === teamId ? { ...r, name } : r)) } : g));
+  return { error: null };
+}
+
+// ¿Alguno de los jugadores nuevos ya está jugando OTRO partido a la misma hora que un partido de este
+// equipo? (cualquier categoría del torneo) -- sustituir no puede dejar a una persona en dos canchas.
+function substituteScheduleConflicts(scopedCategories, teamId, newPlayers) {
+  const norm = (n) => (n || "").trim().toLowerCase();
+  const mine = scopedCategories.flatMap((c) => c.matches.filter((m) => !isByeMatch(m) && m.day && m.time && (m.teamAId === teamId || m.teamBId === teamId)));
+  if (mine.length === 0) return [];
+  const slotKeys = new Set(mine.map((m) => `${m.day}|${m.time}`));
+  const mineIds = new Set(mine.map((m) => m.id));
+  const out = [];
+  scopedCategories.forEach((c) => c.matches.forEach((m) => {
+    if (mineIds.has(m.id) || isByeMatch(m) || !m.day || !m.time || !slotKeys.has(`${m.day}|${m.time}`)) return;
+    const ps = [m.teamAId, m.teamBId].flatMap((tid) => (c.teams || []).find((t) => t.id === tid)?.players || []);
+    newPlayers.forEach((np) => {
+      if (ps.some((p) => (np.userId && p.userId === np.userId) || norm(p.name) === norm(np.name))) {
+        out.push(`${np.name.trim()} ya juega otro partido el ${formatDateHuman(m.day)} a las ${formatTimeAmPm(m.time)} (${c.name}).`);
+      }
+    });
+  }));
+  return [...new Set(out)];
 }
 
 /* =========================================================================
@@ -3727,6 +3797,30 @@ export default function PickleballTournamentApp() {
     return result?.error ? { error: result.error } : {};
   };
 
+  // Sustituir a los jugadores de una dupla ya formada (v2.101.0) -- ver substituteTeamPlayers. El
+  // calendario NO se toca: el equipo conserva su id y los partidos apuntan a él. Valida ANTES que ninguno
+  // de los nuevos juegue otro partido a la misma hora, y dentro del guardado (categoría fresca, rev) que
+  // no estén ya inscritos en la categoría.
+  const replaceTeamPlayers = async (catId, teamId, newPlayers) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede editar duplas." };
+    const cat = categories.find((c) => c.id === catId);
+    if (!cat) return { error: "Esta categoría ya no existe." };
+    const scoped = categories.filter((c) => c.tournamentId === cat.tournamentId);
+    const conflicts = substituteScheduleConflicts(scoped, teamId, newPlayers);
+    if (conflicts.length > 0) return { error: conflicts.join(" ") };
+    let failure = null;
+    const result = await updateCategory(catId, (c) => {
+      failure = null;
+      const r = substituteTeamPlayers(c, teamId, newPlayers);
+      if (r.error) failure = r.error;
+      return c;
+    });
+    if (failure) return { error: failure };
+    if (result?.error) return { error: result.error };
+    newPlayers.forEach((p) => upsertPlayerRanking(p.name, p.ranking, true));
+    return {};
+  };
+
   // Recalcula el precio de las categorías SIN VERIFICAR que le quedan a una persona en un
   // torneo, justo después de quitarle una (v2.55.0). Mismo reparto parejo que usa el checkout
   // (tournamentRegPrice(tournament, N) / N), aplicado de nuevo con la N que le queda de verdad.
@@ -4854,7 +4948,7 @@ export default function PickleballTournamentApp() {
                 categories={categories.filter((c) => c.tournamentId === tournament.id)}
                 activeCat={activeCat} setActiveCatId={setActiveCatId}
                 addCategory={addCategory} removeCategory={removeCategory} updateCategory={updateCategory}
-                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
+                addTeam={addTeam} removePersonFromCategory={removePersonFromCategory} moveSoloRegistration={moveSoloRegistration} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} replaceTeamPlayers={replaceTeamPlayers} setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus} recordPartialPayment={recordPartialPayment}
                 generateDraw={generateDraw} closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} advanceGroupQualifiers={advanceGroupQualifiers} removeTeamFromGroup={removeTeamFromGroup} assignTeamToGroupSlot={assignTeamToGroupSlot}
                 suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} entryRankCheck={entryRankCheck}
                 setCategoryFormat={setCategoryFormat} courts={courts}
@@ -7930,7 +8024,7 @@ function TorneosSection(props) {
 
   const {
     tournament, setTournament, uploadTournamentImage, dates, categories, activeCat, setActiveCatId,
-    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
+    addCategory, removeCategory, updateCategory, addTeam, removePersonFromCategory, moveSoloRegistration, mergeIntoTeam, splitTeam, replaceTeamPlayers, setTeamPaymentStatus, setPlayerPaymentStatus, recordPartialPayment,
     generateDraw, closeGroupsAndSeedBracket, advanceGroupQualifiers, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay,
@@ -8020,7 +8114,7 @@ function TorneosSection(props) {
         <DuplasTab categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
           addTeam={addTeam} suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking}
           setTeamPaymentStatus={setTeamPaymentStatus} setPlayerPaymentStatus={setPlayerPaymentStatus}
-          mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} users={users} />
+          mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} replaceTeamPlayers={replaceTeamPlayers} users={users} />
       )}
 
       {subTab === "formatos" && role === "admin" && (
@@ -8839,7 +8933,7 @@ function ManageCategoriesModal({ entry, categories, removePersonFromCategory, mo
 
 // Arma equipos y revisa quién está inscrito -- de solo lectura desde v2.50.0 (ya no borra, ver
 // comentario en TORNEO_SUB_ITEMS): el borrado vive únicamente en Inscritos.
-function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus, mergeIntoTeam, splitTeam, users }) {
+function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRanking, upsertPlayerRanking, setTeamPaymentStatus, setPlayerPaymentStatus, mergeIntoTeam, splitTeam, replaceTeamPlayers, users }) {
   return (
     <div className="grid md:grid-cols-[260px_1fr] gap-5 mt-2">
       <CategoryPicker categories={categories} activeCat={activeCat} setActiveCatId={setActiveCatId}
@@ -8848,7 +8942,7 @@ function DuplasTab({ categories, activeCat, setActiveCatId, addTeam, suggestedRa
         {activeCat ? (
           <TeamRegistration cat={activeCat} addTeam={addTeam}
             suggestedRanking={suggestedRanking} upsertPlayerRanking={upsertPlayerRanking} setTeamPaymentStatus={setTeamPaymentStatus}
-            setPlayerPaymentStatus={setPlayerPaymentStatus} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} users={users} />
+            setPlayerPaymentStatus={setPlayerPaymentStatus} mergeIntoTeam={mergeIntoTeam} splitTeam={splitTeam} replaceTeamPlayers={replaceTeamPlayers} users={users} />
         ) : (
           <Card><p className="text-sm text-gray-400">Selecciona una categoría para ver o agregar sus duplas.</p></Card>
         )}
@@ -9163,7 +9257,7 @@ function PlayerField({ label, name, setName }) {
 // borra a nadie (v2.50.0) -- ni equipo ni lista de espera; el borrado se centralizó en
 // Inscritos (InscritosTab), por PERSONA y de una vez en todas sus categorías, no por equipo
 // suelto acá. Ver el comentario en TORNEO_SUB_ITEMS para el porqué.
-function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, splitTeam, users }) {
+function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, splitTeam, replaceTeamPlayers, users }) {
   const isDoubles = cat.modality !== "individual";
   const [p1, setP1] = useState("");
   const [p2, setP2] = useState("");
@@ -9223,6 +9317,7 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
   // Desemparejar -- inverso de "Emparejar con...", ver splitTeam en el componente principal
   // para el porqué y las condiciones (solo si el segundo jugador tiene su propio pago
   // guardado). `splitTarget` es la dupla a separar (o null si el popup está cerrado).
+  const [editTarget, setEditTarget] = useState(null); // equipo cuyos integrantes se están sustituyendo (v2.101.0)
   const [splitTarget, setSplitTarget] = useState(null); // { catId, teamId, name1, name2 }
   const [splitting, setSplitting] = useState(false);
   const [splitError, setSplitError] = useState("");
@@ -9338,7 +9433,15 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
                   </button>
                 )}
               </div>
-              <span className="mono text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                {replaceTeamPlayers && (t.players || []).length > 0 && (
+                  <button onClick={() => setEditTarget(t)} title="Cambiar a los jugadores de esta dupla sin tocar su horario"
+                    className="text-[11px] font-semibold rounded-full px-2 py-0.5 flex items-center gap-1" style={{ background: "#EAF0F8", color: COLORS.courtDark }}>
+                    <Pencil size={10} /> Editar
+                  </button>
+                )}
+                <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "#DCEBD5", color: COLORS.courtDark }}>Σ {teamRankSum(t)}</span>
+              </div>
             </div>
           );
         })}
@@ -9363,6 +9466,11 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
         </div>
       )}
 
+      {editTarget && (
+        <EditTeamPlayersModal cat={cat} team={editTarget} users={users} suggestedRanking={suggestedRanking}
+          onSave={(players) => replaceTeamPlayers(cat.id, editTarget.id, players)} onClose={() => setEditTarget(null)} />
+      )}
+
       {pairTarget && (
         <ConfirmDeleteModal
           title={`¿Emparejar a ${pairTarget.targetName} con ${pairTarget.sourceName}?`}
@@ -9379,6 +9487,68 @@ function TeamRegistration({ cat, addTeam, suggestedRanking, mergeIntoTeam, split
           onCancel={() => { setSplitTarget(null); setSplitError(""); }} />
       )}
     </Card>
+  );
+}
+
+// Sustituir a los jugadores de una dupla (v2.101.0) -- ver substituteTeamPlayers: el equipo conserva
+// su horario, cancha y número de partido; solo cambian las personas. Cada jugador se elige entre los
+// socios con cuenta o se escribe a mano (sin cuenta).
+function EditTeamPlayersModal({ cat, team, users, suggestedRanking, onSave, onClose }) {
+  const members = useMemo(() => [...(users || [])].filter((u) => u.role === "cliente" && u.name).sort((a, b) => a.name.localeCompare(b.name)), [users]);
+  const [slots, setSlots] = useState(() => (team.players || []).map((p) => ({ userId: p.userId || "", name: p.name })));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const played = (cat.matches || []).filter((m) => !!m.winnerId && (m.teamAId === team.id || m.teamBId === team.id)).length;
+  const scheduled = (cat.matches || []).filter((m) => !isByeMatch(m) && m.day && (m.teamAId === team.id || m.teamBId === team.id)).length;
+  const setSlot = (i, patch) => setSlots((arr) => arr.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const save = async () => {
+    if (saving) return;
+    setSaving(true); setError("");
+    const players = slots.map((s) => {
+      const u = s.userId ? members.find((m) => m.id === s.userId) : null;
+      const name = (u ? u.name : s.name).trim();
+      return { name, ranking: suggestedRanking(name) || 0, ...(u ? { userId: u.id } : {}) };
+    });
+    const r = await onSave(players);
+    setSaving(false);
+    if (r?.error) { setError(r.error); return; }
+    onClose();
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={520}>
+      <div className="p-5">
+        <p className="text-[11px] font-extrabold uppercase tracking-wide" style={{ color: COLORS.court }}>{cat.name}</p>
+        <p className="disp text-xl mb-1" style={{ color: COLORS.courtDark }}>Cambiar jugadores de la dupla</p>
+        <p className="text-xs mb-3" style={{ color: "#6B7688" }}>
+          Hoy: <strong>{team.name}</strong>. Las personas nuevas juegan en el mismo horario, cancha y número de partido que tenía esta dupla{scheduled > 0 ? ` (${scheduled} partido${scheduled === 1 ? "" : "s"} en el calendario)` : ""}. El pago registrado en este cupo se queda como está.
+        </p>
+        {played > 0 && (
+          <p className="text-xs font-semibold px-3 py-2 rounded-lg mb-3" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
+            Esta dupla ya jugó {played} partido{played === 1 ? "" : "s"}: esos resultados pasan a las personas nuevas (y a su posición en grupos y ranking).
+          </p>
+        )}
+        <div className="space-y-3">
+          {slots.map((s, i) => (
+            <div key={i}>
+              <Label>{slots.length > 1 ? `Jugador ${i + 1}` : "Jugador"}{team.players[i]?.role ? ` · ${MP_ROLE_LABELS[team.players[i].role]}` : ""} <span className="font-normal text-gray-400">(antes: {team.players[i]?.name})</span></Label>
+              <select style={inputStyle} value={s.userId} onChange={(e) => {
+                const u = members.find((m) => m.id === e.target.value);
+                setSlot(i, u ? { userId: u.id, name: u.name } : { userId: "", name: s.name });
+              }}>
+                <option value="">Sin cuenta -- escribir el nombre</option>
+                {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+              {!s.userId && <input style={{ ...inputStyle, marginTop: 6 }} value={s.name} onChange={(e) => setSlot(i, { name: e.target.value })} placeholder="Nombre y apellido" />}
+            </div>
+          ))}
+        </div>
+        {error && <p className="text-xs font-semibold mt-3" style={{ color: "#B23A1B" }}>{error}</p>}
+        <div className="flex items-center gap-2 mt-4">
+          <button onClick={save} disabled={saving} style={{ background: COLORS.court, color: COLORS.chalk, opacity: saving ? 0.6 : 1 }} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold">{saving ? "Guardando…" : "Guardar cambio"}</button>
+          <button onClick={onClose} className="px-4 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
