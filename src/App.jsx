@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.105.0";
+const APP_VERSION = "2.105.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -13162,7 +13162,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
     setCourtId(null);
   };
 
-  const activeBookings = bookings.filter((b) => b.status !== "cancelada").sort((a, b) => (a.date + a.timeMin) - (b.date + b.timeMin));
+  const activeBookings = bookings.filter((b) => b.status !== "cancelada").sort((a, b) => a.date.localeCompare(b.date) || a.timeMin - b.timeMin);
   const visibleBookings = role === "admin" ? activeBookings : activeBookings.filter((b) => b.userName === currentUser.name);
 
   if (courts.length === 0) {
