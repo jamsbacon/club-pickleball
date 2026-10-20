@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.103.0";
+const APP_VERSION = "2.103.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1956,7 +1956,8 @@ function computeRankingTable(ranking, tournaments, categories) {
     });
   });
   rows.sort((a, b) => b.pts - a.pts || b.pg - a.pg || (b.setsF - b.setsC) - (a.setsF - a.setsC) || (b.ptsF - b.ptsC) - (a.ptsF - a.ptsC) || a.name.localeCompare(b.name));
-  rows.forEach((r, i) => { r.rank = i + 1; });
+  // Empate en puntos = mismo puesto (1, 1, 3...); el orden de las filas sigue usando los desempates.
+  rows.forEach((r, i) => { r.rank = i > 0 && r.pts === rows[i - 1].pts ? rows[i - 1].rank : i + 1; });
   return { rows, tournaments: linked, pending: new Set() };
 }
 
@@ -2097,7 +2098,8 @@ function computePositionTable(ranking, tournaments, categories) {
     r.events = entries.length;
   });
   rows.sort((a, b) => b.pts - a.pts || b.titles - a.titles || b.finals - a.finals || a.name.localeCompare(b.name));
-  rows.forEach((r, i) => { r.rank = i + 1; });
+  // Empate en puntos = mismo puesto (1, 1, 3...); el orden de las filas sigue usando los desempates.
+  rows.forEach((r, i) => { r.rank = i > 0 && r.pts === rows[i - 1].pts ? rows[i - 1].rank : i + 1; });
   return { rows, tournaments: linked, pending };
 }
 
