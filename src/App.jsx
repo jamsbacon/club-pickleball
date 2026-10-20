@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.106.3";
+const APP_VERSION = "2.107.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12936,35 +12936,38 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
     );
   };
 
-  // Vista Día: quién ocupa cada cancha en cada bloque.
-  const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes);
-  // Open Play y clases se ubican por su hora REAL (inicio-fin), no por los bloques que guardan en
-  // occupiedBlocks (esos solo incluyen bloques que EMPIEZAN dentro del evento: una clase 6:30-7:30pm
-  // con bloques de 60 min quedaba pintada a las 7:00pm). Un bloque se pinta si se solapa con el evento.
-  const step = Number(club.blockMinutes) || 60;
-  const range = (e) => (e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : "");
-  const hitsBlock = (e, courtId, timeMin) => {
-    if (e.date !== selected) return false;
-    if (e.startTime && e.endTime && Array.isArray(e.courtIds)) {
-      return e.courtIds.includes(courtId) && timeToMinutes(e.startTime) < timeMin + step && timeToMinutes(e.endTime) > timeMin;
-    }
-    return e.occupiedBlocks.some((o) => o.courtId === courtId && o.date === selected && o.timeMin === timeMin);
+  // Vista Día: eje de horas cada 30 min y, por cancha, cada evento en su hora real (alto proporcional a la
+  // duración). Reservas y partidos de torneo ocupan un bloque del club (club.blockMinutes) desde su hora.
+  const blockLen = Number(club.blockMinutes) || 60;
+  const SLOT = 30, SLOT_PX = 40;
+  const dayEvents = (courtId) => {
+    const out = [];
+    infoOf(selected).bookings.filter((x) => x.courtId === courtId)
+      .forEach((x) => out.push({ key: x.id, start: x.timeMin, end: x.timeMin + (Number(x.blockMinutes) || blockLen), text: x.userName || "Reserva", bg: "#DCE6F5", fg: COLORS.courtDark }));
+    const timed = (e) => (e.startTime && e.endTime ? [timeToMinutes(e.startTime), timeToMinutes(e.endTime)] : null);
+    const fromBlocks = (e) => { const t = e.occupiedBlocks.filter((o) => o.courtId === courtId && o.date === selected).map((o) => o.timeMin); return t.length ? [Math.min(...t), Math.max(...t) + blockLen] : null; };
+    openPlays.filter((e) => e.date === selected && (Array.isArray(e.courtIds) ? e.courtIds.includes(courtId) || e.occupiedBlocks.some((o) => o.courtId === courtId) : true)).forEach((e) => {
+      const r = timed(e) || fromBlocks(e); if (r) out.push({ key: e.id, start: r[0], end: r[1], text: `Open Play · ${e.name}`, bg: "#FDEBD9", fg: "#8A3B00" });
+    });
+    classes.filter((e) => e.date === selected && (Array.isArray(e.courtIds) ? e.courtIds.includes(courtId) || e.occupiedBlocks.some((o) => o.courtId === courtId) : true)).forEach((e) => {
+      const r = timed(e) || fromBlocks(e); if (r) out.push({ key: e.id, start: r[0], end: r[1], text: `Clase · ${e.academyName || e.name}`, bg: "#E4F5EC", fg: "#17603C" });
+    });
+    categories.forEach((cat) => (cat.matches || []).forEach((mm) => {
+      if (mm.courtId === courtId && mm.day === selected && !isByeMatch(mm)) { const st = timeToMinutes(mm.time); out.push({ key: mm.id || `${cat.id}${st}`, start: st, end: st + blockLen, text: `Torneo · ${cat.name}`, bg: "#FBE6DE", fg: "#8A2F14" }); }
+    }));
+    // Carriles: eventos que se solapan en la misma cancha se reparten el ancho.
+    out.sort((x, y) => x.start - y.start || x.end - y.end);
+    const lanesEnd = [];
+    out.forEach((ev) => { let l = lanesEnd.findIndex((end) => end <= ev.start); if (l < 0) { l = lanesEnd.length; } lanesEnd[l] = ev.end; ev.lane = l; });
+    out.forEach((ev) => { ev.lanes = Math.max(1, ...out.filter((o) => o.start < ev.end && o.end > ev.start).map((o) => o.lane + 1)); });
+    return out;
   };
-  // Una celda puede tener varios eventos (una clase que termina a las 5:30 y otra que arranca a esa hora
-  // comparten el bloque de las 5:00). El evento se escribe completo en el bloque donde EMPIEZA y en los
-  // siguientes aparece atenuado como "continúa", para no leerlo como una clase duplicada.
-  const cellFor = (courtId, timeMin) => {
-    const items = [];
-    const startsHere = (e) => !(e.startTime && e.endTime) || (timeToMinutes(e.startTime) >= timeMin && timeToMinutes(e.startTime) < timeMin + step);
-    infoOf(selected).bookings.filter((x) => x.courtId === courtId && x.timeMin === timeMin)
-      .forEach((b) => items.push({ text: b.userName || "Reserva", bg: "#DCE6F5", fg: COLORS.courtDark }));
-    openPlays.filter((e) => hitsBlock(e, courtId, timeMin)).forEach((e) => items.push({ text: `Open Play · ${e.name} ${range(e)}`, bg: "#FDEBD9", fg: "#8A3B00", cont: !startsHere(e) }));
-    classes.filter((e) => hitsBlock(e, courtId, timeMin)).forEach((e) => items.push({ text: `Clase · ${e.academyName || e.name} ${range(e)}`, bg: "#E4F5EC", fg: "#17603C", cont: !startsHere(e) }));
-    for (const cat of categories) {
-      if ((cat.matches || []).some((mm) => mm.courtId === courtId && mm.day === selected && !isByeMatch(mm) && timeToMinutes(mm.time) === timeMin)) items.push({ text: `Torneo · ${cat.name}`, bg: "#FBE6DE", fg: "#8A2F14" });
-    }
-    return items;
-  };
+  const dayCols = courts.map((c) => ({ court: c, events: dayEvents(c.id) }));
+  const allEv = dayCols.flatMap((c) => c.events);
+  const axisStart = Math.floor(Math.min(timeToMinutes(club.openTime || "07:00"), ...allEv.map((e) => e.start)) / SLOT) * SLOT;
+  const axisEnd = Math.ceil(Math.max(timeToMinutes(club.closeTime || "22:00"), ...allEv.map((e) => e.end)) / SLOT) * SLOT;
+  const slots = Array.from({ length: Math.max(1, (axisEnd - axisStart) / SLOT) }, (_, i) => axisStart + i * SLOT);
+  const evRange = (e) => `${formatTimeAmPm(e.start)} – ${formatTimeAmPm(e.end)}`;
 
   return (
     <Card>
@@ -13047,37 +13050,27 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
           <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={selected} onChange={(e) => e.target.value && setSelected(e.target.value)} />
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-xs" style={{ minWidth: 120 + courts.length * 120 }}>
-            <thead>
-              <tr className="text-left text-gray-400 uppercase">
-                <th className="py-1.5 pr-2 w-20">Hora</th>
-                {courts.map((c) => <th key={c.id} className="py-1.5 px-1">{c.name}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {blocks.map((t) => (
-                <tr key={t} className="border-t" style={{ borderColor: COLORS.line }}>
-                  <td className="py-1.5 pr-2 mono font-bold" style={{ color: COLORS.courtDark }}>{formatTimeAmPm(t)}</td>
-                  {courts.map((c) => {
-                    const cell = cellFor(c.id, t);
-                    return (
-                      <td key={c.id} className="p-0.5 align-top">
-                        {cell.length > 0 ? (
-                          <div className="space-y-0.5">
-                            {cell.map((it, k) => (
-                              <div key={k} className="rounded-md px-1.5 py-1 font-semibold leading-tight break-words" style={{ background: it.bg, color: it.fg, opacity: it.cont ? 0.55 : 1 }}>
-                                {it.cont ? "↳ " : ""}{it.text}
-                              </div>
-                            ))}
-                          </div>
-                        ) : <div className="rounded-md px-1.5 py-1 text-gray-300">Libre</div>}
-                      </td>
-                    );
-                  })}
-                </tr>
+          <div className="flex" style={{ minWidth: 70 + courts.length * 130 }}>
+            <div className="shrink-0" style={{ width: 70 }}>
+              <div className="h-7" />
+              {slots.map((t) => (
+                <div key={t} className="mono text-[11px] font-semibold pr-2 text-right" style={{ height: SLOT_PX, color: t % 60 === 0 ? COLORS.courtDark : "#9AA6BC" }}>{formatTimeAmPm(t)}</div>
               ))}
-            </tbody>
-          </table>
+            </div>
+            {dayCols.map(({ court, events }) => (
+              <div key={court.id} className="flex-1 min-w-[120px] px-0.5">
+                <div className="h-7 text-xs font-bold uppercase text-gray-500 flex items-center px-1">{court.name}</div>
+                <div className="relative rounded-lg" style={{ height: slots.length * SLOT_PX, background: "repeating-linear-gradient(to bottom, #F5F7FB 0, #F5F7FB " + (SLOT_PX - 1) + "px, #E2E6EE " + (SLOT_PX - 1) + "px, #E2E6EE " + SLOT_PX + "px)" }}>
+                  {events.map((ev) => (
+                    <div key={ev.key + ev.start} title={`${ev.text} · ${evRange(ev)}`} className="absolute rounded-md px-1.5 py-1 text-[11px] font-semibold leading-tight overflow-hidden"
+                      style={{ top: ((ev.start - axisStart) / SLOT) * SLOT_PX + 1, height: ((ev.end - ev.start) / SLOT) * SLOT_PX - 2, left: `calc(${(ev.lane / ev.lanes) * 100}% + 2px)`, width: `calc(${100 / ev.lanes}% - 4px)`, background: ev.bg, color: ev.fg, border: `1px solid ${ev.fg}33` }}>
+                      {ev.text}<br /><span className="font-medium opacity-80">{evRange(ev)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </>)}
 
