@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.103.2";
+const APP_VERSION = "2.103.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1861,6 +1861,13 @@ function substituteScheduleConflicts(scopedCategories, teamId, newPlayers) {
 /* =========================================================================
    RANKINGS (v2.93.0) -- clasificación acumulada entre torneos. Ver migración rankings.
    ========================================================================= */
+// Nombre para mostrar con la inicial de cada palabra en mayúscula ("pedro gómez" -> "Pedro Gómez");
+// partículas como "de/del/la" quedan en minúscula. Solo display: no cambia el dato guardado.
+function displayPersonName(name) {
+  const small = new Set(["de", "del", "la", "las", "los", "y", "e", "da", "do", "van", "von"]);
+  return (name || "").trim().replace(/\s+/g, " ").toLowerCase().split(" ")
+    .map((w, i) => (i > 0 && small.has(w) ? w : w.replace(/(^|[-'’.])(\p{L})/gu, (_, a, c) => a + c.toUpperCase()))).join(" ");
+}
 function normalizePersonName(name) {
   return (name || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -7691,7 +7698,7 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
     ctx.fillText(String(r.rank), cx, cy + 2);
 
     // Nombre + detalle
-    const name = users.find((u) => u.id === r.userId)?.name || r.name;
+    const name = displayPersonName(users.find((u) => u.id === r.userId)?.name || r.name);
     ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     ctx.fillStyle = "#FFFFFF"; ctx.font = `700 ${Math.round(36 * sc)}px ${BODY}`;
     ctx.fillText(fit(name, 560), 80 + 128, cy + 2 * sc);
@@ -7887,7 +7894,7 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                     return (
                       <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
                         <td className="py-2 pr-3 font-bold">{r.rank}</td>
-                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{users.find((u) => u.id === r.userId)?.name || r.name}{isMe ? " (tú)" : ""}</td>
+                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{displayPersonName(users.find((u) => u.id === r.userId)?.name || r.name)}{isMe ? " (tú)" : ""}</td>
                         <td className="py-2 pr-3 text-center font-extrabold mono" style={{ color: COLORS.courtDark }}>{r.pts}</td>
                         <td className="py-2 pr-3 text-center">{r.events}</td>
                         {table.tournaments.map((t) => {
@@ -7936,7 +7943,7 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                     return (
                       <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
                         <td className="py-2 pr-3 font-bold">{r.rank}</td>
-                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{users.find((u) => u.id === r.userId)?.name || r.name}{isMe ? " (tú)" : ""}</td>
+                        <td className={`py-2 pr-3 ${isMe ? "font-extrabold" : "font-medium"}`}>{displayPersonName(users.find((u) => u.id === r.userId)?.name || r.name)}{isMe ? " (tú)" : ""}</td>
                         <td className="py-2 pr-3 text-center font-extrabold mono" style={{ color: COLORS.courtDark }}>{r.pts}</td>
                         <td className="py-2 pr-3 text-center">{r.pj}</td>
                         <td className="py-2 pr-3 text-center">{r.pg}</td>
