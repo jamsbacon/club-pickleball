@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.103.1";
+const APP_VERSION = "2.103.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7666,40 +7666,44 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
   ctx.fillText(fit(`${sub}${ranking.categoryLevel ? ` · ${ranking.categoryLevel}` : ""}`, W - 160), 80, 520);
 
   // Filas
-  const MAX_ROWS = 10, rowH = 86, gap = 10, top = 560;
-  const rows = table.rows.slice(0, MAX_ROWS);
+  // Con cupo de clasificados se muestran TODOS los que clasifican (empates en el corte incluidos);
+  // sin cupo, el top 10. Las filas se achican para que quepan en la historia.
+  const shown = ranking.qualifyCount ? table.rows.filter((r) => r.rank <= ranking.qualifyCount).length : 10;
+  const rows = table.rows.slice(0, Math.max(1, Math.min(shown, 24)));
+  const top = 560, pitch = Math.min(96, 1050 / rows.length);
+  const gap = Math.round(pitch * 0.12), rowH = Math.round(pitch - gap), sc = rowH / 86;
   const medal = ["#FFC83D", "#C9D1DE", "#D9915A"];
   rows.forEach((r, i) => {
     const y = top + i * (rowH + gap);
     const qualifies = ranking.qualifyCount && r.rank <= ranking.qualifyCount;
     ctx.fillStyle = i === 0 ? "rgba(255,106,26,0.22)" : "rgba(255,255,255,0.07)";
-    rrect(80, y, W - 160, rowH, 26); ctx.fill();
-    if (qualifies) { ctx.fillStyle = "#4CC38A"; rrect(80, y + 18, 8, rowH - 36, 4); ctx.fill(); }
+    rrect(80, y, W - 160, rowH, 26 * sc); ctx.fill();
+    if (qualifies) { ctx.fillStyle = "#4CC38A"; rrect(80, y + rowH * 0.2, 8, rowH * 0.6, 4); ctx.fill(); }
 
     // Puesto
     const cx = 80 + 62, cy = y + rowH / 2;
     if (r.rank <= 3) {
-      ctx.fillStyle = medal[r.rank - 1]; ctx.beginPath(); ctx.arc(cx, cy, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = medal[r.rank - 1]; ctx.beginPath(); ctx.arc(cx, cy, 30 * sc, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = "#0A1830";
     } else ctx.fillStyle = "rgba(255,255,255,0.7)";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.font = `800 ${r.rank <= 3 ? 38 : 34}px ${DISP}`;
+    ctx.font = `800 ${Math.round((r.rank <= 3 ? 38 : 34) * sc)}px ${DISP}`;
     ctx.fillText(String(r.rank), cx, cy + 2);
 
     // Nombre + detalle
     const name = users.find((u) => u.id === r.userId)?.name || r.name;
     ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "#FFFFFF"; ctx.font = `700 36px ${BODY}`;
-    ctx.fillText(fit(name, 560), 80 + 128, cy + 2);
-    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `500 26px ${BODY}`;
+    ctx.fillStyle = "#FFFFFF"; ctx.font = `700 ${Math.round(36 * sc)}px ${BODY}`;
+    ctx.fillText(fit(name, 560), 80 + 128, cy + 2 * sc);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `500 ${Math.round(26 * sc)}px ${BODY}`;
     const detail = ranking.method === "posicion" ? `${r.events} torneo${r.events === 1 ? "" : "s"}` : `${r.pj} PJ · ${r.pg} PG`;
-    ctx.fillText(detail, 80 + 128, cy + 32);
+    ctx.fillText(detail, 80 + 128, cy + 32 * sc);
 
     // Puntos
-    ctx.textAlign = "right"; ctx.fillStyle = i === 0 ? "#FF8A45" : "#FFFFFF"; ctx.font = `800 48px ${DISP}`;
-    ctx.fillText(String(r.pts), W - 80 - 66, cy + 4);
-    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `600 22px ${BODY}`;
-    ctx.fillText("PTS", W - 80 - 66, cy + 30);
+    ctx.textAlign = "right"; ctx.fillStyle = i === 0 ? "#FF8A45" : "#FFFFFF"; ctx.font = `800 ${Math.round(48 * sc)}px ${DISP}`;
+    ctx.fillText(String(r.pts), W - 80 - 66, cy + 4 * sc);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `600 ${Math.round(22 * sc)}px ${BODY}`;
+    ctx.fillText("PTS", W - 80 - 66, cy + 30 * sc);
   });
 
   let endY = top + rows.length * (rowH + gap);
@@ -7707,18 +7711,18 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
   if (table.rows.length > rows.length) {
     ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.font = `600 30px ${BODY}`;
     ctx.fillText(`+ ${table.rows.length - rows.length} jugadores más en la app`, W / 2, endY + 36);
-    endY += 50;
+    endY += 44;
   }
   if (ranking.qualifyCount && rows.some((r) => r.rank <= ranking.qualifyCount)) {
     ctx.fillStyle = "#4CC38A"; ctx.font = `600 26px ${BODY}`;
-    ctx.fillText(`Barra verde: los ${ranking.qualifyCount} que clasifican`, W / 2, endY + 36);
+    ctx.fillText(`Barra verde: los ${rows.length} clasificados`, W / 2, endY + 36);
   }
 
   // Pie
   ctx.fillStyle = "#FF6A1A"; ctx.font = `700 36px ${DISP}`;
-  ctx.fillText(clubName || "Pickle Hub", W / 2, 1680);
+  ctx.fillText(clubName || "Pickle Hub", W / 2, 1812);
   ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = `500 26px ${BODY}`;
-  ctx.fillText("club-pickleball.vercel.app", W / 2, 1724);
+  ctx.fillText("club-pickleball.vercel.app", W / 2, 1854);
 
   return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
 }
