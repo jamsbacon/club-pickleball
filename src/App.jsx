@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.106.1";
+const APP_VERSION = "2.106.2";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12929,8 +12929,8 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
             <span className="text-[11px] shrink-0 text-gray-500">{b.freeBlock ? "Bloque gratis" : b.priceUsd != null ? formatMoney(b.priceUsd) : ""}</span>
           </div>
         ))}
-        {sel.plays.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FDEBD9" }}><b>Open Play</b> · {e.name}</div>)}
-        {sel.classes.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#E4F5EC" }}><b>Clase</b> · {e.academyName || e.name}</div>)}
+        {sel.plays.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FDEBD9" }}><b>Open Play</b> · {e.name} <span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
+        {sel.classes.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#E4F5EC" }}><b>Clase</b> · {e.academyName || e.name} <span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
         {[...sel.tournaments.values()].map((n) => <div key={n} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FBE6DE" }}><b>Torneo</b> · {n}</div>)}
       </div>
     );
@@ -12938,13 +12938,25 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
 
   // Vista Día: quién ocupa cada cancha en cada bloque.
   const blocks = generateDayBlocks(club.openTime, club.closeTime, club.blockMinutes);
+  // Open Play y clases se ubican por su hora REAL (inicio-fin), no por los bloques que guardan en
+  // occupiedBlocks (esos solo incluyen bloques que EMPIEZAN dentro del evento: una clase 6:30-7:30pm
+  // con bloques de 60 min quedaba pintada a las 7:00pm). Un bloque se pinta si se solapa con el evento.
+  const step = Number(club.blockMinutes) || 60;
+  const range = (e) => (e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : "");
+  const hitsBlock = (e, courtId, timeMin) => {
+    if (e.date !== selected) return false;
+    if (e.startTime && e.endTime && Array.isArray(e.courtIds)) {
+      return e.courtIds.includes(courtId) && timeToMinutes(e.startTime) < timeMin + step && timeToMinutes(e.endTime) > timeMin;
+    }
+    return e.occupiedBlocks.some((o) => o.courtId === courtId && o.date === selected && o.timeMin === timeMin);
+  };
   const cellFor = (courtId, timeMin) => {
     const b = infoOf(selected).bookings.find((x) => x.courtId === courtId && x.timeMin === timeMin);
     if (b) return { text: b.userName || "Reserva", bg: "#DCE6F5", fg: COLORS.courtDark };
-    const op = openPlays.find((e) => e.occupiedBlocks.some((o) => o.courtId === courtId && o.date === selected && o.timeMin === timeMin));
-    if (op) return { text: `Open Play · ${op.name}`, bg: "#FDEBD9", fg: "#8A3B00" };
-    const cl = classes.find((e) => e.occupiedBlocks.some((o) => o.courtId === courtId && o.date === selected && o.timeMin === timeMin));
-    if (cl) return { text: `Clase · ${cl.academyName || cl.name}`, bg: "#E4F5EC", fg: "#17603C" };
+    const op = openPlays.find((e) => hitsBlock(e, courtId, timeMin));
+    if (op) return { text: `Open Play · ${op.name} ${range(op)}`, bg: "#FDEBD9", fg: "#8A3B00" };
+    const cl = classes.find((e) => hitsBlock(e, courtId, timeMin));
+    if (cl) return { text: `Clase · ${cl.academyName || cl.name} ${range(cl)}`, bg: "#E4F5EC", fg: "#17603C" };
     for (const cat of categories) {
       if ((cat.matches || []).some((mm) => mm.courtId === courtId && mm.day === selected && !isByeMatch(mm) && timeToMinutes(mm.time) === timeMin)) return { text: `Torneo · ${cat.name}`, bg: "#FBE6DE", fg: "#8A2F14" };
     }
@@ -13017,8 +13029,8 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
                       <b className="mono">{formatTimeAmPm(b.timeMin)}</b> {courtName(b.courtId)}<br /><span className="text-gray-500 break-words">{b.userName || "—"}</span>
                     </div>
                   ))}
-                  {info.plays.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#FDEBD9" }}>Open Play · {e.name}</div>)}
-                  {info.classes.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#E4F5EC" }}>Clase · {e.academyName || e.name}</div>)}
+                  {info.plays.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#FDEBD9" }}>Open Play · {e.name}<br /><span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
+                  {info.classes.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#E4F5EC" }}>Clase · {e.academyName || e.name}<br /><span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
                   {[...info.tournaments.values()].map((n) => <div key={n} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#FBE6DE" }}>Torneo · {n}</div>)}
                 </div>
               </div>
