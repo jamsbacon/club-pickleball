@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.103.3";
+const APP_VERSION = "2.104.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12861,6 +12861,123 @@ function AssignMembershipModal({ user, membershipPlans, club, onConfirm, onCance
 /* =========================================================================
    TAB: RESERVAS
    ========================================================================= */
+// Calendario mensual de reservas para el admin (v2.104.0): una cuadrícula del mes con la cantidad de
+// reservas de cancha de cada día (más marcas de Open Play, clases y torneos) y, al tocar un día, el
+// detalle hora por hora. Solo lectura -- las reservas siguen creándose/cancelándose desde el resto de
+// la pestaña. Semana de lunes a domingo.
+function AdminMonthCalendar({ bookings, openPlays, classes, categories, courts }) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [month, setMonth] = useState(todayIso.slice(0, 7));
+  const [selected, setSelected] = useState(todayIso);
+  const [y, m] = month.split("-").map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+  const iso = (d) => `${month}-${String(d).padStart(2, "0")}`;
+  const shift = (delta) => {
+    const d = new Date(y, m - 1 + delta, 1);
+    const next = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    setMonth(next);
+    setSelected(next === todayIso.slice(0, 7) ? todayIso : `${next}-01`);
+  };
+  const courtName = (id) => courts.find((c) => c.id === id)?.name || "Cancha";
+
+  const byDay = useMemo(() => {
+    const map = {};
+    const day = (d) => (map[d] = map[d] || { bookings: [], plays: [], classes: [], tournaments: new Map() });
+    bookings.filter((b) => b.status !== "cancelada" && b.date?.startsWith(month)).forEach((b) => day(b.date).bookings.push(b));
+    openPlays.filter((e) => e.date?.startsWith(month)).forEach((e) => day(e.date).plays.push(e));
+    classes.filter((e) => e.date?.startsWith(month)).forEach((e) => day(e.date).classes.push(e));
+    categories.forEach((c) => (c.matches || []).forEach((mm) => {
+      if (mm.day?.startsWith(month) && !isByeMatch(mm)) day(mm.day).tournaments.set(c.id, c.name);
+    }));
+    Object.values(map).forEach((d) => d.bookings.sort((a, b) => a.timeMin - b.timeMin));
+    return map;
+  }, [bookings, openPlays, classes, categories, month]);
+
+  const total = Object.values(byDay).reduce((s, d) => s + d.bookings.length, 0);
+  const monthLabel = new Date(y, m - 1, 1).toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+  const sel = byDay[selected] || { bookings: [], plays: [], classes: [], tournaments: new Map() };
+  const selInMonth = selected.startsWith(month);
+  const cells = [...Array(lead).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+
+  return (
+    <Card>
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+        <SectionTitle sub={`${total} reserva${total === 1 ? "" : "s"} de cancha este mes. Toca un día para ver el detalle.`}>Calendario del mes</SectionTitle>
+        <div className="flex items-center gap-2">
+          <button onClick={() => shift(-1)} aria-label="Mes anterior" className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: "#EAEEF5" }}><ChevronLeft size={16} color={COLORS.courtDark} /></button>
+          <p className="text-sm font-bold capitalize w-36 text-center" style={{ color: COLORS.courtDark }}>{monthLabel}</p>
+          <button onClick={() => shift(1)} aria-label="Mes siguiente" className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: "#EAEEF5" }}><ChevronRight size={16} color={COLORS.courtDark} /></button>
+          {month !== todayIso.slice(0, 7) && (
+            <button onClick={() => { setMonth(todayIso.slice(0, 7)); setSelected(todayIso); }} className="text-xs font-bold px-2.5 py-2 rounded-xl" style={{ background: "#EAF0F8", color: COLORS.court }}>Hoy</button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 text-center text-[10px] font-bold uppercase text-gray-400 mb-1">
+        {["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"].map((d) => <div key={d}>{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((d, i) => {
+          if (!d) return <div key={`e${i}`} />;
+          const k = iso(d), info = byDay[k];
+          const n = info?.bookings.length || 0;
+          const isSel = k === selected, isToday = k === todayIso;
+          return (
+            <button key={k} onClick={() => setSelected(k)} className="rounded-xl p-1 sm:p-1.5 text-left flex flex-col min-h-[56px] sm:min-h-[84px]"
+              style={{ background: isSel ? "#FDEBD9" : "#F5F7FB", border: `1.5px solid ${isSel ? COLORS.ball : isToday ? COLORS.court : "transparent"}` }}>
+              <span className="text-xs font-bold" style={{ color: isToday ? COLORS.ball : COLORS.courtDark }}>{d}</span>
+              {n > 0 && (
+                <span className="mt-auto self-start text-[10px] sm:text-[11px] font-extrabold rounded-full px-1.5 py-0.5" style={{ background: COLORS.court, color: "#fff" }}>
+                  {n}<span className="hidden sm:inline"> reserva{n === 1 ? "" : "s"}</span>
+                </span>
+              )}
+              {info && (info.plays.length > 0 || info.classes.length > 0 || info.tournaments.size > 0) && (
+                <span className="flex gap-0.5 mt-1">
+                  {info.plays.length > 0 && <span title="Open Play" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.ball }} />}
+                  {info.classes.length > 0 && <span title="Clase" className="w-1.5 h-1.5 rounded-full" style={{ background: "#4CC38A" }} />}
+                  {info.tournaments.size > 0 && <span title="Torneo" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.clay }} />}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[11px] mt-2 flex flex-wrap gap-x-3 gap-y-1" style={{ color: "#8A93A6" }}>
+        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.ball }} />Open Play</span>
+        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: "#4CC38A" }} />Clase</span>
+        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.clay }} />Torneo</span>
+      </p>
+
+      {selInMonth && (
+        <div className="mt-4 pt-3 border-t" style={{ borderColor: COLORS.line }}>
+          <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: COLORS.court }}>{formatDateFull(selected)}</p>
+          {sel.bookings.length === 0 && sel.plays.length === 0 && sel.classes.length === 0 && sel.tournaments.size === 0 && (
+            <p className="text-sm text-gray-400">No hay nada programado este día.</p>
+          )}
+          <div className="space-y-1.5">
+            {sel.bookings.map((b) => (
+              <div key={b.id} className="flex items-center justify-between gap-2 text-sm rounded-lg px-3 py-2" style={{ background: "#F5F7FB" }}>
+                <span className="min-w-0 truncate"><b className="mono">{formatTimeAmPm(b.timeMin)}</b> · {courtName(b.courtId)} · {b.userName || "—"}</span>
+                <span className="text-[11px] shrink-0 text-gray-500">{b.freeBlock ? "Bloque gratis" : b.priceUsd != null ? formatMoney(b.priceUsd) : ""}</span>
+              </div>
+            ))}
+            {sel.plays.map((e) => (
+              <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FDEBD9" }}><b>Open Play</b> · {e.name}</div>
+            ))}
+            {sel.classes.map((e) => (
+              <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#E4F5EC" }}><b>Clase</b> · {e.academyName || e.name}</div>
+            ))}
+            {[...sel.tournaments.values()].map((n) => (
+              <div key={n} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FBE6DE" }}><b>Torneo</b> · {n}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, cancelBooking, currentUser, currentPlan, categories, openPlays, classes, role }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(todayIso);
@@ -12970,6 +13087,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
 
   return (
     <div className="mt-2 space-y-5">
+      {role === "admin" && <AdminMonthCalendar bookings={bookings} openPlays={openPlays} classes={classes} categories={categories} courts={courts} />}
       <Card>
         <SectionTitle sub="Elige una fecha y un horario, luego una cancha disponible.">Reservar cancha</SectionTitle>
 
