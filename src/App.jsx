@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.105.1";
+const APP_VERSION = "2.106.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4063,7 +4063,7 @@ export default function PickleballTournamentApp() {
   };
 
   // ---- Reservas ----
-  const createBooking = async (data) => {
+  const createBooking = async (data, opts = {}) => {
     // `free_block` (cupo mensual gratis del plan, v2.30.0) es lo que deja contar cuántos
     // bloques gratis ya usó este socio este mes (ver ReservasTab) -- el estado de pago sale
     // solo de priceUsd (0 => "confirmada" directo, nada que verificar).
@@ -4081,10 +4081,12 @@ export default function PickleballTournamentApp() {
     // torneo/Open Play/clase -- el servidor ya sabe mandarlo solo a los admins (menos a quien lo
     // disparó, ver ADMIN_ONLY_TYPES/userIds en api/send-push.js), así que no hace falta tocar ese
     // archivo para sumar este aviso.
+    // `opts.silent` / `opts.pushBody`: la reserva de TODAS las canchas crea varias filas pero manda un
+    // solo aviso (v2.106.0), no uno por cancha.
     const courtName = courts.find((c) => c.id === data.courtId)?.name || "una cancha";
-    sendPush("new_registration", {
+    if (!opts.silent) sendPush("new_registration", {
       title: "Nueva reserva",
-      body: `${data.userName || "Alguien"} reservó ${courtName} -- ${formatDateHuman(data.date)} ${formatTimeAmPm(minutesToTime(data.timeMin))}.`,
+      body: opts.pushBody || `${data.userName || "Alguien"} reservó ${courtName} -- ${formatDateHuman(data.date)} ${formatTimeAmPm(minutesToTime(data.timeMin))}.`,
       url: "/",
     });
     return booking;
@@ -13061,6 +13063,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
 }
 
 function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, cancelBooking, currentUser, currentPlan, categories, openPlays, classes, role }) {
+  const [allCourts, setAllCourts] = useState(false); // reservar todas las canchas libres del bloque (v2.106.0)
   const [adminView, setAdminView] = useState("reservar"); // solo admin: reservar | mes | semana | dia
   const showBooking = role !== "admin" || adminView === "reservar";
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -13154,6 +13157,30 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   const pickTime = (t) => {
     setSelectedTime(t);
     setCourtId(null);
+  };
+
+  // Canchas que la persona puede reservar a la vez en el bloque elegido: las libres, sin las privadas
+  // a las que su plan no da acceso. Un solo pago (suma de cada cancha, con el descuento de socio) que
+  // se reparte en partes iguales entre las reservas, para que los ingresos sigan sumando lo cobrado.
+  const bundleCourts = selectedTime === null ? [] : availableCourtsAt(selectedTime).filter((c) => !c.isPrivate || currentPlan?.privateCourtAccess || role === "admin");
+  const confirmAll = async (checkout) => {
+    const list = bundleCourts, n = list.length;
+    if (n < 1) return;
+    const split = (v) => (v == null ? null : Math.round((Number(v) / n) * 100) / 100);
+    const usd = split(checkout.priceUsd), bs = split(checkout.priceBs);
+    const when = `${formatDateHuman(date)} ${minutesToAmPm(selectedTime)}`;
+    let failed = 0;
+    for (let i = 0; i < list.length; i++) {
+      const last = i === list.length - 1;
+      const share = (total, part) => (total == null ? null : last ? Math.round((Number(total) - part * (n - 1)) * 100) / 100 : part);
+      const res = await createBooking(
+        { courtId: list[i].id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, freeBlock: false, ...checkout, priceUsd: share(checkout.priceUsd, usd), priceBs: share(checkout.priceBs, bs) },
+        i === 0 ? { pushBody: `${checkout.userName || "Alguien"} reservó todas las canchas (${n}) -- ${when}.` } : { silent: true },
+      );
+      if (!res) failed++;
+    }
+    if (failed) window.alert(`${failed} de ${n} reservas no se pudieron guardar. Revisa la lista de reservas e inténtalo de nuevo.`);
+    setSelectedTime(null); setCourtId(null); setAllCourts(false);
   };
 
   const confirm = (checkout) => {
@@ -13264,16 +13291,22 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
          primero elegir cancha, luego (mismo panel) confirmar -- "Cancelar" en el checkout
          vuelve a la lista de canchas en vez de cerrar todo, igual que ya hacía EventDetail. */}
       {selectedTime !== null && (
-        <Modal onClose={() => { setSelectedTime(null); setCourtId(null); }}>
+        <Modal onClose={() => { setSelectedTime(null); setCourtId(null); setAllCourts(false); }}>
           <Card>
             <div className="flex items-start justify-between gap-3 mb-1">
               <SectionTitle sub={court ? undefined : role === "admin" ? "Toca una cancha disponible para reservar, o revisa qué ocupa las demás." : "Toca una cancha para continuar."}>
-                {court ? `Confirmar ${court.name}` : "Canchas"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
+                {allCourts ? "Todas las canchas" : court ? `Confirmar ${court.name}` : "Canchas"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
               </SectionTitle>
-              <button onClick={() => { setSelectedTime(null); setCourtId(null); }} className="text-gray-300 hover:text-gray-600 shrink-0"><X size={18} /></button>
+              <button onClick={() => { setSelectedTime(null); setCourtId(null); setAllCourts(false); }} className="text-gray-300 hover:text-gray-600 shrink-0"><X size={18} /></button>
             </div>
 
-            {!court ? (
+            {allCourts ? (
+              <CheckoutPanel title={`${bundleCourts.length} canchas (${bundleCourts.map((c) => c.name).join(", ")}) · ${club.blockMinutes} min`}
+                baseUsd={bundleCourts.reduce((sum, c) => sum + courtPriceInfo(c, selectedTime), 0)}
+                discountPct={courtDiscountPct}
+                club={club} defaultName={currentUser.name}
+                onConfirm={confirmAll} onCancel={() => setAllCourts(false)} confirmLabel={`Confirmar ${bundleCourts.length} reservas`} />
+            ) : !court ? (
               <>
                 {/* El cliente solo ve canchas libres (nada que mirar en una ocupada). El admin
                    ve TODAS -- las ocupadas quedan como una etiqueta informativa (kind + quién/
@@ -13304,6 +13337,12 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                     );
                   })}
                 </div>
+                {bundleCourts.length >= 2 && (
+                  <button onClick={() => setAllCourts(true)} className="mt-3 w-full px-4 py-2.5 rounded-xl text-sm font-bold"
+                    style={{ background: COLORS.ball, color: "#fff" }}>
+                    Reservar todas las canchas libres ({bundleCourts.length}){bundleCourts.length < courts.length ? ` · de ${courts.length}` : ""}
+                  </button>
+                )}
                 {role !== "admin" && availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
                 {/* Bloques gratis del plan (v2.30.0) -- solo aplica fuera de horario pico y en
                    días sin torneo, tal como lo anuncia Membresías; se muestra acá (antes de
