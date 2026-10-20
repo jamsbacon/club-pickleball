@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.106.2";
+const APP_VERSION = "2.106.3";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12950,17 +12950,20 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
     }
     return e.occupiedBlocks.some((o) => o.courtId === courtId && o.date === selected && o.timeMin === timeMin);
   };
+  // Una celda puede tener varios eventos (una clase que termina a las 5:30 y otra que arranca a esa hora
+  // comparten el bloque de las 5:00). El evento se escribe completo en el bloque donde EMPIEZA y en los
+  // siguientes aparece atenuado como "continúa", para no leerlo como una clase duplicada.
   const cellFor = (courtId, timeMin) => {
-    const b = infoOf(selected).bookings.find((x) => x.courtId === courtId && x.timeMin === timeMin);
-    if (b) return { text: b.userName || "Reserva", bg: "#DCE6F5", fg: COLORS.courtDark };
-    const op = openPlays.find((e) => hitsBlock(e, courtId, timeMin));
-    if (op) return { text: `Open Play · ${op.name} ${range(op)}`, bg: "#FDEBD9", fg: "#8A3B00" };
-    const cl = classes.find((e) => hitsBlock(e, courtId, timeMin));
-    if (cl) return { text: `Clase · ${cl.academyName || cl.name} ${range(cl)}`, bg: "#E4F5EC", fg: "#17603C" };
+    const items = [];
+    const startsHere = (e) => !(e.startTime && e.endTime) || (timeToMinutes(e.startTime) >= timeMin && timeToMinutes(e.startTime) < timeMin + step);
+    infoOf(selected).bookings.filter((x) => x.courtId === courtId && x.timeMin === timeMin)
+      .forEach((b) => items.push({ text: b.userName || "Reserva", bg: "#DCE6F5", fg: COLORS.courtDark }));
+    openPlays.filter((e) => hitsBlock(e, courtId, timeMin)).forEach((e) => items.push({ text: `Open Play · ${e.name} ${range(e)}`, bg: "#FDEBD9", fg: "#8A3B00", cont: !startsHere(e) }));
+    classes.filter((e) => hitsBlock(e, courtId, timeMin)).forEach((e) => items.push({ text: `Clase · ${e.academyName || e.name} ${range(e)}`, bg: "#E4F5EC", fg: "#17603C", cont: !startsHere(e) }));
     for (const cat of categories) {
-      if ((cat.matches || []).some((mm) => mm.courtId === courtId && mm.day === selected && !isByeMatch(mm) && timeToMinutes(mm.time) === timeMin)) return { text: `Torneo · ${cat.name}`, bg: "#FBE6DE", fg: "#8A2F14" };
+      if ((cat.matches || []).some((mm) => mm.courtId === courtId && mm.day === selected && !isByeMatch(mm) && timeToMinutes(mm.time) === timeMin)) items.push({ text: `Torneo · ${cat.name}`, bg: "#FBE6DE", fg: "#8A2F14" });
     }
-    return null;
+    return items;
   };
 
   return (
@@ -13058,9 +13061,16 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
                   {courts.map((c) => {
                     const cell = cellFor(c.id, t);
                     return (
-                      <td key={c.id} className="p-0.5">
-                        {cell ? <div className="rounded-md px-1.5 py-1 font-semibold leading-tight break-words" style={{ background: cell.bg, color: cell.fg }}>{cell.text}</div>
-                          : <div className="rounded-md px-1.5 py-1 text-gray-300">Libre</div>}
+                      <td key={c.id} className="p-0.5 align-top">
+                        {cell.length > 0 ? (
+                          <div className="space-y-0.5">
+                            {cell.map((it, k) => (
+                              <div key={k} className="rounded-md px-1.5 py-1 font-semibold leading-tight break-words" style={{ background: it.bg, color: it.fg, opacity: it.cont ? 0.55 : 1 }}>
+                                {it.cont ? "↳ " : ""}{it.text}
+                              </div>
+                            ))}
+                          </div>
+                        ) : <div className="rounded-md px-1.5 py-1 text-gray-300">Libre</div>}
                       </td>
                     );
                   })}
