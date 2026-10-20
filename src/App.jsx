@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.102.0";
+const APP_VERSION = "2.103.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4972,7 +4972,7 @@ export default function PickleballTournamentApp() {
           )}
 
           {effectiveTab === "rankings" && (
-            <RankingsTab rankings={rankings} tournaments={tournaments} categories={categories} users={users} role={role} currentUser={currentUser}
+            <RankingsTab rankings={rankings} tournaments={tournaments} categories={categories} users={users} role={role} currentUser={currentUser} club={club}
               createRanking={createRanking} updateRanking={updateRanking} removeRanking={removeRanking} setRankingNameLink={setRankingNameLink} />
           )}
 
@@ -7603,8 +7603,179 @@ function NameLinksPanel({ ranking, table, users, onLink }) {
   );
 }
 
-function RankingsTab({ rankings, tournaments, categories, users, role, currentUser, createRanking, updateRanking, removeRanking, setRankingNameLink }) {
+// Imagen del ranking para compartir (v2.103.0) -- formato historia de Instagram/WhatsApp
+// (1080x1920, 9:16). Se dibuja en un <canvas> y se devuelve como Blob PNG. Los textos de los
+// bordes (arriba y abajo ~250px) quedan fuera de la zona que tapan las barras de la app.
+function loadImageEl(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+async function renderRankingStoryImage({ ranking, table, users, clubName }) {
+  const W = 1080, H = 1920;
+  try { await Promise.all([document.fonts.load("700 40px 'Space Grotesk'"), document.fonts.load("800 40px 'Inter'"), document.fonts.load("500 40px 'Inter'")]); } catch { /* sin fuentes cae a sans-serif */ }
+  const logo = await loadImageEl(clubLogo);
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  const DISP = "'Space Grotesk', 'Inter', sans-serif", BODY = "'Inter', sans-serif";
+
+  // Fondo: degradado navy + resplandores naranja
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#16325C"); bg.addColorStop(0.55, "#0F2447"); bg.addColorStop(1, "#0A1830");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const glow = (x, y, r, color) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, color); g.addColorStop(1, "rgba(255,106,26,0)");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  };
+  glow(1000, 120, 700, "rgba(255,106,26,0.28)");
+  glow(40, 1850, 650, "rgba(255,106,26,0.16)");
+
+  const fit = (text, maxW) => {
+    if (ctx.measureText(text).width <= maxW) return text;
+    let t = text;
+    while (t.length > 1 && ctx.measureText(t + "…").width > maxW) t = t.slice(0, -1);
+    return t.trimEnd() + "…";
+  };
+  const rrect = (x, y, w, h, r) => { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); };
+
+  // Cabecera
+  if (logo) { const lh = 150; ctx.drawImage(logo, 80, 200, lh * (logo.width / logo.height), lh); }
+  ctx.textBaseline = "alphabetic"; ctx.textAlign = "right";
+  ctx.fillStyle = "#FF6A1A"; ctx.font = `700 34px ${BODY}`;
+  ctx.fillText("RANKING OFICIAL", W - 80, 270);
+  ctx.fillStyle = "rgba(255,255,255,0.65)"; ctx.font = `500 30px ${BODY}`;
+  ctx.fillText(new Date().toLocaleDateString("es-VE", { day: "numeric", month: "long", year: "numeric" }), W - 80, 318);
+
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#FFFFFF";
+  let titleSize = 78;
+  do { ctx.font = `700 ${titleSize}px ${DISP}`; titleSize -= 4; } while (titleSize > 44 && ctx.measureText(ranking.name).width > W - 160);
+  ctx.fillText(fit(ranking.name, W - 160), 80, 470);
+  const sub = ranking.method === "posicion"
+    ? `Por posición final${ranking.bestN ? ` · cuentan los ${ranking.bestN} mejores torneos` : ""}`
+    : "Clasificación por partidos";
+  ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = `500 31px ${BODY}`;
+  ctx.fillText(fit(`${sub}${ranking.categoryLevel ? ` · ${ranking.categoryLevel}` : ""}`, W - 160), 80, 520);
+
+  // Filas
+  const MAX_ROWS = 10, rowH = 86, gap = 10, top = 560;
+  const rows = table.rows.slice(0, MAX_ROWS);
+  const medal = ["#FFC83D", "#C9D1DE", "#D9915A"];
+  rows.forEach((r, i) => {
+    const y = top + i * (rowH + gap);
+    const qualifies = ranking.qualifyCount && r.rank <= ranking.qualifyCount;
+    ctx.fillStyle = i === 0 ? "rgba(255,106,26,0.22)" : "rgba(255,255,255,0.07)";
+    rrect(80, y, W - 160, rowH, 26); ctx.fill();
+    if (qualifies) { ctx.fillStyle = "#4CC38A"; rrect(80, y + 18, 8, rowH - 36, 4); ctx.fill(); }
+
+    // Puesto
+    const cx = 80 + 62, cy = y + rowH / 2;
+    if (r.rank <= 3) {
+      ctx.fillStyle = medal[r.rank - 1]; ctx.beginPath(); ctx.arc(cx, cy, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#0A1830";
+    } else ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `800 ${r.rank <= 3 ? 38 : 34}px ${DISP}`;
+    ctx.fillText(String(r.rank), cx, cy + 2);
+
+    // Nombre + detalle
+    const name = users.find((u) => u.id === r.userId)?.name || r.name;
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#FFFFFF"; ctx.font = `700 36px ${BODY}`;
+    ctx.fillText(fit(name, 560), 80 + 128, cy + 2);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `500 26px ${BODY}`;
+    const detail = ranking.method === "posicion" ? `${r.events} torneo${r.events === 1 ? "" : "s"}` : `${r.pj} PJ · ${r.pg} PG`;
+    ctx.fillText(detail, 80 + 128, cy + 32);
+
+    // Puntos
+    ctx.textAlign = "right"; ctx.fillStyle = i === 0 ? "#FF8A45" : "#FFFFFF"; ctx.font = `800 48px ${DISP}`;
+    ctx.fillText(String(r.pts), W - 80 - 66, cy + 4);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `600 22px ${BODY}`;
+    ctx.fillText("PTS", W - 80 - 66, cy + 30);
+  });
+
+  let endY = top + rows.length * (rowH + gap);
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  if (table.rows.length > rows.length) {
+    ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.font = `600 30px ${BODY}`;
+    ctx.fillText(`+ ${table.rows.length - rows.length} jugadores más en la app`, W / 2, endY + 36);
+    endY += 50;
+  }
+  if (ranking.qualifyCount && rows.some((r) => r.rank <= ranking.qualifyCount)) {
+    ctx.fillStyle = "#4CC38A"; ctx.font = `600 26px ${BODY}`;
+    ctx.fillText(`Barra verde: los ${ranking.qualifyCount} que clasifican`, W / 2, endY + 36);
+  }
+
+  // Pie
+  ctx.fillStyle = "#FF6A1A"; ctx.font = `700 36px ${DISP}`;
+  ctx.fillText(clubName || "Pickle Hub", W / 2, 1680);
+  ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = `500 26px ${BODY}`;
+  ctx.fillText("club-pickleball.vercel.app", W / 2, 1724);
+
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
+}
+
+// Vista previa + Compartir (hoja nativa del celular: Instagram, WhatsApp, etc.) + Descargar.
+function RankingShareModal({ ranking, table, users, clubName, onClose }) {
+  const [blob, setBlob] = useState(null);
+  const [url, setUrl] = useState(null);
+  const [error, setError] = useState("");
+  const fileName = `ranking-${(ranking.name || "club").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.png`;
+
+  useEffect(() => {
+    let alive = true, objUrl = null;
+    renderRankingStoryImage({ ranking, table, users, clubName }).then((b) => {
+      if (!alive) return;
+      if (!b) { setError("No se pudo generar la imagen."); return; }
+      objUrl = URL.createObjectURL(b); setBlob(b); setUrl(objUrl);
+    }).catch((e) => { console.error("ranking story:", e); if (alive) setError("No se pudo generar la imagen."); });
+    return () => { alive = false; if (objUrl) URL.revokeObjectURL(objUrl); };
+  }, []);
+
+  const download = () => {
+    if (!url) return;
+    const a = document.createElement("a");
+    a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); a.remove();
+  };
+  const share = async () => {
+    if (!blob) return;
+    const file = new File([blob], fileName, { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: ranking.name }); } catch (e) { if (e?.name !== "AbortError") download(); }
+    } else download();
+  };
+  const canNativeShare = typeof navigator !== "undefined" && !!navigator.canShare;
+
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="disp text-lg" style={{ color: COLORS.courtDark }}>Compartir ranking</h3>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-700"><X size={18} /></button>
+      </div>
+      <div className="mx-auto rounded-xl overflow-hidden flex items-center justify-center" style={{ aspectRatio: "9 / 16", maxHeight: "58vh", background: "#0F2447" }}>
+        {url ? <img src={url} alt={`Ranking ${ranking.name}`} className="h-full w-full object-contain" />
+          : <p className="text-xs text-white/70">{error || "Generando imagen…"}</p>}
+      </div>
+      <p className="text-[11px] text-center mt-2" style={{ color: "#8A93A6" }}>Formato historia 1080×1920, lista para Instagram y WhatsApp.</p>
+      <div className="grid grid-cols-2 gap-2 mt-3">
+        <button onClick={share} disabled={!blob} className="py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5"
+          style={{ background: COLORS.ball, color: "#fff", opacity: blob ? 1 : 0.5 }}><Share2 size={15} /> {canNativeShare ? "Compartir" : "Guardar imagen"}</button>
+        <button onClick={download} disabled={!blob} className="py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5"
+          style={{ background: "#EAF0F8", color: COLORS.court, opacity: blob ? 1 : 0.5 }}><Download size={15} /> Descargar</button>
+      </div>
+    </Modal>
+  );
+}
+
+function RankingsTab({ rankings, tournaments, categories, users, role, currentUser, club, createRanking, updateRanking, removeRanking, setRankingNameLink }) {
   const isAdmin = role === "admin";
+  const [shareOpen, setShareOpen] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -7666,12 +7837,15 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                 {active.qualifyCount ? ` · clasifican ${active.qualifyCount}` : ""}
               </p>
             </div>
-            {isAdmin && (
-              <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center gap-3 shrink-0">
+              {table.rows.length > 0 && (
+                <button onClick={() => setShareOpen(true)} title="Compartir ranking como imagen" aria-label="Compartir ranking" className="hover:opacity-80" style={{ color: COLORS.ball }}><Share2 size={17} /></button>
+              )}
+            {isAdmin && (<>
                 <button onClick={() => setEditing(true)} title="Editar reglas" className="text-gray-300 hover:text-gray-600"><Pencil size={15} /></button>
                 <button onClick={() => setDeleteTarget(active)} title="Borrar ranking" className="text-gray-300 hover:text-red-500"><Trash2 size={15} /></button>
-              </div>
-            )}
+            </>)}
+            </div>
           </div>
           {isAdmin && (
             <p className="text-[11px] mb-3" style={{ color: "#9AA6BC" }}>
@@ -7778,6 +7952,10 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
 
       {isAdmin && active && !editing && table && (table.rows.length > 0 || Object.keys(active.nameLinks || {}).length > 0) && (
         <NameLinksPanel ranking={active} table={table} users={users} onLink={(variant, target) => setRankingNameLink(active.id, variant, target)} />
+      )}
+
+      {shareOpen && active && table && (
+        <RankingShareModal ranking={active} table={table} users={users} clubName={club?.name} onClose={() => setShareOpen(false)} />
       )}
 
       {deleteTarget && (
