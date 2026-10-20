@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.106.0";
+const APP_VERSION = "2.106.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12886,17 +12886,17 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
 
   const byDay = useMemo(() => {
     const map = {};
-    const day = (d) => (map[d] = map[d] || { bookings: [], plays: [], classes: [], tournaments: new Map() });
+    const day = (d) => (map[d] = map[d] || { bookings: [], plays: [], classes: [], tournaments: new Map(), tourIds: new Set() });
     bookings.filter((b) => b.status !== "cancelada" && b.date).forEach((b) => day(b.date).bookings.push(b));
     openPlays.filter((e) => e.date).forEach((e) => day(e.date).plays.push(e));
     classes.filter((e) => e.date).forEach((e) => day(e.date).classes.push(e));
     categories.forEach((c) => (c.matches || []).forEach((mm) => {
-      if (mm.day && !isByeMatch(mm)) day(mm.day).tournaments.set(c.id, c.name);
+      if (mm.day && !isByeMatch(mm)) { day(mm.day).tournaments.set(c.id, c.name); day(mm.day).tourIds.add(c.tournamentId || c.id); }
     }));
     Object.values(map).forEach((d) => d.bookings.sort((a, b) => a.timeMin - b.timeMin));
     return map;
   }, [bookings, openPlays, classes, categories]);
-  const empty = { bookings: [], plays: [], classes: [], tournaments: new Map() };
+  const empty = { bookings: [], plays: [], classes: [], tournaments: new Map(), tourIds: new Set() };
   const infoOf = (iso) => byDay[iso] || empty;
   const countIn = (isos) => isos.reduce((s, k) => s + infoOf(k).bookings.length, 0);
 
@@ -12912,7 +12912,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
   const Dots = ({ info }) => (info.plays.length > 0 || info.classes.length > 0 || info.tournaments.size > 0) ? (
     <span className="flex gap-0.5">
       {info.plays.length > 0 && <span title="Open Play" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.ball }} />}
-      {info.classes.length > 0 && <span title="Clase" className="w-1.5 h-1.5 rounded-full" style={{ background: "#4CC38A" }} />}
+      {info.classes.length > 0 && <span title="Clase" className="w-1.5 h-1.5 rounded-full" style={{ background: "#2E9E6B" }} />}
       {info.tournaments.size > 0 && <span title="Torneo" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.clay }} />}
     </span>
   ) : null;
@@ -12972,15 +12972,21 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
             if (!k) return <div key={`e${i}`} />;
             const info = infoOf(k), n = info.bookings.length, isSel = k === selected, isToday = k === todayIso;
             return (
-              <button key={k} onClick={() => setSelected(k)} className="rounded-xl p-1 sm:p-1.5 text-left flex flex-col min-h-[56px] sm:min-h-[84px]"
+              <button key={k} onClick={() => setSelected(k)} className="rounded-xl p-1 sm:p-1.5 text-left flex flex-col min-h-[56px] sm:min-h-[100px]"
                 style={{ background: isSel ? "#FDEBD9" : "#F5F7FB", border: `1.5px solid ${isSel ? COLORS.ball : isToday ? COLORS.court : "transparent"}` }}>
                 <span className="text-xs font-bold" style={{ color: isToday ? COLORS.ball : COLORS.courtDark }}>{Number(k.slice(8))}</span>
-                {n > 0 && (
-                  <span className="mt-auto self-start text-[10px] sm:text-[11px] font-extrabold rounded-full px-1.5 py-0.5" style={{ background: COLORS.court, color: "#fff" }}>
-                    {n}<span className="hidden sm:inline"> reserva{n === 1 ? "" : "s"}</span>
-                  </span>
-                )}
-                <div className="mt-1"><Dots info={info} /></div>
+                <div className="mt-auto flex flex-col items-start gap-0.5">
+                  {[
+                    [n, "reserva", "reservas", COLORS.court],
+                    [info.classes.length, "clase", "clases", "#2E9E6B"],
+                    [info.plays.length, "open play", "open plays", COLORS.ball],
+                    [info.tourIds.size, "torneo", "torneos", COLORS.clay],
+                  ].filter(([c]) => c > 0).map(([c, one, many, bg]) => (
+                    <span key={one} className="text-[10px] sm:text-[11px] font-extrabold rounded-full px-1.5 py-0.5 whitespace-nowrap" style={{ background: bg, color: "#fff" }}>
+                      {c}<span className="hidden sm:inline"> {c === 1 ? one : many}</span>
+                    </span>
+                  ))}
+                </div>
               </button>
             );
           })}
@@ -13055,7 +13061,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
 
       <p className="text-[11px] mt-3 flex flex-wrap gap-x-3 gap-y-1" style={{ color: "#8A93A6" }}>
         <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.ball }} />Open Play</span>
-        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: "#4CC38A" }} />Clase</span>
+        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: "#2E9E6B" }} />Clase</span>
         <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.clay }} />Torneo</span>
       </p>
     </Card>
