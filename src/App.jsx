@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.108.0";
+const APP_VERSION = "2.109.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -13407,7 +13407,8 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
 }
 
 function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, cancelBooking, currentUser, currentPlan, categories, openPlays, classes, role }) {
-  const [allCourts, setAllCourts] = useState(false); // reservar todas las canchas libres del bloque (v2.106.0)
+  const [allCourts, setAllCourts] = useState(false); // checkout de VARIAS canchas a la vez (v2.106.0; desde v2.109.0 son las que se marcan con casilla)
+  const [picked, setPicked] = useState([]); // ids de canchas marcadas para reservar juntas (v2.109.0)
   const [adminView, setAdminView] = useState("reservar"); // solo admin: reservar | mes | semana | dia
   const showBooking = role !== "admin" || adminView === "reservar";
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -13506,7 +13507,11 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
   // Canchas que la persona puede reservar a la vez en el bloque elegido: las libres, sin las privadas
   // a las que su plan no da acceso. Un solo pago (suma de cada cancha, con el descuento de socio) que
   // se reparte en partes iguales entre las reservas, para que los ingresos sigan sumando lo cobrado.
-  const bundleCourts = selectedTime === null ? [] : availableCourtsAt(selectedTime).filter((c) => !c.isPrivate || currentPlan?.privateCourtAccess || role === "admin");
+  const eligibleCourts = selectedTime === null ? [] : availableCourtsAt(selectedTime).filter((c) => !c.isPrivate || currentPlan?.privateCourtAccess || role === "admin");
+  const bundleCourts = eligibleCourts.filter((c) => picked.includes(c.id));
+  // Al cambiar de horario o de día se limpia la selección (las canchas libres son otras).
+  useEffect(() => { setPicked([]); setAllCourts(false); }, [selectedTime, date]);
+  const togglePicked = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const confirmAll = async (checkout) => {
     const list = bundleCourts, n = list.length;
     if (n < 1) return;
@@ -13519,12 +13524,12 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
       const share = (total, part) => (total == null ? null : last ? Math.round((Number(total) - part * (n - 1)) * 100) / 100 : part);
       const res = await createBooking(
         { courtId: list[i].id, date, timeMin: selectedTime, blockMinutes: club.blockMinutes, userId: currentUser.id, freeBlock: false, ...checkout, priceUsd: share(checkout.priceUsd, usd), priceBs: share(checkout.priceBs, bs) },
-        i === 0 ? { pushBody: `${checkout.userName || "Alguien"} reservó todas las canchas (${n}) -- ${when}.` } : { silent: true },
+        i === 0 ? { pushBody: `${checkout.userName || "Alguien"} reservó ${n} canchas -- ${when}.` } : { silent: true },
       );
       if (!res) failed++;
     }
     if (failed) window.alert(`${failed} de ${n} reservas no se pudieron guardar. Revisa la lista de reservas e inténtalo de nuevo.`);
-    setSelectedTime(null); setCourtId(null); setAllCourts(false);
+    setSelectedTime(null); setCourtId(null); setAllCourts(false); setPicked([]);
   };
 
   const confirm = (checkout) => {
@@ -13639,7 +13644,7 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
           <Card>
             <div className="flex items-start justify-between gap-3 mb-1">
               <SectionTitle sub={court ? undefined : role === "admin" ? "Toca una cancha disponible para reservar, o revisa qué ocupa las demás." : "Toca una cancha para continuar."}>
-                {allCourts ? "Todas las canchas" : court ? `Confirmar ${court.name}` : "Canchas"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
+                {allCourts ? `${bundleCourts.length} canchas` : court ? `Confirmar ${court.name}` : "Canchas"} · {minutesToAmPm(selectedTime)} ({formatDateHuman(date)})
               </SectionTitle>
               <button onClick={() => { setSelectedTime(null); setCourtId(null); setAllCourts(false); }} className="text-gray-300 hover:text-gray-600 shrink-0"><X size={18} /></button>
             </div>
@@ -13671,21 +13676,40 @@ function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, canc
                     const base = courtPriceInfo(c, selectedTime);
                     const useFreeBlock = canUseFreeBlock(selectedTime);
                     const shownPrice = useFreeBlock ? 0 : (isMember ? base * (1 - courtDiscountPct / 100) : base);
+                    // Cancha privada sin acceso: no se puede marcar -- al tocarla se explica por qué (flujo de siempre).
+                    const blockedPrivate = c.isPrivate && !currentPlan?.privateCourtAccess && role !== "admin";
+                    const on = picked.includes(c.id);
                     return (
-                      <button key={c.id} onClick={() => setCourtId(c.id)}
-                        className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-1.5"
-                        style={{ background: "#EAEEF5", color: COLORS.ink }}>
+                      <button key={c.id} onClick={() => (blockedPrivate ? setCourtId(c.id) : togglePicked(c.id))}
+                        className="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2"
+                        style={{ background: on ? COLORS.court : "#EAEEF5", color: on ? "#fff" : COLORS.ink }}>
+                        {!blockedPrivate && (
+                          <span className="w-4 h-4 rounded flex items-center justify-center shrink-0" style={{ background: on ? "#fff" : "transparent", border: `1.5px solid ${on ? "#fff" : "#9AA6BC"}` }}>
+                            {on && <Check size={11} color={COLORS.court} strokeWidth={3.5} />}
+                          </span>
+                        )}
                         {c.isPrivate && <Lock size={12} />} {c.name}
                         <span className="text-[10px] font-semibold opacity-80">{shownPrice > 0 ? formatMoney(shownPrice) : "Gratis"}</span>
                       </button>
                     );
                   })}
                 </div>
-                {bundleCourts.length >= 2 && (
-                  <button onClick={() => setAllCourts(true)} className="mt-3 w-full px-4 py-2.5 rounded-xl text-sm font-bold"
-                    style={{ background: COLORS.ball, color: "#fff" }}>
-                    Reservar todas las canchas libres ({bundleCourts.length}){bundleCourts.length < courts.length ? ` · de ${courts.length}` : ""}
-                  </button>
+                {/* Elegir cuántas canchas reservar (v2.109.0): marca las que quieras (1, 2, 3 o todas) y continúa. */}
+                {eligibleCourts.length >= 1 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button disabled={bundleCourts.length === 0}
+                      onClick={() => { if (bundleCourts.length === 1) setCourtId(bundleCourts[0].id); else setAllCourts(true); }}
+                      className="px-4 py-2.5 rounded-xl text-sm font-bold flex-1 min-w-[200px]"
+                      style={{ background: bundleCourts.length === 0 ? "#D5D9E3" : COLORS.ball, color: "#fff", opacity: bundleCourts.length === 0 ? 0.8 : 1 }}>
+                      {bundleCourts.length === 0 ? "Marca las canchas que quieres reservar" : `Reservar ${bundleCourts.length} cancha${bundleCourts.length === 1 ? "" : "s"}`}
+                    </button>
+                    {eligibleCourts.length >= 2 && (
+                      <button onClick={() => setPicked(bundleCourts.length === eligibleCourts.length ? [] : eligibleCourts.map((c) => c.id))}
+                        className="px-3 py-2.5 rounded-xl text-xs font-bold" style={{ background: "#EAEEF5", color: COLORS.courtDark }}>
+                        {bundleCourts.length === eligibleCourts.length ? "Quitar todas" : `Marcar todas (${eligibleCourts.length})`}
+                      </button>
+                    )}
+                  </div>
                 )}
                 {role !== "admin" && availableCourtsAt(selectedTime).length === 0 && <p className="text-xs text-gray-400 italic">No hay canchas disponibles para este horario.</p>}
                 {/* Bloques gratis del plan (v2.30.0) -- solo aplica fuera de horario pico y en
