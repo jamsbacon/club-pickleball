@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.107.0";
+const APP_VERSION = "2.108.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1786,6 +1786,139 @@ function recommendFormat(cat, categories, courts, dates, tournament, matchDurati
   if (!pick) pick = candidates[candidates.length - 1];
 
   return { format: pick.format, matches: pick.matches, capacity, othersDemand, remaining, budget, n };
+}
+
+/* =========================================================================
+   DUPLICAR TORNEO (v2.108.0) -- copia un torneo a uno NUEVO (borrador) eligiendo qué llevar: Generalidades,
+   categorías y, por categoría, duplas, sorteo (grupos/cuadro) y calendario. Nunca copia resultados, pagos ni
+   números de partido: la copia arranca limpia. Todo lo que apunta a otra cosa por id (equipos, grupos,
+   partidos, categoría) se re-mapea a ids NUEVOS, y el cuadro de eliminación se devuelve a su estado de
+   "sin jugar" (cupos sin equipo, etiquetas originales) para que se llene con los resultados del torneo nuevo.
+   ========================================================================= */
+function shiftIsoDate(iso, days) {
+  if (!iso) return iso;
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+function daysBetweenIso(a, b) {
+  const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+// Fecha base del torneo original: su inicio, o si no tiene, el primer día con partidos.
+function tournamentBaseDate(src, srcCats) {
+  if (src.startDate) return src.startDate;
+  const days = srcCats.flatMap((c) => (c.matches || []).map((m) => m.day).filter(Boolean)).sort();
+  return days[0] || "";
+}
+
+// Dupla copiada: mismos jugadores (nombre/ranking/cuenta/rol), id nuevo y SIN ningún dato de pago --
+// copiar priceUsd/paymentStatus inflaría los ingresos de Estadísticas con cobros que no ocurrieron en el
+// torneo nuevo. Cada dupla queda "por pagar" (igual que una inscrita a mano).
+function cleanTeamForCopy(t, newId) {
+  return {
+    id: newId, name: t.name, createdAt: Date.now(),
+    players: (t.players || []).map((p) => {
+      const { priceUsd, priceBs, paymentMethod, reference, proofName, paymentStatus, joinedAt, replacedFrom, ...rest } = p; // eslint-disable-line no-unused-vars
+      return rest;
+    }),
+    ...(t.userId ? { userId: t.userId } : {}),
+    paymentStatus: "pendiente_efectivo",
+  };
+}
+
+// Copia los partidos de una categoría en estado "sin jugar". Ver el comentario del bloque de arriba.
+function cloneMatchesClean(cat, newCatId, teamMap, groupMap, offsetDays, withSchedule) {
+  const matchMap = {};
+  cat.matches.forEach((m) => { matchMap[m.id] = uid("m"); });
+  // Casillas que se llenan solas desde otro partido (ganador o perdedor): el cupo se vacía.
+  const fed = new Set();
+  cat.matches.forEach((m) => {
+    if (m.nextMatchId) fed.add(`${m.nextMatchId}|${m.nextSlot}`);
+    if (m.loserNextMatchId) fed.add(`${m.loserNextMatchId}|${m.loserNextSlot}`);
+  });
+  const out = cat.matches.map((m) => {
+    const nm = { ...m, id: matchMap[m.id], categoryId: newCatId };
+    ["matchNumber", "checkedIn", "skipped", "skippedAt", "callCourtId", "calledAt", "locked"].forEach((k) => { delete nm[k]; });
+    nm.sets = []; nm.winnerId = null;
+    if (m.nextMatchId) nm.nextMatchId = matchMap[m.nextMatchId] || null;
+    if (m.loserNextMatchId) nm.loserNextMatchId = matchMap[m.loserNextMatchId] || null;
+    if (m.groupId) nm.groupId = groupMap[m.groupId] || null;
+    ["A", "B"].forEach((side) => {
+      const src = m[`team${side}Src`];
+      if (src) nm[`team${side}Src`] = src.type === "winner" ? { ...src, matchId: matchMap[src.matchId] || null } : { ...src, groupId: groupMap[src.groupId] || null };
+      if (src || fed.has(`${m.id}|${side}`)) {
+        nm[`team${side}Id`] = null;
+        nm[`team${side}Label`] = src && src.type !== "winner" ? `${src.rank}° ${src.groupName}` : "Por definir";
+      } else {
+        const tid = m[`team${side}Id`];
+        nm[`team${side}Id`] = tid ? (teamMap[tid] || null) : null;
+      }
+    });
+    if (withSchedule && m.day && m.time && m.courtId) {
+      // Fijado (`locked`): así "Actualizar calendario" no reacomoda lo copiado, y los horarios ya
+      // cuentan como ocupados para reservas/otros eventos.
+      nm.day = shiftIsoDate(m.day, offsetDays); nm.locked = true;
+    } else {
+      nm.day = null; nm.time = null; nm.courtId = null;
+    }
+    return nm;
+  });
+  propagateWinner(out, null); // vuelve a resolver los pases directos (BYE) del cuadro
+  return out;
+}
+
+// Fila de `categories` para la copia. opts = { teams, draw, schedule } (ya validadas: draw => teams,
+// schedule => draw). El id se genera acá porque los partidos guardan su categoryId.
+function buildCategoryCopy(cat, newTournamentId, opts, offsetDays) {
+  const id = crypto.randomUUID();
+  const row = {
+    id, tournament_id: newTournamentId, name: cat.name, format: cat.format || null,
+    modality: cat.modality, gender: cat.gender, level: cat.level,
+    max_teams: cat.maxTeams ?? null, min_teams: cat.minTeams ?? null, seed_mode: cat.seedMode || "ranking",
+    best_of: cat.bestOf ?? 1, bracket_size: cat.bracketSize ?? 4,
+    points_target: cat.pointsTarget ?? 11, scoring_type: cat.scoringType || "estandar", round_formats: cat.roundFormats || {},
+    pro_min_dupr: cat.proMinDupr ?? null,
+    teams: [], waitlist: [], groups: [], matches: [], draw_generated: false, groups_closed: false,
+  };
+  if (!opts.teams) return row;
+  const teamMap = {};
+  const copyTeam = (t) => { const nid = uid("team"); teamMap[t.id] = nid; return cleanTeamForCopy(t, nid); };
+  row.teams = (cat.teams || []).map(copyTeam);
+  row.waitlist = (cat.waitlist || []).map(copyTeam);
+  if (!opts.draw || !cat.drawGenerated) return row;
+  const groupMap = {};
+  row.groups = (cat.groups || []).map((g) => {
+    const gid = uid("grp"); groupMap[g.id] = gid;
+    const { standings, advanced, ...rest } = g; // eslint-disable-line no-unused-vars
+    return { ...rest, id: gid, teamIds: (g.teamIds || []).map((tid) => (tid ? teamMap[tid] || null : null)) };
+  });
+  row.matches = cloneMatchesClean(cat, id, teamMap, groupMap, offsetDays, !!opts.schedule);
+  row.draw_generated = true;
+  row.groups_closed = cat.format === "grupos_eliminatoria" ? false : !!cat.groupsClosed;
+  return row;
+}
+
+// Fila de `tournaments` para la copia (siempre borrador). `g` = qué partes de Generalidades se copian.
+function buildTournamentCopyRow(src, opts, offsetDays) {
+  const g = opts.general;
+  const num = (v) => (v === "" || v == null ? null : v);
+  const shift = (iso) => (iso ? (offsetDays ? shiftIsoDate(iso, offsetDays) : iso) : null);
+  return {
+    name: (opts.name || "").trim() || `${src.name} (copia)`, status: "draft",
+    start_date: opts.newStart || null, end_date: opts.newStart && src.endDate ? shiftIsoDate(src.endDate, offsetDays) : null,
+    daily_start: g.schedule ? src.dailyStart : "08:00", daily_end: g.schedule ? src.dailyEnd : "20:00",
+    match_duration_min: g.schedule ? src.matchDuration : null, break_min: g.schedule ? src.breakM : null,
+    play_days: g.schedule ? src.playDays || [] : [],
+    court_ids: g.courts ? src.courtIds || [] : [],
+    image: g.image ? src.image || null : null,
+    presale_price_1: g.prices ? num(src.presalePrice1) : null, presale_price_2: g.prices ? num(src.presalePrice2) : null, presale_price_3: g.prices ? num(src.presalePrice3) : null,
+    regular_price_1: g.prices ? num(src.regularPrice1) : null, regular_price_2: g.prices ? num(src.regularPrice2) : null, regular_price_3: g.prices ? num(src.regularPrice3) : null,
+    presale_start: g.regDates ? shift(src.presaleStart) : null, presale_end: g.regDates ? shift(src.presaleEnd) : null,
+    reg_start: g.regDates ? shift(src.regStart) : null, reg_end: g.regDates ? shift(src.regEnd) : null,
+    ranking_id: g.ranking ? src.rankingId || null : null, ranking_multiplier: g.ranking ? src.rankingMultiplier ?? 1 : 1,
+    entry_ranking_id: g.entry ? src.entryRankingId || null : null,
+    entry_rank_from: g.entry ? num(src.entryRankFrom) : null, entry_rank_to: g.entry ? num(src.entryRankTo) : null,
+  };
 }
 
 /* =========================================================================
@@ -2774,6 +2907,38 @@ export default function PickleballTournamentApp() {
     if (error) { console.error("createTournament:", error.message); return { error: error.message }; }
     const created = mapTournamentRow(data);
     setTournaments((prev) => [created, ...prev]);
+    setActiveTournamentId(created.id);
+    setActiveCatId(null);
+    return { data: created };
+  };
+
+  // Duplicar un torneo (v2.108.0) -- ver buildTournamentCopyRow/buildCategoryCopy. Crea el torneo como
+  // borrador y sus categorías UNA POR UNA (para conservar el orden); si algo falla a mitad de camino se
+  // borra el torneo recién creado (ON DELETE CASCADE se lleva lo ya copiado) para no dejar copias a medias.
+  const duplicateTournament = async (sourceId, opts) => {
+    if (currentUser?.role !== "admin") return { error: "Solo un admin puede duplicar torneos." };
+    const src = tournaments.find((t) => t.id === sourceId);
+    if (!src) return { error: "El torneo original ya no existe." };
+    const srcCats = categories.filter((c) => c.tournamentId === sourceId);
+    const base = tournamentBaseDate(src, srcCats);
+    const offset = opts.newStart && base ? daysBetweenIso(base, opts.newStart) : 0;
+    const { data: tdata, error: tErr } = await supabase.from("tournaments").insert(buildTournamentCopyRow(src, opts, offset)).select().single();
+    if (tErr) { console.error("duplicateTournament:", tErr.message); return { error: tErr.message }; }
+    const created = mapTournamentRow(tdata);
+    const newCats = [];
+    for (const c of srcCats) {
+      const o = opts.cats[c.id];
+      if (!o || !o.include) continue;
+      const { data: cdata, error: cErr } = await supabase.from("categories").insert(buildCategoryCopy(c, created.id, o, offset)).select().single();
+      if (cErr) {
+        console.error("duplicateTournament categoría:", cErr.message);
+        await supabase.from("tournaments").delete().eq("id", created.id);
+        return { error: `No se pudo copiar la categoría "${c.name}": ${cErr.message}. No se creó el torneo.` };
+      }
+      newCats.push(mapCategoryRow(cdata));
+    }
+    setTournaments((prev) => [created, ...prev]);
+    setCategories((prev) => [...prev, ...newCats]);
     setActiveTournamentId(created.id);
     setActiveCatId(null);
     return { data: created };
@@ -4977,7 +5142,7 @@ export default function PickleballTournamentApp() {
             ) : (
               <TournamentsListTab tournaments={tournaments} categories={categories} role={role} currentUser={currentUser}
                 onSelect={(id) => { setActiveTournamentId(id); setActiveCatId(null); }}
-                onCreate={createTournament} onRemove={removeTournament}
+                onCreate={createTournament} onRemove={removeTournament} onDuplicate={duplicateTournament} occupiedKeys={occupiedKeys}
                 showForm={tournamentFormOpen} setShowForm={setTournamentFormOpen} />
             )
           )}
@@ -8129,8 +8294,9 @@ const TORNEO_SUB_ITEMS = [
 // `showForm`/`setShowForm` viven en el componente principal (no acá) para que el botón
 // "+ Torneo" de Actividades (EventosTab) pueda abrir este formulario desde afuera al navegar
 // -- mismo motivo por el que activeCatId vive arriba de CategoriasTab.
-function TournamentsListTab({ tournaments, categories, role, currentUser, onSelect, onCreate, onRemove, showForm, setShowForm }) {
+function TournamentsListTab({ tournaments, categories, role, currentUser, onSelect, onCreate, onRemove, onDuplicate, occupiedKeys, showForm, setShowForm }) {
   const isAdmin = role === "admin";
+  const [dupSource, setDupSource] = useState(null); // torneo que se está duplicando (v2.108.0)
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -8190,6 +8356,11 @@ function TournamentsListTab({ tournaments, categories, role, currentUser, onSele
         </Card>
       )}
 
+      {dupSource && (
+        <DuplicateTournamentModal source={dupSource} srcCats={categories.filter((c) => c.tournamentId === dupSource.id)} occupiedKeys={occupiedKeys}
+          onConfirm={(opts) => onDuplicate(dupSource.id, opts)} onClose={() => setDupSource(null)} />
+      )}
+
       {visibleTournaments.length > 0 && (
         <div className="grid sm:grid-cols-2 gap-4">
           {visibleTournaments.map((t) => (
@@ -8214,8 +8385,11 @@ function TournamentsListTab({ tournaments, categories, role, currentUser, onSele
                       )}
                     </h3>
                     {isAdmin && (
-                      <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
-                        className="text-gray-300 hover:text-red-500 shrink-0"><Trash2 size={16} /></button>
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        <button onClick={() => setDupSource(t)} title="Duplicar torneo (eliges qué copiar)" className="text-gray-300 hover:text-blue-600"><Copy size={16} /></button>
+                        <button onClick={() => onRemove(t.id)} title="Borrar torneo (incluye sus categorías, equipos y calendario)"
+                          className="text-gray-300 hover:text-red-500"><Trash2 size={16} /></button>
+                      </div>
                     )}
                   </div>
                   <p className="text-xs text-gray-400 mb-3">
@@ -8235,6 +8409,155 @@ function TournamentsListTab({ tournaments, categories, role, currentUser, onSele
         </div>
       )}
     </div>
+  );
+}
+
+// Ventana "Duplicar torneo" (v2.108.0) con checklist: Generalidades por partes y, por categoría, duplas →
+// sorteo → calendario (cada paso necesita el anterior: no hay sorteo sin duplas ni calendario sin sorteo).
+function DuplicateTournamentModal({ source, srcCats, occupiedKeys, onConfirm, onClose }) {
+  const base = tournamentBaseDate(source, srcCats);
+  const [name, setName] = useState(`${source.name} (copia)`);
+  const [newStart, setNewStart] = useState(base ? shiftIsoDate(base, 7) : "");
+  const [general, setGeneral] = useState({ image: true, schedule: true, courts: true, prices: true, regDates: true, ranking: true, entry: false });
+  const avail = (c) => ({
+    teams: (c.teams || []).length + (c.waitlist || []).length > 0,
+    draw: !!c.drawGenerated && (c.matches || []).length > 0,
+    schedule: (c.matches || []).some((m) => m.day && m.time && m.courtId),
+  });
+  const [cats, setCats] = useState(() => Object.fromEntries(srcCats.map((c) => {
+    const a = avail(c);
+    return [c.id, { include: true, teams: a.teams, draw: a.draw && a.teams, schedule: a.schedule && a.draw && a.teams }];
+  })));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const setCat = (id, patch) => setCats((prev) => {
+    const cur = { ...prev[id], ...patch };
+    if (!cur.teams) { cur.draw = false; cur.schedule = false; }
+    if (!cur.draw) cur.schedule = false;
+    return { ...prev, [id]: cur };
+  });
+  const toggleCat = (id, key, on) => {
+    if (!on) return setCat(id, { [key]: false });
+    setCat(id, key === "teams" ? { teams: true } : key === "draw" ? { teams: true, draw: true } : { teams: true, draw: true, schedule: true });
+  };
+  // Interruptor maestro por columna: aplica a todas las categorías incluidas que lo permitan.
+  const toggleAll = (key, on) => srcCats.forEach((c) => {
+    const a = avail(c);
+    if (!cats[c.id].include || !a[key]) return;
+    if (on && (key === "draw" && !a.teams || key === "schedule" && !(a.draw && a.teams))) return;
+    toggleCat(c.id, key, on);
+  });
+  const allOn = (key) => { const list = srcCats.filter((c) => cats[c.id].include && avail(c)[key]); return list.length > 0 && list.every((c) => cats[c.id][key]); };
+
+  const copiesSchedule = srcCats.some((c) => cats[c.id].include && cats[c.id].schedule);
+  const offset = newStart && base ? daysBetweenIso(base, newStart) : 0;
+  const clashes = useMemo(() => {
+    if (!copiesSchedule) return 0;
+    let n = 0;
+    srcCats.forEach((c) => { if (cats[c.id].include && cats[c.id].schedule) c.matches.forEach((m) => {
+      if (isByeMatch(m) || !m.day || !m.time || !m.courtId) return;
+      if (occupiedKeys.has(blockKey(m.courtId, shiftIsoDate(m.day, offset), timeToMinutes(m.time)))) n++;
+    }); });
+    return n;
+  }, [cats, offset, copiesSchedule, srcCats, occupiedKeys]);
+  const matchCount = srcCats.reduce((s, c) => s + (cats[c.id].include && cats[c.id].schedule ? c.matches.filter((m) => !isByeMatch(m) && m.day).length : 0), 0);
+
+  const Check2 = ({ checked, onChange, disabled, children, sub }) => (
+    <label className={`flex items-start gap-2 text-sm py-0.5 ${disabled ? "opacity-40" : "cursor-pointer"}`}>
+      <input type="checkbox" className="mt-0.5" checked={!!checked && !disabled} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span>{children}{sub && <span className="block text-[11px] text-gray-400">{sub}</span>}</span>
+    </label>
+  );
+  const needsDate = copiesSchedule && !newStart;
+  const submit = async () => {
+    if (saving || needsDate) return;
+    setSaving(true); setError("");
+    const r = await onConfirm({ name, newStart, general, cats });
+    setSaving(false);
+    if (r?.error) { setError(r.error); return; }
+    onClose();
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={640}>
+      <div className="p-5 max-h-[85vh] overflow-y-auto">
+        <p className="disp text-xl mb-0.5" style={{ color: COLORS.courtDark }}>Duplicar torneo</p>
+        <p className="text-xs mb-4" style={{ color: "#6B7688" }}>Crea un torneo nuevo (en borrador) a partir de <strong>{source.name}</strong>. No se copian resultados, pagos ni números de partido: la copia arranca limpia.</p>
+
+        <div className="grid sm:grid-cols-2 gap-3 mb-4">
+          <div><Label>Nombre del torneo nuevo</Label><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></div>
+          <div><Label>Fecha de inicio del torneo nuevo</Label><input type="date" style={inputStyle} value={newStart} onChange={(e) => setNewStart(e.target.value)} /></div>
+        </div>
+        {newStart && base && (
+          <p className="text-[11px] mb-4" style={{ color: offset === 0 && copiesSchedule ? "#B23A1B" : "#6B7688" }}>
+            {offset === 0 ? "Mismas fechas que el original" : `Todas las fechas se mueven ${offset > 0 ? "+" : ""}${offset} día${Math.abs(offset) === 1 ? "" : "s"} (del ${formatDateHuman(base)} al ${formatDateHuman(newStart)}); las horas y canchas se quedan igual.`}
+            {offset === 0 && copiesSchedule ? " -- los partidos chocarían con los del torneo original." : ""}
+          </p>
+        )}
+
+        <div className="rounded-xl p-3 mb-3" style={{ background: "#F5F7FB" }}>
+          <p className="text-xs font-extrabold uppercase tracking-wide mb-1" style={{ color: COLORS.court }}>Generalidades</p>
+          <Check2 checked={general.image} onChange={(v) => setGeneral({ ...general, image: v })} disabled={!source.image} sub={!source.image ? "El torneo original no tiene imagen" : undefined}>Imagen (flyer)</Check2>
+          <Check2 checked={general.schedule} onChange={(v) => setGeneral({ ...general, schedule: v })} sub="Horario diario, duración de partidos, descansos y días de juego">Horario y duración de partidos</Check2>
+          <Check2 checked={general.courts} onChange={(v) => setGeneral({ ...general, courts: v })} sub="Qué canchas usa el torneo">Canchas del torneo</Check2>
+          <Check2 checked={general.prices} onChange={(v) => setGeneral({ ...general, prices: v })}>Precios de inscripción (preventa y regular)</Check2>
+          <Check2 checked={general.regDates} onChange={(v) => setGeneral({ ...general, regDates: v })} sub="Se mueven los mismos días que el torneo">Fechas de preventa e inscripción</Check2>
+          <Check2 checked={general.ranking} onChange={(v) => setGeneral({ ...general, ranking: v })} disabled={!source.rankingId} sub={!source.rankingId ? "El torneo original no suma a ningún ranking" : "A qué ranking suma y su peso"}>Ranking al que suma</Check2>
+          <Check2 checked={general.entry} onChange={(v) => setGeneral({ ...general, entry: v })} disabled={!source.entryRankingId} sub={!source.entryRankingId ? "El torneo original no restringe la inscripción" : "Quién puede inscribirse por ranking"}>Restricción de inscripción por ranking</Check2>
+        </div>
+
+        <div className="rounded-xl p-3 mb-3" style={{ background: "#F5F7FB" }}>
+          <p className="text-xs font-extrabold uppercase tracking-wide mb-1" style={{ color: COLORS.court }}>Categorías</p>
+          {srcCats.length === 0 ? <p className="text-xs text-gray-400 italic">Este torneo no tiene categorías.</p> : (
+            <>
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 pb-2 mb-2 border-b" style={{ borderColor: COLORS.line }}>
+                <span className="text-[11px] font-semibold text-gray-500">Marcar en todas:</span>
+                {[["teams", "Duplas"], ["draw", "Sorteo"], ["schedule", "Calendario"]].map(([k, l]) => (
+                  <label key={k} className="text-[12px] flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={allOn(k)} onChange={(e) => toggleAll(k, e.target.checked)} /> {l}</label>
+                ))}
+              </div>
+              <div className="space-y-2">
+                {srcCats.map((c) => {
+                  const a = avail(c), o = cats[c.id];
+                  return (
+                    <div key={c.id} className="rounded-lg p-2" style={{ background: "#fff", border: `1px solid ${COLORS.line}`, opacity: o.include ? 1 : 0.55 }}>
+                      <label className="flex items-center gap-2 text-sm font-bold cursor-pointer">
+                        <input type="checkbox" checked={o.include} onChange={(e) => setCat(c.id, { include: e.target.checked })} />
+                        {c.name}
+                        <span className="text-[10px] font-semibold text-gray-400">{(c.teams || []).length} equipo(s) · {(c.matches || []).filter((m) => !isByeMatch(m)).length} partido(s)</span>
+                      </label>
+                      {o.include && (
+                        <div className="pl-6 mt-1 grid sm:grid-cols-3 gap-x-3">
+                          <Check2 checked={o.teams} disabled={!a.teams} onChange={(v) => toggleCat(c.id, "teams", v)} sub={a.teams ? "Sin pagos: quedan por pagar" : "No tiene duplas"}>Duplas inscritas</Check2>
+                          <Check2 checked={o.draw} disabled={!a.draw || !a.teams} onChange={(v) => toggleCat(c.id, "draw", v)} sub={a.draw ? "Grupos y cuadro, sin resultados" : "Sin sorteo generado"}>Sorteo</Check2>
+                          <Check2 checked={o.schedule} disabled={!a.schedule || !a.draw || !a.teams} onChange={(v) => toggleCat(c.id, "schedule", v)} sub={a.schedule ? "Mismos horarios y canchas" : "Sin calendario"}>Calendario</Check2>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] mt-2 text-gray-400">Cupos, formato de puntuación y formato de la categoría siempre se copian. El sorteo necesita las duplas y el calendario necesita el sorteo.</p>
+            </>
+          )}
+        </div>
+
+        {copiesSchedule && (
+          <p className="text-xs px-3 py-2 rounded-lg mb-3" style={{ background: clashes > 0 ? "#FBEAE3" : "#EAF3E6", color: clashes > 0 ? "#B23A1B" : COLORS.courtDark }}>
+            {matchCount} partido(s) quedan agendados y fijados a sus horarios. {clashes > 0 ? `${clashes} chocan con reservas u otros eventos en esas canchas y horas -- los verás en el calendario para resolverlos.` : "Ninguno choca con reservas u otros eventos."}
+          </p>
+        )}
+        {needsDate && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>Para copiar el calendario elige la fecha de inicio del torneo nuevo.</p>}
+        {error && <p className="text-xs font-semibold mb-3" style={{ color: "#B23A1B" }}>{error}</p>}
+
+        <div className="flex items-center gap-2">
+          <button onClick={submit} disabled={saving || needsDate} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold" style={{ background: COLORS.court, color: COLORS.chalk, opacity: saving || needsDate ? 0.55 : 1 }}>
+            {saving ? "Duplicando…" : "Duplicar torneo"}
+          </button>
+          <button onClick={onClose} className="px-4 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
