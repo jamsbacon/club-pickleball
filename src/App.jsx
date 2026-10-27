@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.110.0";
+const APP_VERSION = "2.111.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -2095,9 +2095,18 @@ function computeRankingTable(ranking, tournaments, categories) {
       });
     });
   });
-  rows.sort((a, b) => b.pts - a.pts || b.pg - a.pg || (b.setsF - b.setsC) - (a.setsF - a.setsC) || (b.ptsF - b.ptsC) - (a.ptsF - a.ptsC) || a.name.localeCompare(b.name));
-  // Empate en puntos = mismo puesto (1, 1, 3...); el orden de las filas sigue usando los desempates.
-  rows.forEach((r, i) => { r.rank = i > 0 && r.pts === rows[i - 1].pts ? rows[i - 1].rank : i + 1; });
+  // v2.111.0, a pedido del club -- criterio de desempate: 1) puntos (por partidos ganados y por
+  // participación) y 2) diferencial entre puntos totales anotados y recibidos. Solo si siguen EXACTAMENTE
+  // iguales en ambos se comparte el puesto (1, 1, 3...); para que el orden y el corte de clasificados
+  // sean siempre deterministas, ahí desempatan además partidos ganados, diferencial de sets y nombre.
+  const ptsDiff = (r) => r.ptsF - r.ptsC;
+  rows.sort((a, b) => b.pts - a.pts || ptsDiff(b) - ptsDiff(a) || b.pg - a.pg || (b.setsF - b.setsC) - (a.setsF - a.setsC) || a.name.localeCompare(b.name));
+  // `rank` = puesto que se muestra (puede compartirse en un empate exacto); `pos` = posición única 1..N, la
+  // que decide quién clasifica -- así con cupo 16 clasifican EXACTAMENTE 16, nunca 17 por un empate.
+  rows.forEach((r, i) => {
+    r.pos = i + 1;
+    r.rank = i > 0 && r.pts === rows[i - 1].pts && ptsDiff(r) === ptsDiff(rows[i - 1]) ? rows[i - 1].rank : i + 1;
+  });
   return { rows, tournaments: linked, pending: new Set() };
 }
 
@@ -2181,7 +2190,8 @@ function entryRankStatus(tournament, ranking, table, person) {
   const to = Number(tournament.entryRankTo) > 0 ? Number(tournament.entryRankTo) : Infinity;
   const nameKey = normalizePersonName(person?.name);
   const row = table.rows.find((r) => (person?.userId && r.userId === person.userId) || (nameKey && normalizePersonName(r.name) === nameKey));
-  return { allowed: !!row && row.rank >= from && row.rank <= to, rank: row ? row.rank : null, from, to, rankingName: ranking.name };
+  // Por posición única (`pos`), no por puesto compartido: "puestos 1 al 16" son exactamente 16 personas.
+  return { allowed: !!row && row.pos >= from && row.pos <= to, rank: row ? row.pos : null, from, to, rankingName: ranking.name };
 }
 function entryRankMessage(st, name = null) {
   const range = st.to === Infinity ? `del puesto ${st.from} en adelante` : `los puestos ${st.from} al ${st.to}`;
@@ -2238,8 +2248,11 @@ function computePositionTable(ranking, tournaments, categories) {
     r.events = entries.length;
   });
   rows.sort((a, b) => b.pts - a.pts || b.titles - a.titles || b.finals - a.finals || a.name.localeCompare(b.name));
-  // Empate en puntos = mismo puesto (1, 1, 3...); el orden de las filas sigue usando los desempates.
-  rows.forEach((r, i) => { r.rank = i > 0 && r.pts === rows[i - 1].pts ? rows[i - 1].rank : i + 1; });
+  // Mismo puesto solo si empatan en puntos, títulos y finales; `pos` (1..N, único) decide el corte de clasificados.
+  rows.forEach((r, i) => {
+    r.pos = i + 1;
+    r.rank = i > 0 && r.pts === rows[i - 1].pts && r.titles === rows[i - 1].titles && r.finals === rows[i - 1].finals ? rows[i - 1].rank : i + 1;
+  });
   return { rows, tournaments: linked, pending };
 }
 
@@ -7840,16 +7853,16 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
   ctx.fillText(fit(`${sub}${ranking.categoryLevel ? ` · ${ranking.categoryLevel}` : ""}`, W - 160), 80, 520);
 
   // Filas
-  // Con cupo de clasificados se muestran TODOS los que clasifican (empates en el corte incluidos);
+  // Con cupo de clasificados se muestran EXACTAMENTE los que clasifican (el desempate ya los ordena);
   // sin cupo, el top 10. Las filas se achican para que quepan en la historia.
-  const shown = ranking.qualifyCount ? table.rows.filter((r) => r.rank <= ranking.qualifyCount).length : 10;
+  const shown = ranking.qualifyCount ? Math.min(ranking.qualifyCount, table.rows.length) : 10;
   const rows = table.rows.slice(0, Math.max(1, Math.min(shown, 24)));
   const top = 560, pitch = Math.min(96, 1050 / rows.length);
   const gap = Math.round(pitch * 0.12), rowH = Math.round(pitch - gap), sc = rowH / 86;
   const medal = ["#FFC83D", "#C9D1DE", "#D9915A"];
   rows.forEach((r, i) => {
     const y = top + i * (rowH + gap);
-    const qualifies = ranking.qualifyCount && r.rank <= ranking.qualifyCount;
+    const qualifies = ranking.qualifyCount && r.pos <= ranking.qualifyCount;
     ctx.fillStyle = i === 0 ? "rgba(255,106,26,0.22)" : "rgba(255,255,255,0.07)";
     rrect(80, y, W - 160, rowH, 26 * sc); ctx.fill();
     if (qualifies) { ctx.fillStyle = "#4CC38A"; rrect(80, y + rowH * 0.2, 8, rowH * 0.6, 4); ctx.fill(); }
@@ -7887,7 +7900,7 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
     ctx.fillText(`+ ${table.rows.length - rows.length} jugadores más en la app`, W / 2, endY + 36);
     endY += 44;
   }
-  if (ranking.qualifyCount && rows.some((r) => r.rank <= ranking.qualifyCount)) {
+  if (ranking.qualifyCount && rows.some((r) => r.pos <= ranking.qualifyCount)) {
     ctx.fillStyle = "#4CC38A"; ctx.font = `600 26px ${BODY}`;
     ctx.fillText(`Barra verde: los ${rows.length} clasificados`, W / 2, endY + 36);
   }
@@ -8055,9 +8068,9 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                 </thead>
                 <tbody>
                   {table.rows.map((r) => {
-                    const qualifies = active.qualifyCount && r.rank <= active.qualifyCount;
+                    const qualifies = active.qualifyCount && r.pos <= active.qualifyCount;
                     const isMe = !!currentUser && !!r.userId && r.userId === currentUser.id;
-                    const cutLine = active.qualifyCount && r.rank === active.qualifyCount;
+                    const cutLine = active.qualifyCount && r.pos === active.qualifyCount;
                     return (
                       <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
                         <td className="py-2 pr-3 font-bold">{r.rank}</td>
@@ -8104,9 +8117,9 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                 </thead>
                 <tbody>
                   {table.rows.map((r) => {
-                    const qualifies = active.qualifyCount && r.rank <= active.qualifyCount;
+                    const qualifies = active.qualifyCount && r.pos <= active.qualifyCount;
                     const isMe = !!currentUser && !!r.userId && r.userId === currentUser.id;
-                    const cutLine = active.qualifyCount && r.rank === active.qualifyCount;
+                    const cutLine = active.qualifyCount && r.pos === active.qualifyCount;
                     return (
                       <tr key={r.userId || r.name} className="border-t" style={{ borderColor: cutLine ? COLORS.court : COLORS.line, borderBottomWidth: cutLine ? 2 : 0, background: isMe ? "#FDEBD9" : qualifies ? "#EAF3E6" : "transparent" }}>
                         <td className="py-2 pr-3 font-bold">{r.rank}</td>
@@ -8124,7 +8137,12 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                   })}
                 </tbody>
               </table>
-              {active.qualifyCount && <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>Resaltados en verde: los {active.qualifyCount} que clasifican. PJ = partidos jugados, PG = ganados, PP = perdidos.</p>}
+              {active.qualifyCount && <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>Resaltados en verde: los {active.qualifyCount} que clasifican. PJ = partidos jugados, PG = ganados, PP = perdidos. Desempate: 1) puntos, 2) diferencial de puntos anotados menos recibidos.</p>}
+              {active.qualifyCount && table.rows[active.qualifyCount - 1] && table.rows[active.qualifyCount] && table.rows[active.qualifyCount - 1].rank === table.rows[active.qualifyCount].rank && (
+                <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>
+                  Ojo: hay un empate exacto en el corte (mismos puntos y mismo diferencial entre el {active.qualifyCount}° y el {active.qualifyCount + 1}°). Se ordenó por partidos ganados, diferencial de sets y nombre -- confírmalo antes de dar por cerrada la lista.
+                </p>
+              )}
             </div>
           )}
         </Card>
