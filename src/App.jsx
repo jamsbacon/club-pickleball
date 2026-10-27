@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.111.0";
+const APP_VERSION = "2.112.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -7883,7 +7883,7 @@ async function renderRankingStoryImage({ ranking, table, users, clubName }) {
     ctx.fillStyle = "#FFFFFF"; ctx.font = `700 ${Math.round(36 * sc)}px ${BODY}`;
     ctx.fillText(fit(name, 560), 80 + 128, cy + 2 * sc);
     ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = `500 ${Math.round(26 * sc)}px ${BODY}`;
-    const detail = ranking.method === "posicion" ? `${r.events} torneo${r.events === 1 ? "" : "s"}` : `${r.pj} PJ · ${r.pg} PG`;
+    const detail = ranking.method === "posicion" ? `${r.events} torneo${r.events === 1 ? "" : "s"}` : `${r.pj} PJ · ${r.pg} PG · Dif ${r.ptsF - r.ptsC > 0 ? "+" : ""}${r.ptsF - r.ptsC}`;
     ctx.fillText(detail, 80 + 128, cy + 32 * sc);
 
     // Puntos
@@ -8110,6 +8110,9 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                     <th className="py-1.5 pr-3 text-center">PG</th>
                     <th className="py-1.5 pr-3 text-center">PP</th>
                     <th className="py-1.5 pr-3 text-center">Sets</th>
+                    <th className="py-1.5 pr-3 text-center" title="Puntos a favor (anotados)">PF</th>
+                    <th className="py-1.5 pr-3 text-center" title="Puntos en contra (recibidos)">PC</th>
+                    <th className="py-1.5 pr-3 text-center" title="Diferencial: puntos anotados menos recibidos (primer desempate)">Dif</th>
                     {table.tournaments.map((t) => (
                       <th key={t.id} className="py-1.5 pr-3 text-center whitespace-nowrap" title={t.name}>{t.startDate ? formatDateHuman(t.startDate) : t.name}</th>
                     ))}
@@ -8129,6 +8132,9 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                         <td className="py-2 pr-3 text-center">{r.pg}</td>
                         <td className="py-2 pr-3 text-center">{r.pp}</td>
                         <td className="py-2 pr-3 text-center mono">{r.setsF}-{r.setsC}</td>
+                        <td className="py-2 pr-3 text-center mono">{r.ptsF}</td>
+                        <td className="py-2 pr-3 text-center mono">{r.ptsC}</td>
+                        <td className="py-2 pr-3 text-center mono font-bold" style={{ color: r.ptsF - r.ptsC > 0 ? COLORS.courtDark : r.ptsF - r.ptsC < 0 ? "#B23A1B" : "#6B7688" }}>{r.ptsF - r.ptsC > 0 ? "+" : ""}{r.ptsF - r.ptsC}</td>
                         {table.tournaments.map((t) => (
                           <td key={t.id} className="py-2 pr-3 text-center mono text-gray-500">{r.byTournament[t.id] ?? "—"}</td>
                         ))}
@@ -8137,7 +8143,7 @@ function RankingsTab({ rankings, tournaments, categories, users, role, currentUs
                   })}
                 </tbody>
               </table>
-              {active.qualifyCount && <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>Resaltados en verde: los {active.qualifyCount} que clasifican. PJ = partidos jugados, PG = ganados, PP = perdidos. Desempate: 1) puntos, 2) diferencial de puntos anotados menos recibidos.</p>}
+              {active.qualifyCount && <p className="text-[11px] mt-2" style={{ color: "#9AA6BC" }}>Resaltados en verde: los {active.qualifyCount} que clasifican. PJ = partidos jugados, PG = ganados, PP = perdidos. Desempate: 1) puntos, 2) diferencial (Dif = PF puntos a favor - PC puntos en contra).</p>}
               {active.qualifyCount && table.rows[active.qualifyCount - 1] && table.rows[active.qualifyCount] && table.rows[active.qualifyCount - 1].rank === table.rows[active.qualifyCount].rank && (
                 <p className="text-[11px] mt-1 font-semibold" style={{ color: "#B23A1B" }}>
                   Ojo: hay un empate exacto en el corte (mismos puntos y mismo diferencial entre el {active.qualifyCount}° y el {active.qualifyCount + 1}°). Se ordenó por partidos ganados, diferencial de sets y nombre -- confírmalo antes de dar por cerrada la lista.
