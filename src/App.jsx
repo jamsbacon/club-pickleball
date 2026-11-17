@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.112.0";
+const APP_VERSION = "2.113.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -13231,19 +13231,28 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
     else setSelected(addDays(selected, view === "semana" ? delta * 7 : delta));
   };
 
+  // Clases de la Academia (app PickleUp), solo lectura, vía /api/academy-calendar (v2.113.0).
+  const [academy, setAcademy] = useState([]);
+  useEffect(() => {
+    let off = false;
+    fetch("/api/academy-calendar").then((r) => (r.ok ? r.json() : { classes: [] })).then((d) => { if (!off) setAcademy(Array.isArray(d.classes) ? d.classes : []); }).catch(() => {});
+    return () => { off = true; };
+  }, []);
+
   const byDay = useMemo(() => {
     const map = {};
-    const day = (d) => (map[d] = map[d] || { bookings: [], plays: [], classes: [], tournaments: new Map(), tourIds: new Set() });
+    const day = (d) => (map[d] = map[d] || { bookings: [], plays: [], classes: [], academy: [], tournaments: new Map(), tourIds: new Set() });
     bookings.filter((b) => b.status !== "cancelada" && b.date).forEach((b) => day(b.date).bookings.push(b));
     openPlays.filter((e) => e.date).forEach((e) => day(e.date).plays.push(e));
     classes.filter((e) => e.date).forEach((e) => day(e.date).classes.push(e));
+    academy.filter((e) => e.date).forEach((e) => day(e.date).academy.push(e));
     categories.forEach((c) => (c.matches || []).forEach((mm) => {
       if (mm.day && !isByeMatch(mm)) { day(mm.day).tournaments.set(c.id, c.name); day(mm.day).tourIds.add(c.tournamentId || c.id); }
     }));
     Object.values(map).forEach((d) => d.bookings.sort((a, b) => a.timeMin - b.timeMin));
     return map;
-  }, [bookings, openPlays, classes, categories]);
-  const empty = { bookings: [], plays: [], classes: [], tournaments: new Map(), tourIds: new Set() };
+  }, [bookings, openPlays, classes, academy, categories]);
+  const empty = { bookings: [], plays: [], classes: [], academy: [], tournaments: new Map(), tourIds: new Set() };
   const infoOf = (iso) => byDay[iso] || empty;
   const countIn = (isos) => isos.reduce((s, k) => s + infoOf(k).bookings.length, 0);
 
@@ -13256,17 +13265,18 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
   const total = view === "mes" ? countIn(monthDays) : view === "semana" ? countIn(weekDays) : infoOf(selected).bookings.length;
   const scope = view === "mes" ? "este mes" : view === "semana" ? "esta semana" : "este día";
 
-  const Dots = ({ info }) => (info.plays.length > 0 || info.classes.length > 0 || info.tournaments.size > 0) ? (
+  const Dots = ({ info }) => (info.plays.length > 0 || info.classes.length > 0 || info.academy.length > 0 || info.tournaments.size > 0) ? (
     <span className="flex gap-0.5">
       {info.plays.length > 0 && <span title="Open Play" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.ball }} />}
       {info.classes.length > 0 && <span title="Clase" className="w-1.5 h-1.5 rounded-full" style={{ background: "#2E9E6B" }} />}
+      {info.academy.length > 0 && <span title="Academia" className="w-1.5 h-1.5 rounded-full" style={{ background: ACADEMY_COLOR }} />}
       {info.tournaments.size > 0 && <span title="Torneo" className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.clay }} />}
     </span>
   ) : null;
 
   const DayDetail = ({ iso }) => {
     const sel = infoOf(iso);
-    const none = sel.bookings.length === 0 && sel.plays.length === 0 && sel.classes.length === 0 && sel.tournaments.size === 0;
+    const none = sel.bookings.length === 0 && sel.plays.length === 0 && sel.classes.length === 0 && sel.academy.length === 0 && sel.tournaments.size === 0;
     return (
       <div className="space-y-1.5">
         {none && <p className="text-sm text-gray-400">No hay nada programado este día.</p>}
@@ -13278,6 +13288,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
         ))}
         {sel.plays.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FDEBD9" }}><b>Open Play</b> · {e.name} <span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
         {sel.classes.map((e) => <div key={e.id} className="text-sm rounded-lg px-3 py-2" style={{ background: "#E4F5EC" }}><b>Clase</b> · {e.academyName || e.name} <span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
+        {sel.academy.map((e) => <AcademyChip key={e.id} e={e} />)}
         {[...sel.tournaments.values()].map((n) => <div key={n} className="text-sm rounded-lg px-3 py-2" style={{ background: "#FBE6DE" }}><b>Torneo</b> · {n}</div>)}
       </div>
     );
@@ -13344,6 +13355,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
                   {[
                     [n, "reserva", "reservas", COLORS.court],
                     [info.classes.length, "clase", "clases", "#2E9E6B"],
+                    [info.academy.length, "academia", "academia", ACADEMY_COLOR],
                     [info.plays.length, "open play", "open plays", COLORS.ball],
                     [info.tourIds.size, "torneo", "torneos", COLORS.clay],
                   ].filter(([c]) => c > 0).map(([c, one, many, bg]) => (
@@ -13384,6 +13396,7 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
                   ))}
                   {info.plays.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#FDEBD9" }}>Open Play · {e.name}<br /><span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
                   {info.classes.map((e) => <div key={e.id} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#E4F5EC" }}>Clase · {e.academyName || e.name}<br /><span className="text-gray-500">{e.startTime && e.endTime ? `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}` : ""}</span></div>)}
+                  {info.academy.map((e) => <AcademyChip key={e.id} e={e} small />)}
                   {[...info.tournaments.values()].map((n) => <div key={n} className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#FBE6DE" }}>Torneo · {n}</div>)}
                 </div>
               </div>
@@ -13396,6 +13409,12 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
         <div className="max-w-xs mb-3">
           <input type="date" style={{ ...inputStyle, textAlign: "center", fontWeight: 700 }} value={selected} onChange={(e) => e.target.value && setSelected(e.target.value)} />
         </div>
+        {infoOf(selected).academy.length > 0 && (
+          <div className="mb-3 space-y-1.5">
+            <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: ACADEMY_COLOR }}>Academia (otras sedes)</p>
+            {infoOf(selected).academy.map((e) => <AcademyChip key={e.id} e={e} />)}
+          </div>
+        )}
         <div className="overflow-x-auto">
           <div className="flex" style={{ minWidth: 70 + courts.length * 130 }}>
             <div className="shrink-0" style={{ width: 70 }}>
@@ -13424,10 +13443,20 @@ function AdminBookingsCalendar({ view, setView, bookings, openPlays, classes, ca
       <p className="text-[11px] mt-3 flex flex-wrap gap-x-3 gap-y-1" style={{ color: "#8A93A6" }}>
         <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.ball }} />Open Play</span>
         <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: "#2E9E6B" }} />Clase</span>
+        <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: ACADEMY_COLOR }} />Academia</span>
         <span><span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: COLORS.clay }} />Torneo</span>
       </p>
     </Card>
   );
+}
+
+const ACADEMY_COLOR = "#7B5EA7";
+// Clase de la Academia (PickleUp): solo lectura, no ocupa canchas de PickleHub (es en otra sede).
+function AcademyChip({ e, small }) {
+  const t = `${formatTimeAmPm(e.startTime)} – ${formatTimeAmPm(e.endTime)}`;
+  return small
+    ? <div className="text-[11px] rounded-md px-1.5 py-1" style={{ background: "#EEE8F6" }}>Academia · {e.title}<br /><span className="text-gray-500">{t}{e.venue ? ` · ${e.venue}` : ""}</span></div>
+    : <div className="text-sm rounded-lg px-3 py-2" style={{ background: "#EEE8F6" }}><b>Academia</b> · {e.title} <span className="text-gray-500">{t}{e.venue ? ` · ${e.venue}` : ""}</span></div>;
 }
 
 function ReservasTab({ club, courts, occupiedKeys, bookings, createBooking, cancelBooking, currentUser, currentPlan, categories, openPlays, classes, role }) {
