@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.113.0";
+const APP_VERSION = "2.114.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12160,26 +12160,43 @@ function computeNextCalls(categories, courts, day) {
     namesOf(m).forEach((p) => busy.add(p));
   };
   courts.forEach((court) => { const h = queueByCourt[court.id][0]; if (h && h.checkedIn) take(court, h); });
-  courts.forEach((court) => {
-    if (currentByCourt[court.id]) return;
-    const pick = queueByCourt[court.id].find((m) => !claimed.has(m.id) && !clashes(m, busy));
-    if (pick) take(court, pick);
+  // v2.114.0 -- dos pasadas: primero los partidos LLAMADOS a mano (intención explícita del admin), después
+  // los automáticos. Antes todo se resolvía por orden de cancha, y un llamado a la cancha 3 perdía contra
+  // el partido automático de la cancha 1 aunque el admin lo hubiera pedido a propósito (y el actual de
+  // las demás canchas "saltaba" de un partido a otro sin que nadie lo tocara).
+  [true, false].forEach((onlyCalled) => {
+    courts.forEach((court) => {
+      if (currentByCourt[court.id]) return;
+      const pick = queueByCourt[court.id].find((m) => !claimed.has(m.id) && (!onlyCalled || isCalledMatch(m, validCourtIds)) && !clashes(m, busy));
+      if (pick) take(court, pick);
+    });
   });
 
   const courtOrder = {}; courts.forEach((c, i) => (courtOrder[c.id] = i));
   const pool = chronoSort(todays.filter((m) => !m.winnerId && !isCalledMatch(m, validCourtIds) && !claimed.has(m.id)), courtOrder);
   const nextClaimed = new Set();
+  // Jugadores ya anunciados como "Sigue" en alguna cancha: no se repiten en el "Sigue" de otra.
+  const nextBusy = new Set();
+  const nextByCourt = {};
+  [true, false].forEach((onlyCalled) => {
+    courts.forEach((court) => {
+      if (nextByCourt[court.id]) return;
+      const cur = currentByCourt[court.id] || null;
+      // Los jugadores del partido actual de ESTA cancha no cuentan como "ocupados" para elegir su
+      // siguiente -- son justo los que quedan libres apenas se cargue este resultado.
+      const busyHere = new Set(busy);
+      if (cur) namesOf(cur).forEach((p) => busyHere.delete(p));
+      const own = queueByCourt[court.id].filter((m) => m !== cur);
+      const candidates = onlyCalled ? own.filter((m) => isCalledMatch(m, validCourtIds)) : [...own, ...pool];
+      const next = candidates.find((m) => !claimed.has(m.id) && !nextClaimed.has(m.id) && !clashes(m, busyHere) && !clashes(m, nextBusy)) || null;
+      if (next) { nextClaimed.add(next.id); namesOf(next).forEach((p) => nextBusy.add(p)); nextByCourt[court.id] = next; }
+    });
+  });
 
   return courts.map((court) => {
     const cur = currentByCourt[court.id] || null;
     const current = cur && isCalledMatch(cur, validCourtIds) ? { ...cur, courtId: court.id } : cur;
-    // Los jugadores del partido actual de ESTA cancha no cuentan como "ocupados" para elegir su
-    // siguiente -- son justo los que quedan libres apenas se cargue este resultado.
-    const busyHere = new Set(busy);
-    if (cur) namesOf(cur).forEach((p) => busyHere.delete(p));
-    const candidates = [...queueByCourt[court.id].filter((m) => m !== cur), ...pool];
-    const next = candidates.find((m) => !claimed.has(m.id) && !nextClaimed.has(m.id) && !clashes(m, busyHere)) || null;
-    if (next) nextClaimed.add(next.id);
+    const next = nextByCourt[court.id] || null;
     const called = !!(next && isCalledMatch(next, validCourtIds));
     // Cancha sin actual aunque tenga cola: su primer partido choca con alguien que sigue jugando en
     // otra cancha -- se avisa quién y dónde, en vez de llamarlo igual.
@@ -12290,6 +12307,9 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   // igual que ya se puede en Calendario.
   const [selectedDay, setSelectedDay] = useState("");
   const day = dates.includes(selectedDay) ? selectedDay : (dates[0] || "");
+  // v2.114.0: "Buscar encuentro" -- cancha para la que está abierto el buscador (o null) + texto de filtro.
+  const [searchCourtId, setSearchCourtId] = useState(null);
+  const [searchText, setSearchText] = useState("");
   // v2.68.0: planillas descargables -- ver PrintScoreSheets. `printing` solo controla que el
   // bloque imprimible exista en el DOM (se monta al pulsar el botón, se desmonta solo al
   // cerrar el diálogo de impresión vía el evento "afterprint").
@@ -12439,6 +12459,31 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     if (side === "A") return m.teamALabel || cat.teams.find((t) => t.id === m.teamAId)?.name || "Por definir";
     return m.teamBLabel || cat.teams.find((t) => t.id === m.teamBId)?.name || "Por definir";
   };
+  // v2.114.0 -- "Buscar encuentro": el admin elige a mano qué partido lanza en una cancha. La lista trae
+  // TODOS los pendientes del día; los que tienen algún jugador jugando AHORA en otra cancha salen
+  // bloqueados (no se pueden llamar). Los jugadores del partido actual de la propia cancha no cuentan:
+  // se liberan al cargar su resultado.
+  const searchCourt = searchCourtId ? courts.find((c) => c.id === searchCourtId) : null;
+  const searchEntry = searchCourt ? nextCalls.find((nc) => nc.court.id === searchCourt.id) : null;
+  const searchRows = (() => {
+    if (!searchCourt) return [];
+    const q = searchText.trim().toLowerCase();
+    const all = chronoSort(categories.flatMap((c) => c.matches
+      .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId && !m.winnerId && !m.checkedIn)
+      .map((m) => ({ ...m, __cat: c }))), courtOrder);
+    return all
+      .filter((m) => !q || `${teamLabelOf(m, "A")} ${teamLabelOf(m, "B")} ${m.__cat.name} ${matchIndex.get(m.id) ?? ""}`.toLowerCase().includes(q))
+      .map((m) => ({ m, who: playingConflicts(m, searchCourt.id) }))
+      .sort((a, b) => (a.who.length > 0) - (b.who.length > 0));
+  })();
+  const pickMatchForCourt = (m) => {
+    const court = searchCourt;
+    // Pasa delante de los demás llamados a esta misma cancha (calledAt menor = primero).
+    const times = categories.flatMap((c) => c.matches.filter((x) => x.callCourtId === court.id && !x.winnerId && x.calledAt).map((x) => x.calledAt));
+    const calledAt = Math.min(Date.now(), ...times) - 1;
+    updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: court.id, calledAt });
+    setSearchCourtId(null); setSearchText("");
+  };
   const nextCallsPanel = isAdmin && day && (
     <Card>
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -12514,7 +12559,13 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         )}
         {nextCalls.map(({ court, current, next, borrowed, called, blocked }) => (
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
-            <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: COLORS.courtDark }}>{court.name}</p>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: COLORS.courtDark }}>{court.name}</p>
+              <button onClick={() => { setSearchText(""); setSearchCourtId(court.id); }}
+                style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}` }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1">
+                <Search size={12} /> Buscar encuentro
+              </button>
+            </div>
             {current && !current.checkedIn ? (
               // v2.79.1: recién promovido, todavía sin confirmar que los jugadores entraron a
               // la cancha -- se resalta distinto (ámbar, no el crema normal de MatchRow) y el
@@ -12593,6 +12644,45 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
         ))}
         {nextCalls.length === 0 && <p className="text-xs text-gray-400 italic">Este torneo no tiene canchas asignadas.</p>}
       </div>
+      {searchCourt && (
+        <Modal onClose={() => { setSearchCourtId(null); setSearchText(""); }} maxWidth={620}>
+          <div className="p-5">
+            <p className="disp text-xl mb-0.5" style={{ color: COLORS.courtDark }}>Buscar encuentro · {searchCourt.name}</p>
+            <p className="text-xs mb-3" style={{ color: "#6B7688" }}>
+              {searchEntry?.current?.checkedIn
+                ? "Esta cancha tiene un partido en juego: el que elijas queda como el que sigue."
+                : "El que elijas pasa a ser el partido de esta cancha ahora."}
+              {" "}Los partidos con jugadores que ya están en otra cancha aparecen bloqueados.
+            </p>
+            <input autoFocus value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Buscar por jugador, categoría o #"
+              className="w-full px-3 py-2 rounded-lg text-sm mb-3" style={{ border: `1.5px solid ${COLORS.line}` }} />
+            <div className="space-y-2 max-h-[55vh] overflow-y-auto">
+              {searchRows.length === 0 && <p className="text-xs text-gray-400 italic">No hay partidos pendientes que coincidan.</p>}
+              {searchRows.map(({ m, who }) => {
+                const blockedRow = who.length > 0;
+                return (
+                  <div key={m.id} className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap" style={{ background: blockedRow ? "#F1F2F5" : "#fff", border: `1px solid ${COLORS.line}`, opacity: blockedRow ? 0.75 : 1 }}>
+                    <div className="text-sm min-w-0">
+                      <div className="flex items-center flex-wrap gap-x-2 gap-y-1">
+                        {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
+                        <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(m.__cat)}</span>
+                        {m.skipped && <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase" style={{ background: "#FBF3E4", color: "#8A5A16" }}>En espera</span>}
+                        {m.time && <span className="mono text-[11px] text-gray-500">{formatTimeAmPm(m.time)} · {courtById[m.courtId]?.name}</span>}
+                      </div>
+                      <div>{teamLabelOf(m, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(m, "B")}</div>
+                      {blockedRow && <p className="text-[11px] font-semibold" style={{ color: "#B23A1B" }}>No disponible: {who.join(", ")} ya está jugando</p>}
+                    </div>
+                    <button disabled={blockedRow} onClick={() => pickMatchForCourt(m)}
+                      style={{ background: blockedRow ? "#C9CEDA" : COLORS.court, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+                      Llamar aquí
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Modal>
+      )}
     </Card>
   );
 
