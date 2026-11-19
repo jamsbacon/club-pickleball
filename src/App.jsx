@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.118.1";
+const APP_VERSION = "2.119.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12154,7 +12154,7 @@ function playerLabelsOf(m) {
   const b = cat.teams.find((t) => t.id === m.teamBId);
   return [...(a ? a.players : []), ...(b ? b.players : [])].map((p) => ({ key: p.name.trim().toLowerCase(), name: p.name.trim() }));
 }
-function computeNextCalls(categories, courts, day) {
+function computeNextCalls(categories, courts, day, heldCourtIds = new Set()) {
   const validCourtIds = new Set(courts.map((c) => c.id));
   const todays = categories.flatMap((c) => c.matches
     .filter((m) => !isByeMatch(m) && m.day === day && m.teamAId && m.teamBId)
@@ -12167,7 +12167,9 @@ function computeNextCalls(categories, courts, day) {
   // cancha, por orden de llamado] + [el resto de los suyos, por hora].
   const queueByCourt = {};
   courts.forEach((court) => {
-    const own = todays.filter((m) => m.courtId === court.id && !isCalledMatch(m, validCourtIds) && !m.winnerId)
+    // v2.119.0 "Liberar cancha": una cancha retenida no toma sus partidos automáticos (queda vacía a
+    // propósito) -- solo entra lo que el admin llame a mano a esa cancha.
+    const own = heldCourtIds.has(court.id) ? [] : todays.filter((m) => m.courtId === court.id && !isCalledMatch(m, validCourtIds) && !m.winnerId)
       .sort((a, b) => a.time.localeCompare(b.time));
     const calls = todays.filter((m) => isCalledMatch(m, validCourtIds) && m.callCourtId === court.id)
       .sort((a, b) => (a.calledAt || 0) - (b.calledAt || 0));
@@ -12223,7 +12225,7 @@ function computeNextCalls(categories, courts, day) {
       const busyHere = new Set(busy);
       if (cur) namesOf(cur).forEach((p) => busyHere.delete(p));
       const own = queueByCourt[court.id].filter((m) => m !== cur);
-      const candidates = onlyCalled ? own.filter((m) => isCalledMatch(m, validCourtIds)) : [...own, ...pool];
+      const candidates = onlyCalled || heldCourtIds.has(court.id) ? own.filter((m) => isCalledMatch(m, validCourtIds)) : [...own, ...pool];
       const next = candidates.find((m) => !claimed.has(m.id) && !nextClaimed.has(m.id) && !clashes(m, busyHere) && !clashes(m, nextBusy)) || null;
       if (next) { nextClaimed.add(next.id); namesOf(next).forEach((p) => nextBusy.add(p)); nextByCourt[court.id] = next; }
     });
@@ -12360,7 +12362,20 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
   // v2.78.0: "mesa técnica" -- siempre sobre TODAS las categorías del día (no respeta el chip
   // de categoría activo), porque las canchas se comparten entre categorías y el llamado tiene
   // que tener en cuenta a todo el mundo, no solo a la categoría que se está mirando ahora mismo.
-  const nextCalls = useMemo(() => computeNextCalls(categories, courts, day), [categories, courts, day]);
+  // v2.119.0 -- "Liberar cancha": canchas dejadas vacías a propósito ("día|cancha"). Se guarda en este
+  // navegador (localStorage), no en la base: es un apoyo de la mesa técnica, no un dato del torneo.
+  const [heldKeys, setHeldKeys] = useState(() => {
+    try { const v = JSON.parse(localStorage.getItem("heldCourts") || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }
+  });
+  const updateHeld = (fn) => setHeldKeys((prev) => {
+    const next = fn(prev);
+    try { localStorage.setItem("heldCourts", JSON.stringify(next)); } catch { /* sin almacenamiento */ }
+    return next;
+  });
+  const heldIds = useMemo(() => new Set(heldKeys.filter((k) => k.startsWith(`${day}|`)).map((k) => k.slice(day.length + 1))), [heldKeys, day]);
+  const holdCourt = (courtId) => updateHeld((p) => (p.includes(`${day}|${courtId}`) ? p : [...p, `${day}|${courtId}`]));
+  const unholdCourt = (courtId) => updateHeld((p) => p.filter((k) => k !== `${day}|${courtId}`));
+  const nextCalls = useMemo(() => computeNextCalls(categories, courts, day, heldIds), [categories, courts, day, heldIds]);
   // v2.98.0 -- llamados a una cancha cuyos jugadores siguen jugando en otra (no entran hasta liberarse).
   const blockedCalls = useMemo(() => computeBlockedCalls(categories, courts, day, nextCalls), [categories, courts, day, nextCalls]);
   // Quién está jugando AHORA (actual de cada cancha) y dónde -- para no ofrecer ni llamar a nadie que
@@ -12397,6 +12412,7 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
       if (cur) ups.push({ categoryId: cur.__cat.id, matchId: cur.id, patch: { skipped: true, skippedAt: Date.now(), callCourtId: null, checkedIn: false } });
       ups.push({ categoryId: c.id, matchId: m.id, patch: { skipped: false, callCourtId: opt.id, calledAt: Date.now(), checkedIn: false } });
       updateMatchCallFlagsBatch(ups);
+      unholdCourt(opt.id);
     };
     return { options, onAssign };
   };
@@ -12518,6 +12534,7 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
     const times = categories.flatMap((c) => c.matches.filter((x) => x.callCourtId === court.id && !x.winnerId && x.calledAt).map((x) => x.calledAt));
     const calledAt = Math.min(Date.now(), ...times) - 1;
     updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: court.id, calledAt });
+    unholdCourt(court.id);
     setSearchCourtId(null); setSearchText("");
   };
   // v2.115.0 -- deshacer cambios manuales: quita los llamados / "en espera" de partidos pendientes del día
@@ -12548,18 +12565,28 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
   })();
   const resettable = resetPlan;
   const resetCalls = () => {
-    if (resettable.length === 0) return;
+    if (resettable.length === 0 && heldIds.size === 0) return;
+    if (resettable.length === 0) { if (window.confirm(`¿Reanudar las ${heldIds.size} cancha(s) liberadas de ${formatDateHuman(day)}?`)) updateHeld((p) => p.filter((k) => !k.startsWith(`${day}|`))); return; }
     if (!window.confirm(`¿Restablecer el orden original de ${formatDateHuman(day)}? Se afectan ${resettable.length} partido(s) sin resultado: se quitan llamados, "En espera" y "En cancha", y cada uno vuelve a la cancha y hora que le tocaba por su número. Los partidos con resultado no se tocan.`)) return;
     updateMatchCallFlagsBatch(resetPlan);
+    updateHeld((p) => p.filter((k) => !k.startsWith(`${day}|`)));
+  };
+  // v2.119.0 -- "Liberar cancha": el partido que estaba ahí (si lo hay) sale sin resultado y pasa a "En espera"
+  // (no se pierde, se llama a otra cancha cuando se quiera) y la cancha queda vacía hasta nuevo aviso.
+  const releaseCourt = (court, cur) => {
+    const label = cur ? `"${teamLabelOf(cur, "A")} vs ${teamLabelOf(cur, "B")}" sale de la cancha y pasa a "En espera" (sin perder nada). ` : "";
+    if (!window.confirm(`¿Liberar ${court.name}? ${label}La cancha queda vacía hasta que llames un partido aquí o pulses "Reanudar cancha".`)) return;
+    if (cur) updateMatchCallFlags(cur.__cat.id, cur.id, { skipped: true, skippedAt: Date.now(), callCourtId: null, calledAt: null, checkedIn: false });
+    holdCourt(court.id);
   };
   const nextCallsPanel = isAdmin && day && (
     <Card>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
-        <button onClick={resetCalls} disabled={resettable.length === 0}
+        <button onClick={resetCalls} disabled={resettable.length === 0 && heldIds.size === 0}
           title="Quita llamados, en espera y En cancha, y devuelve cada partido pendiente a su cancha y hora originales"
-          style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B", opacity: resettable.length === 0 ? 0.4 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
-          Restablecer orden original{resettable.length > 0 ? ` (${resettable.length})` : ""}
+          style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B", opacity: resettable.length === 0 && heldIds.size === 0 ? 0.4 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+          Restablecer orden original{resettable.length + heldIds.size > 0 ? ` (${resettable.length + heldIds.size})` : ""}
         </button>
         {worstDelayMin !== null && (
           worstDelayMin > 15 ? (
@@ -12594,7 +12621,7 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                       return (
                         <button key={c.id} disabled={who.length > 0}
                           title={who.length ? `${who.join(", ")} ya está jugando` : undefined}
-                          onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() })}
+                          onClick={() => { updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() }); unholdCourt(c.id); }}
                           style={{ background: who.length ? "#C9CEDA" : COLORS.court, color: "#fff", opacity: who.length ? 0.7 : 1 }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
                           {c.name}
                         </button>
@@ -12634,10 +12661,23 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
           <div key={court.id} className="rounded-lg p-2.5" style={{ background: "#F5F6F9" }}>
             <div className="flex items-center justify-between gap-2 mb-1.5">
               <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: COLORS.courtDark }}>{court.name}</p>
-              <button onClick={() => { setSearchText(""); setSearchCourtId(court.id); }}
-                style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}` }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1">
-                <Search size={12} /> Buscar encuentro
-              </button>
+              <div className="flex items-center gap-1.5">
+                {heldIds.has(court.id) ? (
+                  <button onClick={() => unholdCourt(court.id)}
+                    style={{ background: "#fff", color: "#8A5A16", border: "1.5px solid #C97A1B" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                    Reanudar cancha
+                  </button>
+                ) : (
+                  <button onClick={() => releaseCourt(court, current)}
+                    style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B" }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                    Liberar cancha
+                  </button>
+                )}
+                <button onClick={() => { setSearchText(""); setSearchCourtId(court.id); }}
+                  style={{ background: "#fff", color: COLORS.court, border: `1.5px solid ${COLORS.court}` }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1">
+                  <Search size={12} /> Buscar encuentro
+                </button>
+              </div>
             </div>
             {current && !current.checkedIn ? (
               // v2.79.1: recién promovido, todavía sin confirmar que los jugadores entraron a
@@ -12686,7 +12726,9 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                 <p className="text-xs italic" style={{ color: "#B23A1B" }}>
                   Esperando a que se libere: {blocked.who.join(", ")} -- su partido ({teamLabelOf(blocked.match, "A")} vs {teamLabelOf(blocked.match, "B")}) no se llama hasta entonces.
                 </p>
-              ) : <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
+              ) : heldIds.has(court.id)
+                ? <p className="text-xs font-semibold" style={{ color: "#8A5A16" }}>Cancha liberada: queda vacía hasta que llames un partido aquí o pulses "Reanudar cancha".</p>
+                : <p className="text-xs text-gray-400 italic">Cancha libre ahora mismo.</p>
             )}
             {next ? (
               <div className="mt-1.5 pl-0.5" style={{ opacity: 0.55 }}>
