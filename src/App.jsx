@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.120.1";
+const APP_VERSION = "2.121.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12432,6 +12432,28 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
   };
   // v2.87.0: partidos "en espera" (cambiar juego) -- siempre arriba del panel, por orden de salto.
   const waitingMatches = useMemo(() => computeWaitingMatches(categories, courts, day), [categories, courts, day]);
+  // v2.121.0 -- aviso "se desocupó una cancha": cuando se carga el resultado del partido de una cancha y hay
+  // partidos "En espera" cuyos jugadores no están jugando en ninguna otra cancha, se pregunta si se llama
+  // uno de ellos (o se sigue con el siguiente de la lista, que la cancha ya tomó sola).
+  const prevCurrentsRef = useRef(null);
+  const [freedCourtId, setFreedCourtId] = useState(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    const cur = {};
+    nextCalls.forEach((nc) => { cur[nc.court.id] = nc.current ? nc.current.id : null; });
+    const prev = prevCurrentsRef.current;
+    prevCurrentsRef.current = { day, cur };
+    if (!prev || prev.day !== day) return;
+    const allMatches = categories.flatMap((c) => c.matches);
+    for (const court of courts) {
+      const before = prev.cur[court.id];
+      if (!before || before === cur[court.id]) continue;
+      const done = allMatches.find((m) => m.id === before);
+      if (!done || !done.winnerId) continue;
+      const callable = waitingMatches.some((m) => playerLabelsOf(m).every((p) => { const b = busyOn.get(p.key); return !b || b.matchId === m.id || b.courtId === court.id; }));
+      if (callable) { setFreedCourtId(court.id); break; }
+    }
+  }, [nextCalls]);
   // v2.79.0: número de partido único por día, igual en la planilla impresa, en esta lista y en
   // "En cancha ahora" -- ver buildMatchIndex.
   const matchIndex = useMemo(() => buildMatchIndex(categories, courts, day), [categories, courts, day]);
@@ -12790,6 +12812,50 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
         ))}
         {nextCalls.length === 0 && <p className="text-xs text-gray-400 italic">Este torneo no tiene canchas asignadas.</p>}
       </div>
+      {freedCourtId && waitingMatches.length > 0 && (() => {
+        const fc = courts.find((c) => c.id === freedCourtId);
+        const fe = nextCalls.find((nc) => nc.court.id === freedCourtId);
+        if (!fc) return null;
+        const close = () => setFreedCourtId(null);
+        const callHere = (m) => {
+          const times = categories.flatMap((c) => c.matches.filter((x) => x.callCourtId === fc.id && !x.winnerId && x.calledAt).map((x) => x.calledAt));
+          updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: fc.id, calledAt: Math.min(Date.now(), ...times) - 1 });
+          unholdCourt(fc.id);
+          close();
+        };
+        return (
+          <Modal onClose={close} maxWidth={620}>
+            <div className="p-5">
+              <p className="disp text-xl mb-0.5" style={{ color: COLORS.courtDark }}>Se desocupó {fc.name}</p>
+              <p className="text-xs mb-3" style={{ color: "#6B7688" }}>Hay partidos en espera. ¿Quieres llamar uno aquí, o seguir con el siguiente de la lista?</p>
+              <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+                {waitingMatches.map((m) => {
+                  const who = playingConflicts(m, fc.id);
+                  return (
+                    <div key={m.id} className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap" style={{ background: who.length ? "#F1F2F5" : "#fff", border: `1px solid ${COLORS.line}` }}>
+                      <div className="text-sm min-w-0">
+                        {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold mr-2" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
+                        <span style={teamBusy(m, "A") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>{courtBadges(m, "A")}
+                        <span className="text-gray-400 mx-1.5">vs</span>
+                        <span style={teamBusy(m, "B") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>{courtBadges(m, "B")}
+                      </div>
+                      <button disabled={who.length > 0} onClick={() => callHere(m)}
+                        style={{ background: who.length ? "#C9CEDA" : COLORS.court, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+                        Llamar a {fc.name}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={close} style={{ background: "#EAEEF5", color: COLORS.ink }} className="w-full mt-3 px-4 py-2.5 rounded-xl text-sm font-bold">
+                {fe?.current
+                  ? `Seguir con el siguiente: #${matchIndex.get(fe.current.id) ?? ""} ${teamLabelOf(fe.current, "A")} vs ${teamLabelOf(fe.current, "B")}`
+                  : "Seguir sin llamar a ninguno"}
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
       {searchCourt && (
         <Modal onClose={() => { setSearchCourtId(null); setSearchText(""); }} maxWidth={620}>
           <div className="p-5">
