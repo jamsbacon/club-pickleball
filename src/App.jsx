@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.118.0";
+const APP_VERSION = "2.118.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4249,7 +4249,9 @@ export default function PickleballTournamentApp() {
     const cat = categories.find((c) => c.id === catId);
     const cm = cat?.matches.find((mm) => mm.id === matchId);
     if (!cm || !cm.winnerId) return;
-    if (cm.phase !== "group" || cat.groupsClosed || (cat.groups || []).some((g) => g.id === cm.groupId && g.advanced)) {
+    // "groupsClosed" solo bloquea si de verdad existe un cuadro armado (una liga no tiene cuadro).
+    const hasBracket = cat.matches.some((x) => x.phase && x.phase !== "group");
+    if (cm.phase !== "group" || (cat.groupsClosed && hasBracket) || (cat.groups || []).some((g) => g.id === cm.groupId && g.advanced)) {
       window.alert("Este resultado ya no se puede borrar: el grupo ya pasó al cuadro de eliminación. Usa \"Editar\" para corregir el marcador.");
       return;
     }
