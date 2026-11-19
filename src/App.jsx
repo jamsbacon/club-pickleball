@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.115.0";
+const APP_VERSION = "2.116.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12486,20 +12486,42 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
   };
   // v2.115.0 -- deshacer cambios manuales: quita los llamados / "en espera" de partidos pendientes del día
   // (los confirmados "En cancha" no se tocan) y cada cancha vuelve a su orden del calendario.
-  const resettable = categories.flatMap((c) => c.matches
-    .filter((m) => !isByeMatch(m) && m.day === day && !m.winnerId && !m.checkedIn && (m.callCourtId || m.skipped))
-    .map((m) => ({ categoryId: c.id, matchId: m.id })));
+  // v2.116.0 -- además de llamados/"en espera", quita "En cancha" y devuelve cada partido pendiente a la
+  // cancha/hora que le tocaba por su número (el N-ésimo partido pendiente toma la N-ésima franja). Los que
+  // ya tienen resultado no se tocan. Si algún pendiente no tiene número guardado, solo se limpian banderas.
+  const resetPlan = (() => {
+    const pending = categories.flatMap((c) => c.matches
+      .filter((m) => !isByeMatch(m) && m.day === day && !m.winnerId)
+      .map((m) => ({ c, m })));
+    const slotKey = (x) => `${x.time}|${courtOrder[x.courtId] ?? 0}`;
+    const slotsSorted = [...pending].map(({ m }) => ({ time: m.time, courtId: m.courtId }))
+      .sort((a, b) => a.time.localeCompare(b.time) || (courtOrder[a.courtId] ?? 0) - (courtOrder[b.courtId] ?? 0));
+    const canReposition = pending.length > 0 && pending.every(({ m }) => m.matchNumber != null && m.time && m.courtId);
+    const byNumber = canReposition ? [...pending].sort((a, b) => a.m.matchNumber - b.m.matchNumber) : [];
+    const slotFor = new Map();
+    byNumber.forEach(({ m }, i) => slotFor.set(m.id, slotsSorted[i]));
+    return pending.map(({ c, m }) => {
+      const slot = slotFor.get(m.id);
+      const moved = !!slot && slotKey(slot) !== slotKey(m);
+      const flagged = !!(m.callCourtId || m.skipped || m.checkedIn);
+      if (!moved && !flagged) return null;
+      const patch = { callCourtId: null, calledAt: null, skipped: false, skippedAt: null, checkedIn: false };
+      if (moved) { patch.time = slot.time; patch.courtId = slot.courtId; }
+      return { categoryId: c.id, matchId: m.id, patch };
+    }).filter(Boolean);
+  })();
+  const resettable = resetPlan;
   const resetCalls = () => {
     if (resettable.length === 0) return;
-    if (!window.confirm(`¿Restablecer el orden original? Se quitan ${resettable.length} llamado(s)/partido(s) en espera de ${formatDateHuman(day)} y cada cancha vuelve a su orden del calendario. Los partidos ya confirmados "En cancha" no se tocan.`)) return;
-    updateMatchCallFlagsBatch(resettable.map((r) => ({ ...r, patch: { callCourtId: null, calledAt: null, skipped: false, skippedAt: null } })));
+    if (!window.confirm(`¿Restablecer el orden original de ${formatDateHuman(day)}? Se afectan ${resettable.length} partido(s) sin resultado: se quitan llamados, "En espera" y "En cancha", y cada uno vuelve a la cancha y hora que le tocaba por su número. Los partidos con resultado no se tocan.`)) return;
+    updateMatchCallFlagsBatch(resetPlan);
   };
   const nextCallsPanel = isAdmin && day && (
     <Card>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
         <button onClick={resetCalls} disabled={resettable.length === 0}
-          title="Quita todos los llamados y partidos en espera: cada cancha vuelve a su orden del calendario"
+          title="Quita llamados, en espera y En cancha, y devuelve cada partido pendiente a su cancha y hora originales"
           style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B", opacity: resettable.length === 0 ? 0.4 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
           Restablecer orden original{resettable.length > 0 ? ` (${resettable.length})` : ""}
         </button>
