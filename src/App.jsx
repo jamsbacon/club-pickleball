@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.120.0";
+const APP_VERSION = "2.120.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12392,10 +12392,19 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
     .filter(({ b }) => b && b.matchId !== mm.id && b.courtId !== exceptCourtId)
     .map(({ p, b }) => `${p.name} (${b.courtName})`);
   // v2.120.0 -- ¿alguien de este lado (A/B) del partido está jugando AHORA en una cancha? (para pintarlo en rojo)
-  const teamBusy = (mm, side) => {
+  // Canchas donde están jugando ahora los jugadores de ese lado (sin repetir, en orden de cancha).
+  const teamCourts = (mm, side) => {
     const t = mm.__cat.teams.find((x) => x.id === (side === "A" ? mm.teamAId : mm.teamBId));
-    return !!t && t.players.some((p) => { const b = busyOn.get(p.name.trim().toLowerCase()); return b && b.matchId !== mm.id; });
+    if (!t) return [];
+    const ids = new Set();
+    t.players.forEach((p) => { const b = busyOn.get(p.name.trim().toLowerCase()); if (b && b.matchId !== mm.id) ids.add(b.courtId); });
+    return courts.map((c, i) => ({ id: c.id, name: c.name, short: `C${(c.name.match(/\d+/) || [i + 1])[0]}` })).filter((c) => ids.has(c.id));
   };
+  const teamBusy = (mm, side) => teamCourts(mm, side).length > 0;
+  const courtBadges = (mm, side) => teamCourts(mm, side).map((c) => (
+    <span key={c.id} title={`Jugando en ${c.name}`} className="inline-flex items-center justify-center rounded-full text-[9px] font-extrabold ml-1 align-middle"
+      style={{ background: COLORS.court, color: "#fff", width: 22, height: 22 }}>{c.short}</span>
+  ));
   // "Asignar a cancha" (v2.98.0): cualquier partido pendiente del día puede sustituir al que está en una
   // cancha mientras ese NO esté "en cancha" (checkedIn). El sustituido pasa a "En espera". Nunca se ofrece
   // una cancha si alguno de los jugadores del partido ya está jugando en otra.
@@ -12618,9 +12627,9 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                     {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
                     <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(m.__cat)}</span>
                     <span>
-                      <span style={teamBusy(m, "A") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>
+                      <span style={teamBusy(m, "A") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>{courtBadges(m, "A")}
                       <span className="text-gray-400 mx-1.5">vs</span>
-                      <span style={teamBusy(m, "B") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>
+                      <span style={teamBusy(m, "B") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>{courtBadges(m, "B")}
                     </span>
                   </div>
                   <div className="flex items-center flex-wrap gap-1.5 mt-1.5">
@@ -12640,9 +12649,6 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                         </button>
                       );
                     })}
-                    {playingConflicts(m, null).length > 0 && (
-                      <span className="text-[10px] font-semibold w-full" style={{ color: "#B23A1B" }}>Ya está jugando: {playingConflicts(m, null).join(", ")} -- espera a que se libere.</span>
-                    )}
                     <button onClick={() => updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: null })}
                       style={{ color: COLORS.court }} className="text-[11px] font-bold underline ml-1">
                       Volver a su turno
