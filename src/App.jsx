@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.117.0";
+const APP_VERSION = "2.118.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -4240,6 +4240,28 @@ export default function PickleballTournamentApp() {
     });
   };
 
+  // v2.118.0 -- "Borrar resultado": para un marcador cargado en el partido equivocado. Deja el partido
+  // pendiente otra vez (sin sets, sin ganador, sin "En cancha"/llamado) en su misma cancha y hora. Solo
+  // fase de grupos y mientras el grupo no haya pasado al cuadro: en un cuadro ya sembrado el ganador ya
+  // avanzó a la siguiente ronda y no se puede deshacer limpio desde aquí.
+  const clearScore = (catId, matchId) => {
+    if (currentUser?.role !== "admin") return;
+    const cat = categories.find((c) => c.id === catId);
+    const cm = cat?.matches.find((mm) => mm.id === matchId);
+    if (!cm || !cm.winnerId) return;
+    if (cm.phase !== "group" || cat.groupsClosed || (cat.groups || []).some((g) => g.id === cm.groupId && g.advanced)) {
+      window.alert("Este resultado ya no se puede borrar: el grupo ya pasó al cuadro de eliminación. Usa \"Editar\" para corregir el marcador.");
+      return;
+    }
+    updateCategory(catId, (c) => {
+      const mm = c.matches.find((x) => x.id === matchId);
+      if (!mm) return c;
+      mm.sets = []; mm.winnerId = null;
+      mm.checkedIn = false; mm.skipped = false; mm.skippedAt = null; mm.callCourtId = null; mm.calledAt = null;
+      return c;
+    });
+  };
+
   // ---- Reservas ----
   const createBooking = async (data, opts = {}) => {
     // `free_block` (cupo mensual gratis del plan, v2.30.0) es lo que deja contar cuántos
@@ -5146,7 +5168,7 @@ export default function PickleballTournamentApp() {
                 setMatchDuration={setMatchDuration} setBreakM={setBreakM}
                 occupiedKeys={occupiedKeys} moveMatch={moveMatch} unlockMatch={unlockMatch} clearDaySchedule={clearDaySchedule} reorderColumn={reorderColumn}
                 markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} renumberDay={renumberDay}
-                submitScore={submitScore}
+                submitScore={submitScore} clearScore={clearScore}
                 pendingCategoryCount={pendingCategoryCount} flushPendingCategoryWrites={flushPendingCategoryWrites}
                 initialSubTab={pendingTorneoSubTab} onConsumeInitialSubTab={() => setPendingTorneoSubTab(null)}
                 onBackToList={() => { setActiveTournamentId(null); setActiveCatId(null); }}
@@ -8607,7 +8629,7 @@ function TorneosSection(props) {
     generateDraw, closeGroupsAndSeedBracket, advanceGroupQualifiers, removeTeamFromGroup, assignTeamToGroupSlot, suggestedRanking, upsertPlayerRanking,
     setCategoryFormat, courts, matchDuration, breakM, runScheduler, reflowSchedule, scheduleInfo,
     setMatchDuration, setBreakM, occupiedKeys, moveMatch, unlockMatch, clearDaySchedule, reorderColumn, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay,
-    submitScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
+    submitScore, clearScore, currentUser, users, club, setTab, onBackToList, onRemoveTournament,
     pendingCategoryCount, flushPendingCategoryWrites, initialSubTab, onConsumeInitialSubTab, registrationLog, rankings, entryRankCheck,
   } = props;
   const isAdmin = role === "admin";
@@ -8717,7 +8739,7 @@ function TorneosSection(props) {
       )}
 
       {subTab === "resultados" && (
-        <ResultadosTab categories={categories} courts={courts} submitScore={submitScore}
+        <ResultadosTab categories={categories} courts={courts} submitScore={submitScore} clearScore={clearScore}
           closeGroupsAndSeedBracket={closeGroupsAndSeedBracket} advanceGroupQualifiers={advanceGroupQualifiers} tournament={tournament} dates={dates}
           moveMatch={moveMatch} markMatchOnCourt={markMatchOnCourt} updateMatchCallFlags={updateMatchCallFlags} updateMatchCallFlagsBatch={updateMatchCallFlagsBatch} renumberDay={renumberDay} role={role} />
       )}
@@ -12307,7 +12329,7 @@ function ClasificacionTab({ categories }) {
   );
 }
 
-function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBracket, advanceGroupQualifiers, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay, role }) {
+function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroupsAndSeedBracket, advanceGroupQualifiers, tournament, dates, moveMatch, markMatchOnCourt, updateMatchCallFlags, updateMatchCallFlagsBatch, renumberDay, role }) {
   const isAdmin = role === "admin";
   // Por defecto "Todas" -- la cola combinada y cronológica de partidos por cargar, igual
   // que pide el usuario ("ordenados cronológicamente exactamente igual que el calendario").
@@ -12656,7 +12678,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
               <MatchRow key={current.id} isAdmin={isAdmin} m={current} cat={current.__cat} catColor={catColorMap[current.__cat.id]} courtById={courtById}
                 matchNumber={matchIndex.get(current.id)}
                 teamName={(id) => current.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={current.__cat.bestOf}
-                onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} />
+                onSubmit={(sets) => submitScore(current.__cat.id, current.id, sets)} onClear={() => clearScore(current.__cat.id, current.id)} />
             ) : (
               blocked ? (
                 <p className="text-xs italic" style={{ color: "#B23A1B" }}>
@@ -12831,7 +12853,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
               <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={m.__cat} catName={catBadgeLabel(m.__cat)} catColor={catColorMap[m.__cat.id]} courtById={courtById}
                 matchNumber={matchIndex.get(m.id)} assign={assignFor(m, m.__cat)}
                 teamName={(id) => m.__cat.teams.find((t) => t.id === id)?.name || "?"} bestOf={m.__cat.bestOf}
-                onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} />
+                onSubmit={(sets) => submitScore(m.__cat.id, m.id, sets)} onClear={() => clearScore(m.__cat.id, m.id)} />
             ))}
             {allPlayable.length === 0 && <p className="text-xs text-gray-400 italic">{!isAdmin ? "Todavía no hay resultados cargados." : day ? "No hay partidos programados para este día." : "Genera primero el draw de alguna categoría."}</p>}
           </div>
@@ -12897,7 +12919,7 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
           {playableMatches.map((m) => (
             <MatchRow key={m.id} isAdmin={isAdmin} m={m} cat={cat} catColor={catColorMap[cat.id]} courtById={courtById} teamName={teamName} bestOf={cat.bestOf}
               matchNumber={matchIndex.get(m.id)} assign={assignFor(m, cat)}
-              onSubmit={(sets) => submitScore(cat.id, m.id, sets)} />
+              onSubmit={(sets) => submitScore(cat.id, m.id, sets)} onClear={() => clearScore(cat.id, m.id)} />
           ))}
           {playableMatches.length === 0 && <p className="text-xs text-gray-400 italic">{!isAdmin ? "Todavía no hay resultados cargados." : day ? "No hay partidos programados para este día." : "Genera primero el draw de esta categoría."}</p>}
         </div>
@@ -13070,7 +13092,7 @@ function StandingsTable({ rows, qualifiers }) {
   );
 }
 
-function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, matchNumber, isAdmin, assign }) {
+function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, onClear, matchNumber, isAdmin, assign }) {
   const [open, setOpen] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
   // v2.84.0 -- el formato efectivo de ESTA fase/ronda (puede tener su propio override, ver
@@ -13161,7 +13183,17 @@ function MatchRow({ m, cat, catName, catColor, courtById, teamName, onSubmit, ma
             </div>
           ))}
           <p className="text-xs text-gray-400">Se necesitan {setsNeeded} sets ganados para cerrar el partido (mejor de {bestOf}) -- a {fmt.pointsTarget} puntos, {SCORING_TYPE_LABELS[fmt.scoringType]}.</p>
-          <button onClick={save} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-1.5 rounded-lg text-xs font-bold">Guardar resultado</button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={save} style={{ background: COLORS.court, color: "#fff" }} className="px-4 py-1.5 rounded-lg text-xs font-bold">Guardar resultado</button>
+            {m.winnerId && onClear && (
+              <button onClick={() => {
+                if (!window.confirm("¿Borrar este resultado? El partido vuelve a quedar pendiente (disponible para jugarse) en su misma cancha y hora.")) return;
+                onClear();
+                setSets(Array.from({ length: bestOf }, () => ({ a: "", b: "" })));
+                setOpen(false);
+              }} style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B" }} className="px-4 py-1.5 rounded-lg text-xs font-bold">Borrar resultado</button>
+            )}
+          </div>
         </div>
       )}
     </div>
