@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.116.0";
+const APP_VERSION = "2.117.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12164,12 +12164,24 @@ function computeNextCalls(categories, courts, day) {
   // los automáticos. Antes todo se resolvía por orden de cancha, y un llamado a la cancha 3 perdía contra
   // el partido automático de la cancha 1 aunque el admin lo hubiera pedido a propósito (y el actual de
   // las demás canchas "saltaba" de un partido a otro sin que nadie lo tocara).
+  // v2.117.0 -- y dentro de cada pasada se resuelve por ORDEN DEL CALENDARIO (el partido programado más
+  // temprano gana), no por número de cancha: antes la Cancha 2 podía tomar el #10 (19:40) y dejar sin
+  // jugar al #4 (19:00) de la Cancha 4 solo porque comparten jugadores y la 2 se evaluaba primero.
   [true, false].forEach((onlyCalled) => {
-    courts.forEach((court) => {
-      if (currentByCourt[court.id]) return;
-      const pick = queueByCourt[court.id].find((m) => !claimed.has(m.id) && (!onlyCalled || isCalledMatch(m, validCourtIds)) && !clashes(m, busy));
-      if (pick) take(court, pick);
-    });
+    for (;;) {
+      let best = null;
+      courts.forEach((court) => {
+        if (currentByCourt[court.id]) return;
+        const pick = queueByCourt[court.id].find((m) => !claimed.has(m.id) && (!onlyCalled || isCalledMatch(m, validCourtIds)) && !clashes(m, busy));
+        if (!pick) return;
+        const key = onlyCalled
+          ? String(pick.calledAt || 0).padStart(16, "0")
+          : `${pick.day}|${pick.time}|${String(pick.matchNumber ?? 0).padStart(6, "0")}`;
+        if (!best || key < best.key) best = { court, pick, key };
+      });
+      if (!best) break;
+      take(best.court, best.pick);
+    }
   });
 
   const courtOrder = {}; courts.forEach((c, i) => (courtOrder[c.id] = i));
