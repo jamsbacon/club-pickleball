@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.114.0";
+const APP_VERSION = "2.115.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12484,10 +12484,25 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
     updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: court.id, calledAt });
     setSearchCourtId(null); setSearchText("");
   };
+  // v2.115.0 -- deshacer cambios manuales: quita los llamados / "en espera" de partidos pendientes del día
+  // (los confirmados "En cancha" no se tocan) y cada cancha vuelve a su orden del calendario.
+  const resettable = categories.flatMap((c) => c.matches
+    .filter((m) => !isByeMatch(m) && m.day === day && !m.winnerId && !m.checkedIn && (m.callCourtId || m.skipped))
+    .map((m) => ({ categoryId: c.id, matchId: m.id })));
+  const resetCalls = () => {
+    if (resettable.length === 0) return;
+    if (!window.confirm(`¿Restablecer el orden original? Se quitan ${resettable.length} llamado(s)/partido(s) en espera de ${formatDateHuman(day)} y cada cancha vuelve a su orden del calendario. Los partidos ya confirmados "En cancha" no se tocan.`)) return;
+    updateMatchCallFlagsBatch(resettable.map((r) => ({ ...r, patch: { callCourtId: null, calledAt: null, skipped: false, skippedAt: null } })));
+  };
   const nextCallsPanel = isAdmin && day && (
     <Card>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <SectionTitle sub="Carga acá mismo el resultado del partido activo de cada cancha -- apenas lo guardes, la cancha pasa sola al que sigue (chico y en gris, debajo de cada uno).">En cancha ahora</SectionTitle>
+        <button onClick={resetCalls} disabled={resettable.length === 0}
+          title="Quita todos los llamados y partidos en espera: cada cancha vuelve a su orden del calendario"
+          style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B", opacity: resettable.length === 0 ? 0.4 : 1 }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
+          Restablecer orden original{resettable.length > 0 ? ` (${resettable.length})` : ""}
+        </button>
         {worstDelayMin !== null && (
           worstDelayMin > 15 ? (
             <span className="text-xs font-extrabold px-3 py-1.5 rounded-full shrink-0" style={{ background: "#FCE9E4", color: "#B23A1B" }}>
@@ -12582,6 +12597,12 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                   </div>
                   {isAdmin && (
                     <div className="flex items-center gap-2 shrink-0">
+                      {current.callCourtId && (
+                        <button onClick={() => updateMatchCallFlags(current.__cat.id, current.id, { callCourtId: null, calledAt: null })}
+                          style={{ background: "#fff", color: "#B23A1B", border: "1.5px solid #B23A1B" }} className="px-3 py-1.5 rounded-lg text-xs font-bold">
+                          Deshacer llamado
+                        </button>
+                      )}
                       <button onClick={() => {
                         if (!window.confirm("¿Cambiar este juego? Sale de la cancha y sube el siguiente. NO se pierde: queda en \"En espera\", arriba de la lista, para llamarlo cuando lleguen.")) return;
                         updateMatchCallFlags(current.__cat.id, current.id, { skipped: true, skippedAt: Date.now(), callCourtId: null, checkedIn: false });
@@ -12623,6 +12644,12 @@ function ResultadosTab({ categories, courts, submitScore, closeGroupsAndSeedBrac
                         <button onClick={() => updateMatchCallFlags(next.__cat.id, next.id, { skipped: true, skippedAt: Date.now(), callCourtId: null })}
                           style={{ color: COLORS.court }} className="text-[10px] font-bold underline">
                           Devolver a espera
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button onClick={() => updateMatchCallFlags(next.__cat.id, next.id, { callCourtId: null, calledAt: null })}
+                          style={{ color: "#B23A1B" }} className="text-[10px] font-bold underline">
+                          Deshacer llamado
                         </button>
                       )}
                     </>
