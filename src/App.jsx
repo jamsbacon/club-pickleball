@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.121.0";
+const APP_VERSION = "2.121.1";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12393,15 +12393,15 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
     .map(({ p, b }) => `${p.name} (${b.courtName})`);
   // v2.120.0 -- ¿alguien de este lado (A/B) del partido está jugando AHORA en una cancha? (para pintarlo en rojo)
   // Canchas donde están jugando ahora los jugadores de ese lado (sin repetir, en orden de cancha).
-  const teamCourts = (mm, side) => {
+  const teamCourts = (mm, side, exceptCourtId = null) => {
     const t = mm.__cat.teams.find((x) => x.id === (side === "A" ? mm.teamAId : mm.teamBId));
     if (!t) return [];
     const ids = new Set();
-    t.players.forEach((p) => { const b = busyOn.get(p.name.trim().toLowerCase()); if (b && b.matchId !== mm.id) ids.add(b.courtId); });
+    t.players.forEach((p) => { const b = busyOn.get(p.name.trim().toLowerCase()); if (b && b.matchId !== mm.id && b.courtId !== exceptCourtId) ids.add(b.courtId); });
     return courts.map((c, i) => ({ id: c.id, name: c.name, short: `C${(c.name.match(/\d+/) || [i + 1])[0]}` })).filter((c) => ids.has(c.id));
   };
-  const teamBusy = (mm, side) => teamCourts(mm, side).length > 0;
-  const courtBadges = (mm, side) => teamCourts(mm, side).map((c) => (
+  const teamBusy = (mm, side, exceptCourtId = null) => teamCourts(mm, side, exceptCourtId).length > 0;
+  const courtBadges = (mm, side, exceptCourtId = null) => teamCourts(mm, side, exceptCourtId).map((c) => (
     <span key={c.id} title={`Jugando en ${c.name}`} className="inline-flex items-center justify-center rounded-full text-[9px] font-extrabold ml-1 align-middle"
       style={{ background: COLORS.court, color: "#fff", width: 22, height: 22 }}>{c.short}</span>
   ));
@@ -12835,9 +12835,9 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                     <div key={m.id} className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap" style={{ background: who.length ? "#F1F2F5" : "#fff", border: `1px solid ${COLORS.line}` }}>
                       <div className="text-sm min-w-0">
                         {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold mr-2" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
-                        <span style={teamBusy(m, "A") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>{courtBadges(m, "A")}
+                        <span style={teamBusy(m, "A", fc.id) ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>{courtBadges(m, "A", fc.id)}
                         <span className="text-gray-400 mx-1.5">vs</span>
-                        <span style={teamBusy(m, "B") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>{courtBadges(m, "B")}
+                        <span style={teamBusy(m, "B", fc.id) ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>{courtBadges(m, "B", fc.id)}
                       </div>
                       <button disabled={who.length > 0} onClick={() => callHere(m)}
                         style={{ background: who.length ? "#C9CEDA" : COLORS.court, color: "#fff" }} className="px-3 py-1.5 rounded-lg text-xs font-bold shrink-0">
