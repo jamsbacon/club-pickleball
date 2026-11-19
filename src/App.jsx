@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.119.0";
+const APP_VERSION = "2.120.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -12391,6 +12391,11 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
     .map((p) => ({ p, b: busyOn.get(p.key) }))
     .filter(({ b }) => b && b.matchId !== mm.id && b.courtId !== exceptCourtId)
     .map(({ p, b }) => `${p.name} (${b.courtName})`);
+  // v2.120.0 -- ¿alguien de este lado (A/B) del partido está jugando AHORA en una cancha? (para pintarlo en rojo)
+  const teamBusy = (mm, side) => {
+    const t = mm.__cat.teams.find((x) => x.id === (side === "A" ? mm.teamAId : mm.teamBId));
+    return !!t && t.players.some((p) => { const b = busyOn.get(p.name.trim().toLowerCase()); return b && b.matchId !== mm.id; });
+  };
   // "Asignar a cancha" (v2.98.0): cualquier partido pendiente del día puede sustituir al que está en una
   // cancha mientras ese NO esté "en cancha" (checkedIn). El sustituido pasa a "En espera". Nunca se ofrece
   // una cancha si alguno de los jugadores del partido ya está jugando en otra.
@@ -12612,18 +12617,26 @@ function ResultadosTab({ categories, courts, submitScore, clearScore, closeGroup
                   <div className="text-sm flex items-center flex-wrap gap-x-2 gap-y-1">
                     {matchIndex.get(m.id) != null && <span className="mono text-xs font-extrabold" style={{ color: COLORS.court }}>#{matchIndex.get(m.id)}</span>}
                     <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide" style={{ background: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).bg, color: (catColorMap[m.__cat.id] || CATEGORY_PALETTE[0]).text }}>{catBadgeLabel(m.__cat)}</span>
-                    <span>{teamLabelOf(m, "A")}<span className="text-gray-400 mx-1.5">vs</span>{teamLabelOf(m, "B")}</span>
+                    <span>
+                      <span style={teamBusy(m, "A") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "A")}</span>
+                      <span className="text-gray-400 mx-1.5">vs</span>
+                      <span style={teamBusy(m, "B") ? { color: "#B23A1B", fontWeight: 700 } : undefined}>{teamLabelOf(m, "B")}</span>
+                    </span>
                   </div>
                   <div className="flex items-center flex-wrap gap-1.5 mt-1.5">
                     <span className="text-[10px] font-semibold text-gray-500">Llamar en:</span>
                     {courts.map((c) => {
-                      const who = playingConflicts(m, c.id);
+                      // v2.120.0: solo se puede llamar a una cancha DISPONIBLE (sin partido en ella) y solo si
+                      // ninguno de los jugadores está jugando en ninguna cancha (tampoco en esta).
+                      const who = playingConflicts(m, null);
+                      const occupied = nextCalls.find((nc) => nc.court.id === c.id)?.current;
+                      const off = who.length > 0 || !!occupied;
                       return (
-                        <button key={c.id} disabled={who.length > 0}
-                          title={who.length ? `${who.join(", ")} ya está jugando` : undefined}
+                        <button key={c.id} disabled={off}
+                          title={who.length ? `${who.join(", ")} ya está jugando` : occupied ? "Cancha ocupada" : undefined}
                           onClick={() => { updateMatchCallFlags(m.__cat.id, m.id, { skipped: false, callCourtId: c.id, calledAt: Date.now() }); unholdCourt(c.id); }}
-                          style={{ background: who.length ? "#C9CEDA" : COLORS.court, color: "#fff", opacity: who.length ? 0.7 : 1 }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
-                          {c.name}
+                          style={{ background: off ? "#C9CEDA" : COLORS.court, color: "#fff", opacity: off ? 0.7 : 1 }} className="px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                          {c.name}{occupied && who.length === 0 ? " · ocupada" : ""}
                         </button>
                       );
                     })}
