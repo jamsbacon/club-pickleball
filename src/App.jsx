@@ -1575,7 +1575,7 @@ function checkMoveConflict(match, target, categories, occupiedKeys) {
 /* =========================================================================
    APP VERSION
    ========================================================================= */
-const APP_VERSION = "2.121.1";
+const APP_VERSION = "2.122.0";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -1651,6 +1651,7 @@ const LEVEL_OPTIONS = ["Principiante", "3.0", "3.5", "4.0", "4.5", "5.0+", "Open
 // lleno rechaza la inscripción. `cat.proMinDupr` es el DUPR mínimo para anotarse como Pro.
 const MASTER_PRO_LEVEL = "Master-Pro";
 const CATEGORY_LEVEL_OPTIONS = [...LEVEL_OPTIONS, MASTER_PRO_LEVEL];
+const CUSTOM_LEVEL_VALUE = "__otra__"; // opción "Otra" del selector de nivel (no es un nivel real)
 const MASTER_MIN_AGE = 50;
 const MP_ROLE_LABELS = { master: "Master", pro: "Pro" };
 const isMasterPro = (cat) => cat?.level === MASTER_PRO_LEVEL;
@@ -9769,14 +9770,19 @@ function CategoryCapacityFields({ modality, maxTeams, setMaxTeams, minTeams, set
 function NewCategoryForm({ onCreate, onCancel }) {
   const [modality, setModality] = useState("dobles");
   const [gender, setGender] = useState("mixto");
-  const [level, setLevel] = useState(LEVEL_OPTIONS[2]);
+  const [levelChoice, setLevelChoice] = useState(LEVEL_OPTIONS[2]);
+  // v2.122.0 -- "Otra": nivel/categoría inventada solo para este torneo (ej. "Master +45", "3.6").
+  // Se guarda tal cual en cat.level pero NO entra a las listas predeterminadas.
+  const [customLevel, setCustomLevel] = useState("");
+  const isCustom = levelChoice === CUSTOM_LEVEL_VALUE;
+  const level = isCustom ? customLevel.trim() : levelChoice;
   const [maxTeams, setMaxTeams] = useState("");
   const [minTeams, setMinTeams] = useState("");
   const [proMinDupr, setProMinDupr] = useState("");
   const masterPro = level === MASTER_PRO_LEVEL;
   // Master-Pro es siempre de dobles (cada dupla = 1 Master + 1 Pro) -- se fuerza al elegirlo.
   const effectiveModality = masterPro ? "dobles" : modality;
-  const previewName = makeCategoryName(effectiveModality, gender, level);
+  const previewName = makeCategoryName(effectiveModality, gender, level || "…");
 
   // "Mixto" es un género de pareja (un hombre + una mujer por equipo) -- no existe en
   // Individual, donde cada jugador compite solo. Cambiar a Individual con "Mixto" ya
@@ -9807,9 +9813,17 @@ function NewCategoryForm({ onCreate, onCancel }) {
         </div>
         <div>
           <Label>3. Nivel de habilidad</Label>
-          <select style={inputStyle} value={level} onChange={(e) => setLevel(e.target.value)}>
+          <select style={inputStyle} value={levelChoice} onChange={(e) => setLevelChoice(e.target.value)}>
             {CATEGORY_LEVEL_OPTIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+            <option value={CUSTOM_LEVEL_VALUE}>Otra (personalizada)…</option>
           </select>
+          {isCustom && (
+            <div className="mt-2">
+              <input style={inputStyle} value={customLevel} onChange={(e) => setCustomLevel(e.target.value)}
+                placeholder="Ej. Master +45, 3.6" maxLength={40} autoFocus />
+              <p className="text-[11px] mt-1" style={{ color: "#6B7688" }}>Solo se crea para este torneo; no se agrega a las categorías predeterminadas.</p>
+            </div>
+          )}
         </div>
         {masterPro && (
           <div className="rounded-xl p-3 space-y-2" style={{ background: "#FBF3E4", color: "#8A5A16" }}>
@@ -9830,8 +9844,8 @@ function NewCategoryForm({ onCreate, onCancel }) {
         </div>
         <p className="text-xs" style={{ color: "#6B7688" }}>El formato del torneo se elige más adelante, una vez que sepas cuántos equipos se inscribieron — la app te dará una recomendación.</p>
         <div className="flex gap-2 pt-1">
-          <button onClick={() => onCreate(effectiveModality, gender, level, maxTeams, minTeams, proMinDupr)}
-            style={{ background: COLORS.court, color: COLORS.chalk }}
+          <button disabled={!level} onClick={() => onCreate(effectiveModality, gender, level, maxTeams, minTeams, proMinDupr)}
+            style={{ background: level ? COLORS.court : "#E5E5E5", color: level ? COLORS.chalk : "#999" }}
             className="px-6 py-2.5 rounded-xl font-bold text-sm">Crear categoría</button>
           <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#EAEEF5", color: COLORS.ink }}>Cancelar</button>
         </div>
